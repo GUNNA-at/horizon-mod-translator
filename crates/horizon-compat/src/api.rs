@@ -159,9 +159,11 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         return f(rt, args);
     }
     trace_unmapped(rt, key, args);
-    if runaway(rt) {
-        let secs = rt.hook_first_miss.map_or(0, |t| t.elapsed().as_secs());
-        let n = rt.hook_misses;
+    if runaway(rt, key) {
+        let secs = rt
+            .hook_first_miss
+            .map_or(RUNAWAY_TIME.as_secs(), |t| t.elapsed().as_secs());
+        let n = rt.hook_misses.max(RUNAWAY_MISSES);
         crate::jlang::throw_with(rt, "java/lang/Error", &format!("horizon-compat: {key} isn't translated, and this hook kept calling what isn't ({n} calls in {secs} s): a loop waiting on its stand-in answer"));
         return r;
     }
@@ -224,15 +226,55 @@ const RUNAWAY_TIME: std::time::Duration = std::time::Duration::from_secs(10);
 /// loop that waits for another answer (`while (it.next() != BreakIterator.DONE)`) never ends. Past
 /// [`RUNAWAY_MISSES`] such calls over [`RUNAWAY_TIME`], each throws `java.lang.Error`, which unwinds
 /// the mod's code to the hook's end, as a `catch (Exception e)` doesn't stop it: the game goes on
-/// without what the hook would have done, and the error names the call. Outside hooks (loading)
-/// there is no game to keep going.
-fn runaway(rt: &mut Rt) -> bool {
+/// without what the hook would have done, and the error names the call. While the mods load there
+/// is no hook: a loop is known there by the few keys it goes round ([`Run`]), and the error ends
+/// the mod's constructor or listener it is in, so the mods after it load.
+fn runaway(rt: &mut Rt, key: &'static str) -> bool {
     if rt.host().is_none() {
-        return false;
+        return LOADING.with(|run| run.borrow_mut().stuck(key));
     }
     rt.hook_misses += 1;
     let first = *rt.hook_first_miss.get_or_insert_with(std::time::Instant::now);
     rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME
+}
+
+/// The unmapped calls of a loop while the mods load, where no hook bounds them: the few keys the
+/// loop goes round, how many calls of them in a row, and since when. A mod's constructor that
+/// drained a queue nothing mapped (`while (!queue.isEmpty()) queue.poll().build()`) never ended,
+/// and no mod after it loaded.
+#[derive(Default)]
+struct Run {
+    keys: Vec<&'static str>,
+    calls: u64,
+    since: Option<std::time::Instant>,
+}
+
+/// How many unmapped keys a loop may go round and still be told from loading going on.
+const RUN_KEYS: usize = 12;
+
+impl Run {
+    /// Counts an unmapped call of `key`; whether its loop is stuck ([`RUNAWAY_MISSES`] calls of the
+    /// same few keys over [`RUNAWAY_TIME`]). A key past [`RUN_KEYS`] starts the count again:
+    /// loading that goes on meets new ones.
+    fn stuck(&mut self, key: &'static str) -> bool {
+        if !self.keys.contains(&key) {
+            if self.keys.len() >= RUN_KEYS {
+                *self = Run::default();
+            }
+            self.keys.push(key);
+        }
+        self.calls += 1;
+        let since = *self.since.get_or_insert_with(std::time::Instant::now);
+        let stuck = self.calls >= RUNAWAY_MISSES && since.elapsed() >= RUNAWAY_TIME;
+        if stuck {
+            *self = Run::default();
+        }
+        stuck
+    }
+}
+
+thread_local! {
+    static LOADING: std::cell::RefCell<Run> = std::cell::RefCell::new(Run::default());
 }
 
 /// What an unmapped method returning its own class gives back, so a builder chain
@@ -1055,7 +1097,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 90] = [
+const CHAIN: [Module; 92] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -1134,6 +1176,8 @@ const CHAIN: [Module; 90] = [
     crate::streams::call,
     crate::gson::call,
     crate::jregex::call,
+    crate::jsystem::call,
+    crate::jdk::call,
     crate::jlang::call,
     crate::jutil::call,
     crate::tags::call,
@@ -1151,7 +1195,7 @@ const CHAIN: [Module; 90] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 90] = [
+const CLAIMS: [Claims; 92] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -1230,6 +1274,8 @@ const CLAIMS: [Claims; 90] = [
     crate::streams::claims,
     crate::gson::claims,
     crate::jregex::claims,
+    crate::jsystem::claims,
+    crate::jdk::claims,
     crate::jlang::claims,
     crate::jutil::claims,
     crate::tags::claims,
@@ -1245,7 +1291,7 @@ const CLAIMS: [Claims; 90] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 90] = [
+const MODULE_NAMES: [&str; 92] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1324,6 +1370,8 @@ const MODULE_NAMES: [&str; 90] = [
     "streams",
     "gson",
     "jregex",
+    "jsystem",
+    "jdk",
     "jlang",
     "jutil",
     "tags",
@@ -4304,7 +4352,45 @@ mod tests {
         rt.hook_misses = RUNAWAY_MISSES;
         rt.hook_first_miss = Some(long_ago());
         call(&mut rt, key, &[]);
-        assert!(rt.thrown.is_none(), "loading is never stopped");
+        assert!(rt.thrown.is_none(), "loading that goes on is not stopped");
+        // A loop on the same few keys while the mods load is.
+        let mut run = Run {
+            keys: vec![key],
+            calls: RUNAWAY_MISSES - 1,
+            since: Some(long_ago()),
+        };
+        assert!(run.stuck(key) && run.calls == 0);
+        let mut run = Run {
+            keys: vec![key],
+            calls: RUNAWAY_MISSES - 1,
+            since: Some(std::time::Instant::now()),
+        };
+        assert!(
+            !run.stuck(key),
+            "a million calls in no time are not a stuck loop"
+        );
+        let mut run = Run {
+            keys: (0..RUN_KEYS).map(|_| "other").collect(),
+            calls: RUNAWAY_MISSES - 1,
+            since: Some(long_ago()),
+        };
+        assert!(
+            !run.stuck(key) && run.calls == 1,
+            "a new key past the loop's few starts the count again"
+        );
+        LOADING.with(|run| {
+            *run.borrow_mut() = Run {
+                keys: vec![key],
+                calls: RUNAWAY_MISSES - 1,
+                since: Some(long_ago()),
+            }
+        });
+        call(&mut rt, key, &[]);
+        let e = rt
+            .thrown
+            .take()
+            .expect("a constructor stuck on an unmapped call is stopped");
+        assert_eq!(rt.class_of(e), "java/lang/Error");
         let mut game = Game;
         rt.with_host(&mut game, |rt| {
             call(rt, key, &[]);

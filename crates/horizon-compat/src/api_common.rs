@@ -446,7 +446,7 @@ fn bounds(rt: &mut Rt, class: &str, min: Option<V>, max: Option<V>) -> V {
 
 /// The proleptic Gregorian date `days` after 1970-01-01, as `(year, month, day)` (`LocalDate`'s
 /// `ofEpochDay`).
-fn civil_date(days: i64) -> (i32, u32, u32) {
+pub(crate) fn civil_date(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
@@ -3591,7 +3591,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/minecraft/util/Mth", "sin") => V::F(mth_sin(a(0))),
         ("net/minecraft/util/Mth", "cos") => V::F(mth_cos(a(0))),
         // The game's version, as mods made for it read it: 1.21.1's `version.json`.
-        ("net/minecraft/SharedConstants", "getCurrentVersion") => rt.intern("compat:world-version".into(), |rt| rt.new_object(WORLD_VERSION)),
+        ("net/minecraft/SharedConstants", "getCurrentVersion")
+        | ("net/minecraft/DetectedVersion", "tryDetectVersion") => rt
+            .intern("compat:world-version".into(), |rt| {
+                rt.new_object(WORLD_VERSION)
+            }),
         (WORLD_VERSION | "net/minecraft/DetectedVersion", n) => match n {
             "getName" | "getId" => rt.string("1.21.1"),
             "getProtocolVersion" => V::I(767),
@@ -5985,14 +5989,19 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             crate::jlang::class_object(rt, &primitive)
         }
         // `StandardCharsets.UTF_8` and the others: one object each, named as Java names them.
-        "java/nio/charset/StandardCharsets" => {
-            let name = match field {
-                "UTF_8" => "UTF-8",
-                "US_ASCII" => "US-ASCII",
-                "ISO_8859_1" => "ISO-8859-1",
-                "UTF_16" => "UTF-16",
-                "UTF_16BE" => "UTF-16BE",
-                "UTF_16LE" => "UTF-16LE",
+        // And as the JDK's own code names them, by their classes (`sun.nio.cs.UTF_8.INSTANCE`).
+        "java/nio/charset/StandardCharsets"
+        | "sun/nio/cs/UTF_8"
+        | "sun/nio/cs/ISO_8859_1"
+        | "sun/nio/cs/US_ASCII" => {
+            const STANDARD: &str = "java/nio/charset/StandardCharsets";
+            let name = match (owner, field) {
+                (STANDARD, "UTF_8") | ("sun/nio/cs/UTF_8", "INSTANCE") => "UTF-8",
+                (STANDARD, "US_ASCII") | ("sun/nio/cs/US_ASCII", "INSTANCE") => "US-ASCII",
+                (STANDARD, "ISO_8859_1") | ("sun/nio/cs/ISO_8859_1", "INSTANCE") => "ISO-8859-1",
+                (STANDARD, "UTF_16") => "UTF-16",
+                (STANDARD, "UTF_16BE") => "UTF-16BE",
+                (STANDARD, "UTF_16LE") => "UTF-16LE",
                 _ => return None,
             };
             rt.intern(format!("compat:charset/{name}"), |rt| {
@@ -6472,6 +6481,7 @@ mod tests {
         crate::install();
         let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
         let v = c(&mut rt, "net/minecraft/SharedConstants.getCurrentVersion.()Lnet/minecraft/WorldVersion;", &[]);
+        assert_eq!(c(&mut rt, "net/minecraft/DetectedVersion.tryDetectVersion.()Lnet/minecraft/WorldVersion;", &[]), v);
         let name = c(&mut rt, "net/minecraft/WorldVersion.getName.()Ljava/lang/String;", &[v]);
         assert_eq!(rt.str_of(name), Some("1.21.1"));
         assert_eq!(c(&mut rt, "net/minecraft/WorldVersion.getProtocolVersion.()I", &[v]), V::I(767));

@@ -1007,6 +1007,66 @@ fn util_owner(owner: &str) -> bool {
         || owner.starts_with("com/google/common/collect/")
 }
 
+/// `StringJoiner`: the pieces added so far, joined, between its prefix and suffix.
+fn joiner(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let text = |rt: &Rt, field: &'static str| {
+        rt.str_of(rt.get_field(this, field))
+            .unwrap_or("")
+            .to_owned()
+    };
+    let put = |rt: &mut Rt, field: &'static str, s: &str| {
+        let v = rt.string(s);
+        rt.put_field(this, field, v);
+    };
+    Some(match name {
+        "<init>" => {
+            let parts: Vec<String> = (1..args.len())
+                .map(|i| crate::jlang::text(rt, a(i)))
+                .collect();
+            put(rt, "$separator", &parts[0]);
+            if desc.starts_with(
+                "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/CharSequence;)",
+            ) {
+                put(rt, "$prefix", &parts[1]);
+                put(rt, "$suffix", &parts[2]);
+            }
+            V::Void
+        }
+        "add" => {
+            let piece = crate::jlang::text(rt, a(1));
+            let joined = if rt.get_field(this, "$count").i() == 0 {
+                piece
+            } else {
+                text(rt, "$joined") + &text(rt, "$separator") + &piece
+            };
+            put(rt, "$joined", &joined);
+            let count = rt.get_field(this, "$count").i() + 1;
+            rt.put_field(this, "$count", V::I(count));
+            this
+        }
+        "setEmptyValue" => {
+            rt.put_field(this, "$empty", a(1));
+            this
+        }
+        "toString" | "length" => {
+            let empty = rt.get_field(this, "$empty");
+            let s = if rt.get_field(this, "$count").i() == 0 && rt.str_of(empty).is_some() {
+                rt.str_of(empty).unwrap_or("").to_owned()
+            } else {
+                text(rt, "$prefix") + &text(rt, "$joined") + &text(rt, "$suffix")
+            };
+            if name == "length" {
+                V::I(s.encode_utf16().count() as i32)
+            } else {
+                rt.string(&s)
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
@@ -1017,6 +1077,13 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    match owner {
+        "java/util/Calendar" | "java/util/GregorianCalendar" | "java/util/Date" => {
+            return crate::jsystem::calendar(rt, owner, name, desc, args);
+        }
+        "java/util/StringJoiner" => return joiner(rt, name, desc, args),
+        _ => {}
+    }
     // Statics first.
     if let Some(v) = statics(rt, owner, name, desc, args) {
         return Some(v);
@@ -1458,6 +1525,24 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         // `Maps.newHashMap(map)`...): empty for a size hint, else a copy of what they're given (an
         // `Iterable`, an `Iterator`, an array, a map). The runtime's sets and maps keep insertion
         // order, as the linked ones do.
+        // `Queues.newConcurrentLinkedQueue()` and its kin: the queue class the factory names.
+        ("com/google/common/collect/Queues", n)
+            if n.starts_with("new")
+                && desc
+                    .rsplit_once(")L")
+                    .is_some_and(|(_, c)| kind_of(c.trim_end_matches(';')) == Some("list")) =>
+        {
+            let items = if desc.starts_with("(Ljava/lang/Iterable;)") {
+                elements(rt, a(0))
+            } else {
+                Vec::new()
+            };
+            let class = rt.static_key(
+                desc.rsplit_once(")L")
+                    .map_or("java/util/ArrayDeque", |(_, c)| c.trim_end_matches(';')),
+            );
+            rt.alloc(class, Data::List(items))
+        }
         ("com/google/common/collect/Sets" | "com/google/common/collect/Lists" | "com/google/common/collect/Maps", n)
             if n.starts_with("new") =>
         {
@@ -1820,6 +1905,49 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                 l.reverse();
             }
             V::Void
+        }
+        // The bounds checks of the JDK's own code: the index back, or the exception.
+        ("java/util/Objects", "checkIndex" | "checkFromToIndex" | "checkFromIndexSize") => {
+            let n = |i: usize| {
+                if desc.starts_with("(J") {
+                    a(i).j()
+                } else {
+                    i64::from(a(i).i())
+                }
+            };
+            let (ok, what) = match name {
+                "checkIndex" => (
+                    n(0) >= 0 && n(0) < n(1),
+                    format!("Index {} out of bounds for length {}", n(0), n(1)),
+                ),
+                "checkFromToIndex" => (
+                    n(0) >= 0 && n(0) <= n(1) && n(1) <= n(2),
+                    format!(
+                        "Range [{}, {}) out of bounds for length {}",
+                        n(0),
+                        n(1),
+                        n(2)
+                    ),
+                ),
+                _ => (
+                    n(0) >= 0 && n(1) >= 0 && n(0) <= n(2) - n(1),
+                    format!(
+                        "Range [{}, {} + {}) out of bounds for length {}",
+                        n(0),
+                        n(0),
+                        n(1),
+                        n(2)
+                    ),
+                ),
+            };
+            if !ok {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IndexOutOfBoundsException",
+                    &what,
+                ));
+            }
+            a(0)
         }
         ("java/util/Objects", "requireNonNull" | "requireNonNullElse") => {
             if a(0).r() == 0 && name == "requireNonNullElse" { a(1) } else { a(0) }
@@ -3541,6 +3669,61 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_joiner_joins_between_its_prefix_and_suffix() {
+        let mut rt = Rt::new();
+        let c = crate::api::call;
+        let (j, comma, open, close) = (
+            rt.new_object("java/util/StringJoiner"),
+            rt.string(", "),
+            rt.string("["),
+            rt.string("]"),
+        );
+        c(
+            &mut rt,
+            "java/util/StringJoiner.<init>.(Ljava/lang/CharSequence;Ljava/lang/CharSequence;Ljava/lang/CharSequence;)V",
+            &[j, comma, open, close],
+        );
+        let text = |rt: &mut Rt, j: V| {
+            let s = c(
+                rt,
+                "java/util/StringJoiner.toString.()Ljava/lang/String;",
+                &[j],
+            );
+            rt.str_of(s).unwrap_or("?").to_owned()
+        };
+        assert_eq!(text(&mut rt, j), "[]");
+        for piece in ["a", "b", "c"] {
+            let p = rt.string(piece);
+            assert_eq!(
+                c(
+                    &mut rt,
+                    "java/util/StringJoiner.add.(Ljava/lang/CharSequence;)Ljava/util/StringJoiner;",
+                    &[j, p]
+                ),
+                j
+            );
+        }
+        assert_eq!(text(&mut rt, j), "[a, b, c]");
+        assert_eq!(
+            c(&mut rt, "java/util/StringJoiner.length.()I", &[j]),
+            V::I(9)
+        );
+        let (plain, none) = (rt.new_object("java/util/StringJoiner"), rt.string("none"));
+        c(
+            &mut rt,
+            "java/util/StringJoiner.<init>.(Ljava/lang/CharSequence;)V",
+            &[plain, comma],
+        );
+        c(
+            &mut rt,
+            "java/util/StringJoiner.setEmptyValue.(Ljava/lang/CharSequence;)Ljava/util/StringJoiner;",
+            &[plain, none],
+        );
+        assert_eq!(text(&mut rt, plain), "none");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `Stream.reduce` in its three forms, left to right (`(a - b)` shows the order); an empty
     /// stream's `reduce(op)` is empty. Guava's factories: `Sets.newLinkedHashSet()` empty, then
     /// growing in order (FarmersDelight's), `Maps.newHashMap(map)` a copy, `Lists.newArrayList`
@@ -3583,6 +3766,33 @@ mod tests {
         let copy = c(&mut rt, "com/google/common/collect/Maps.newHashMap.(Ljava/util/Map;)Ljava/util/HashMap;", &[m]);
         assert_ne!(copy, m);
         assert_eq!(table_get(&mut rt, copy, ints[0]), Some(ints[1]));
+        // A queue from Guava's factory is the runtime's queue: what is offered is polled, in order.
+        let queue = c(
+            &mut rt,
+            "com/google/common/collect/Queues.newConcurrentLinkedQueue.()Ljava/util/concurrent/ConcurrentLinkedQueue;",
+            &[],
+        );
+        assert_eq!(
+            rt.class_of(queue),
+            "java/util/concurrent/ConcurrentLinkedQueue"
+        );
+        assert_eq!(c(&mut rt, "java/util/Queue.isEmpty.()Z", &[queue]), V::I(1));
+        let first = rt.string("first");
+        c(
+            &mut rt,
+            "java/util/Queue.offer.(Ljava/lang/Object;)Z",
+            &[queue, first],
+        );
+        assert_eq!(c(&mut rt, "java/util/Queue.isEmpty.()Z", &[queue]), V::I(0));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Queue.poll.()Ljava/lang/Object;",
+                &[queue]
+            ),
+            first
+        );
+        assert_eq!(c(&mut rt, "java/util/Queue.isEmpty.()Z", &[queue]), V::I(1));
         let sized = c(&mut rt, "com/google/common/collect/Lists.newArrayListWithCapacity.(I)Ljava/util/ArrayList;", &[V::I(8)]);
         assert!(elements(&rt, sized).is_empty());
     }

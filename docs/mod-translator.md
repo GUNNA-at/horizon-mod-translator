@@ -9679,6 +9679,78 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     with both and marks the upper class; a `super` call blocks; a field is read through the mapped method that
     only returns it), and the compat test the lookup (the receiver's class's method runs; a marked class is a
     miss). 745 compat, 15 compat-core and 25 translator unit tests pass, and the differential test.
+- [x] 2026-11-10 Part 146: the whole pack as one game. It translates and builds; its first launch stopped while
+  the mods were being constructed. What building and launching it asked for, and three things to make the
+  next rounds cheaper: the Java runtime's own code, ids that stay, a runtime in two crates.
+  - The pack as one group (Create first, the other 364 mods with it, `scratchpad/packbundle.sh`): 218 s and
+    7.8 GB to translate, 3.6 GB of Rust in 547 code crates (560 with the jars inside jars, below), one binary
+    of 2.0 GB. A jar given with `--with` that declares no mod is taken as a library by itself.
+  - Blocks too long to compile: two crates (Cataclysm's, Block Factory's Bosses') never built, each rustc past
+    7 GB on a static initialiser that is one basic block of 2 to 3 MB of bytecode. A block whose Rust passes
+    64 KB is now cut into functions of about 24 KB (`#[inline(never)]`, sharing the method's locals and
+    stack; `codegen.rs`, `cut`), and a part of a crate is sized by its bytecode (160 KB) and no longer by its
+    class count. The whole pack then builds at three jobs in 5,252 s with no growth of swap (six jobs had
+    taken 15 GB of it and were killed). The differential test cuts its fixture's blocks at 600 bytes.
+  - The runtime in two crates: the core (`runtime`, what the generated code calls) and the API mapping
+    (`mapping`, all of horizon-compat's modules). The mods' code crates depend on the core only and reach the
+    mapping through the functions `install()` hands it, so a change to the mapping builds again the mapping,
+    the engine and the client, and none of the 560 code crates. Built once this way (4,124 s at four jobs,
+    exit 0); what a mapping-only rebuild then costs is not measured yet.
+  - Jars inside jars inside jars are read (Sable carries Veil, which carries its GLSL and Molang libraries;
+    `nested_jars` was one level deep): their classes showed in the first launch's log as unmapped.
+  - The first launch (`scratchpad/packlive.sh`, every mod's content folder given): 52 lines of log, the mods
+    constructing in turn, then nothing. Puzzles Lib drains a queue made by Guava's
+    `Queues.newConcurrentLinkedQueue()`, which had no answer, so `while (!queue.isEmpty())` asked nothing
+    forever. Guava's queue factories are mapped, and the guard that stops a hook looping on unmapped calls
+    now works while the mods load too (no game to count ticks by: by the clock, over at most 12 distinct
+    calls). Not launched again yet: the build with these fixes was still running when this was written.
+  - The Java runtime's own code. The pack misses 2,479 JDK methods, and most of the classes behind them are
+    plain code over what the runtime already models. The translator now reads the image (`lib/modules`,
+    `jimage.rs`: the table of resources, each whole or packed with zlib) of the Java 21 runtime a launcher
+    installed for the game, and takes from it:
+    - as a library, the classes listed in `JDK_CODE`: `java.awt.Color`, `Point`, `Rectangle`, `Dimension`,
+      `Insets`, `java.awt.geom`, `java.math`, `java.net.URI`, `java.util.Base64`, `StringTokenizer`,
+      `java.lang.reflect.Modifier`, `ParsePosition`, `FieldPosition`. Only what the mods reach of them;
+    - by `derive`, the static methods of `java.lang` and `java.util` classes the runtime has no answer for,
+      where their code asks only what is answered or stands in its turn (`Arrays.binarySearch`,
+      `Arrays.toString`, `Long.rotateLeft`, `Character.isISOControl`). The JDK's code is held to every call
+      it makes; the game's still takes a library's method for answered.
+    The differential test runs both against a JVM: colours, rectangles, 30-digit factorials, decimals rounded
+    and divided, a URI resolved, Base64 both ways, and those statics give the same bits. Known limits: a URI's
+    percent-escapes are not decoded (its code wants a `CharsetDecoder` over byte buffers, which the runtime
+    has none of), and only a Java 21 image is taken (another version's classes are other code).
+  - What the JDK's code found wrong in the runtime's own models, fixed: `StringBuilder.append(text, start,
+    end)` and `append(chars, offset, count)` appended the whole; `append(char[])` and `insert(i, char[])` of
+    an array made by `new char[n]` appended nothing; `String.valueOf(chars, offset, count)` gave the whole;
+    `new String(bytes, hibyte, offset, count)` and `Integer.parseInt(text, begin, end, radix)` read the wrong
+    arguments; `Long.highestOneBit` answered for an int. Added: `lowestOneBit`, `Objects.checkIndex`,
+    `checkFromToIndex`, `checkFromIndexSize`, `Number`'s constructor, and what the JDK's code asks of the
+    JDK's insides (`jdk.rs`: no display, no serial form, the charsets by their own classes).
+  - What a mod asks of the machine (`jsystem.rs`): a thread it starts runs its body at once on the game's
+    thread, to its end or to its first wait, where it is interrupted as a mod stops one of its own (a loop
+    that swallows that is stopped by an error after three more); `Calendar`, `GregorianCalendar` and `Date`
+    over a moment in milliseconds, read in UTC; `java.net.http` and `URL`: a request is built as the mod
+    builds it and fails as one does offline (`IOException` from `send`, a 503 from `sendAsync`). Also
+    `StringJoiner`, `Class.getModifiers`, `CommonHooks.markComponentClassAsValid`,
+    `DetectedVersion.tryDetectVersion`.
+  - Ids that stay. A class's id and a lambda's are in the text of every crate that makes one, and were
+    numbered in name order, so one class more renumbered all after it: a mod added before four others changed
+    files in ten crates and more (Create's, SecurityCraft's, Resourceful Lib's, the shared library's). A bundle folder now keeps
+    `ids.txt` and a translation into it gives each class and lambda the id it had, new ones ids past those;
+    a part's registry is named by its first class. The same change now touches 11 files of the shared
+    library crate, the engine and the new mod's crate.
+  - Coverage, run 53 (the pack's 367 jars): API methods 91.0% (120,424 of 132,302: the jars inside jars
+    are now part of each jar's program, so there is more to answer), call sites 95.6%. The libraries: 85.5%
+    of the methods (65,557 of 76,713) and 95.1% of the uses, from 83.5% and 94.3%. Of those, the JDK's
+    classes taken as code answer 924 method uses by jars and its static methods standing 197, in 103 jars.
+    4,982 distinct library methods are missing (5,176 before), 2,262 of them the JDK's (2,479). The gaps the
+    table lists first (`Method.invoke`, `Class.getDeclaredFields`, `Field.getType`) are the probe's: those
+    are modelled and answer only for a real object.
+  - Tests: 751 compat, 15 compat-core and 27 translator unit tests pass, the differential test (now with the
+    Java runtime's code, threads and the string fixes), and the game-code, hook and weave tests.
+  - Open: the pack's second launch; `ByteBuffer` (31 jars, no model); a jar's own files for
+    `Class.getResourceAsStream` (70 jars, only `assets/` and `data/` are carried); Gson's reading and writing
+    of a mod's own classes (40 jars); a jar whose classes are Groovy (1,224 `invokedynamic` left).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

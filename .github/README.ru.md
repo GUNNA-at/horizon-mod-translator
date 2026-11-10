@@ -14,7 +14,7 @@ Java Edition. JVM не запускается ни на одном шаге. Б�
 для любого мода, а не для списка поддерживаемых. Create и аддоны к нему служат проверкой.
 
 <!-- progress:headline -->
-Rust отвечает на **91,1 %** методов Minecraft и NeoForge, которые вызывают 367 джаров пака, это **95,6 %** мест вызова. Библиотеки Java: **94,3 %** вызовов. Create: **98,0 %** его вызовов. Прогон 51, 9 ноября 2026.
+Rust отвечает на **91,0 %** методов Minecraft и NeoForge, которые вызывают 367 джаров пака, это **95,6 %** мест вызова. Библиотеки Java: **95,1 %** вызовов. Create: **98,0 %** его вызовов. Прогон 53, 10 ноября 2026.
 <!-- /progress -->
 
 | Если вам это показали | Если вы работаете над Horizon |
@@ -40,13 +40,13 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 у игрока.</sub>
 
 <!-- progress:table -->
-| Прогон 51, 367 джаров | Отвечено методов | Отвечено вызовов |
+| Прогон 53, 367 джаров | Отвечено методов | Отвечено вызовов |
 |---|---:|---:|
-| API Minecraft и NeoForge | **91,1 %**<br><sub>118 625 из 130 262</sub> | **95,6 %**<br><sub>356 370 из 372 790</sub> |
-| …из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub> | **6,0 %**<br><sub>7 768 из 130 262</sub> | **2,9 %**<br><sub>10 882 из 372 790</sub> |
-| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **83,5 %**<br><sub>61 862 из 74 081</sub> | **94,3 %**<br><sub>336 967 из 357 517</sub> |
+| API Minecraft и NeoForge | **91,0 %**<br><sub>120 424 из 132 302</sub> | **95,6 %**<br><sub>360 141 из 376 860</sub> |
+| …из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub> | **6,0 %**<br><sub>7 962 из 132 302</sub> | **2,9 %**<br><sub>11 107 из 376 860</sub> |
+| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **85,5 %**<br><sub>65 557 из 76 713</sub> | **95,1 %**<br><sub>354 933 из 373 410</sub> |
 | Create 6.0.10, вызовы API | **89,8 %**<br><sub>3 570 из 3 976</sub> | **98,0 %**<br><sub>24 731 из 25 245</sub> |
-| Create 6.0.10, вызовы библиотек | **82,8 %**<br><sub>1 326 из 1 602</sub> | **97,5 %**<br><sub>14 053 из 14 416</sub> |
+| Create 6.0.10, вызовы библиотек | **83,5 %**<br><sub>1 338 из 1 602</sub> | **97,6 %**<br><sub>14 066 из 14 416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -64,6 +64,7 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 <!-- progress:history -->
 | Прогон | Дата | Методы API | Вызовы | Create, вызовы |
 |---:|---|---:|---:|---:|
+| 53 | 2026-11-10 | 91,0 % | 95,6 % | 98,0 % |
 | 51 | 2026-11-09 | 91,1 % | 95,6 % | 98,0 % |
 | 50 | 2026-11-09 | 90,0 % | 95,2 % | 97,8 % |
 | 49 | 2026-11-09 | 85,2 % | 92,7 % | 96,8 % |
@@ -168,7 +169,7 @@ Create 6.0.10, переведённый и собранный в Horizon, про
   отдельным экземпляром (`--new-instance` или модпак, брошенный в окно лаунчера), и оба мода играли в одном мире.
 
 Пока не работает: экраны настроек NeoForge и часть отрисовки клиента.
-Подробнее в разделе [чего ещё нет](#чего-ещё-нет). Весь пак целиком в одной игре ещё не запускался.
+Подробнее в разделе [чего ещё нет](#чего-ещё-нет). Весь пак целиком (365 модов) переводится и собирается в одну игру за 87 минут, но в мир пока не загружается: первый запуск остановился на конструировании модов.
 
 ## Попробовать
 
@@ -276,14 +277,14 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 <!-- progress:gaps -->
 | Метод API, которого нет | Джаров | Вызовов |
 |---|---:|---:|
-| `Minecraft.getTextureManager()` | 46 | 106 |
-| `RenderSystem.getModelViewStack()` | 24 | 40 |
+| `Minecraft.getTextureManager()` | 47 | 107 |
+| `RenderSystem.getModelViewStack()` | 25 | 41 |
 | `TextureManager.register(ResourceLocation, AbstractTexture)` | 24 | 40 |
+| `ChunkMap.getPlayers(ChunkPos, boolean)` | 23 | 33 |
 | `Level.broadcastEntityEvent(Entity, byte)` | 22 | 78 |
 | `new DynamicTexture(NativeImage)` | 22 | 39 |
-| `ChunkMap.getPlayers(ChunkPos, boolean)` | 21 | 31 |
+| `BlockEntityRenderDispatcher.getRenderer(BlockEntity)` | 21 | 33 |
 | `PlayerEvent.PlayerChangedDimensionEvent.getEntity()` | 21 | 22 |
-| `MinecraftServer.reloadableRegistries()` | 20 | 43 |
 <!-- /progress -->
 
 <details>
@@ -292,14 +293,14 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 <!-- progress:lib_gaps -->
 | Метод библиотеки, которого нет | Джаров | Вызовов |
 |---|---:|---:|
-| `Method.invoke(Object, Object[])` | 57 | 126 |
-| `Class.getDeclaredFields()` | 45 | 84 |
-| `Field.getType()` | 43 | 94 |
+| `Method.invoke(Object, Object[])` | 59 | 140 |
+| `Class.getDeclaredFields()` | 46 | 90 |
+| `Field.getType()` | 44 | 99 |
 | `Gson.fromJson(Reader, Class)` | 40 | 55 |
+| `Array.newInstance(Class, int)` | 36 | 76 |
 | `Gson.fromJson(String, Class)` | 35 | 68 |
-| `Modifier.isStatic(int)` | 34 | 65 |
-| `Array.newInstance(Class, int)` | 33 | 62 |
-| `new FileWriter(File)` | 33 | 46 |
+| `new FileWriter(File)` | 34 | 47 |
+| `Field.getModifiers()` | 32 | 75 |
 <!-- /progress -->
 
 </details>

@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 125] = [
+const COMPAT: [(&str, &str); 127] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
@@ -209,7 +209,9 @@ const COMPAT: [(&str, &str); 125] = [
     ("gson.rs", include_str!("../../horizon-compat/src/gson.rs")),
     ("network.rs", include_str!("../../horizon-compat/src/network.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
+    ("jdk.rs", include_str!("../../horizon-compat/src/jdk.rs")),
     ("jregex.rs", include_str!("../../horizon-compat/src/jregex.rs")),
+    ("jsystem.rs", include_str!("../../horizon-compat/src/jsystem.rs")),
     ("tags.rs", include_str!("../../horizon-compat/src/tags.rs")),
     ("render.rs", include_str!("../../horizon-compat/src/render.rs")),
     ("models.rs", include_str!("../../horizon-compat/src/models.rs")),
@@ -232,25 +234,20 @@ const COMPAT: [(&str, &str); 125] = [
 const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\nflate2 = { version = \"1.1.10\", default-features = false, features = [\"zlib-rs\", \"runtime_detection\"] }\n";
 
 /// horizon-compat's modules for tools only (the port pack's), not carried: nothing carried uses them.
-#[cfg(test)]
 const TOOL_ONLY: [&str; 1] = ["convention.rs"];
 
-/// The core's root inlined: without the installable entry points (inlined, `api` and `neo` are
-/// the mapping's own modules), and declaring the mapping's modules.
-fn inlined_core() -> String {
-    let (head, rest) = CORE.split_once("// BEGIN ENGINE ENTRY POINTS").expect("core entry point markers");
-    let (_, tail) = rest.split_once("// END ENGINE ENTRY POINTS").expect("core entry point markers");
-    let mods: String = COMPAT
-        .iter()
-        .filter(|(n, _)| !matches!(*n, "host.rs" | "gc.rs" | "linked.rs"))
-        .map(|(n, _)| format!("pub mod {};\n", n.trim_end_matches(".rs")))
-        .collect();
-    let (_, helpers) = COMPAT_ROOT.split_once("// BEGIN RUNTIME HELPERS").expect("compat runtime helper markers");
-    let (helpers, _) = helpers.split_once("// END RUNTIME HELPERS").expect("compat runtime helper markers");
-    let helpers = helpers.split_once('\n').map_or("", |(_, rest)| rest);
-    // `Rt::is_a` asks the mapping's table of Minecraft's class families, `Rt::type_of` its
-    // vanilla blocks' and items' classes.
-    format!("{head}{tail}\n{mods}pub use api_common::{{api_is_a, vanilla_class}};\n{helpers}")
+/// In a bundle's folder: the ids its classes and lambdas were given ([`Program::ids`]), for a
+/// translation into the same folder to keep.
+pub const IDS: &str = "ids.txt";
+
+/// The mapping crate's root: horizon-compat's, naming the bundle's runtime crate for the core and
+/// without the modules only tools use ([`TOOL_ONLY`]).
+fn mapping_root(runtime: &str) -> String {
+    let mut root = COMPAT_ROOT.replace("horizon_compat_core", runtime);
+    for name in TOOL_ONLY {
+        root = root.replace(&format!("pub mod {};\n", name.trim_end_matches(".rs")), "");
+    }
+    root
 }
 
 /// Writes `contents` unless the file already holds exactly that, so an unchanged engine keeps its
@@ -293,16 +290,42 @@ fn crate_bytes() -> usize {
     std::env::var("HORIZON_TRANSLATOR_CRATE_MB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&mb| mb > 0).unwrap_or(8) << 20
 }
 
-/// A split engine's runtime crate: horizon-compat-core's root, with the API mapping's modules
-/// declared in it ([`inlined_core`]), and their sources.
+/// The runtime's core files, which the runtime crate carries; the mapping crate, the rest.
+const CORE_FILES: [&str; 3] = ["host.rs", "gc.rs", "linked.rs"];
+
+/// A split engine's runtime crate: horizon-compat-core as it is, which every crate of translated
+/// code builds on. The API mapping is a crate of its own ([`write_mapping`]) that only the engine
+/// names, so a change to the mapping builds that crate and the engine again, not the mods' code.
 fn write_runtime(dir: &Path, package: &str) -> Result<(), String> {
+    put(dir.join("Cargo.toml"), format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n")).map_err(|e| e.to_string())?;
+    let files: Vec<(String, String)> = std::iter::once(("lib.rs", CORE))
+        .chain(COMPAT.into_iter().filter(|(n, _)| CORE_FILES.contains(n)))
+        .map(|(name, text)| (name.to_owned(), text.replace("#![", "// #![")))
+        .collect();
+    sync_dir(&dir.join("src"), &files)
+}
+
+/// A split engine's mapping crate: horizon-compat ([`mapping_root`] and its modules) on the
+/// bundle's runtime crate `runtime` (its Rust name; `runtime_package`, its package's). The engine
+/// installs it in the runtime (`install()`) before it makes one.
+fn write_mapping(
+    dir: &Path,
+    package: &str,
+    runtime: &str,
+    runtime_package: &str,
+) -> Result<(), String> {
     put(
         dir.join("Cargo.toml"),
-        format!("[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{ENGINE_DEPENDENCIES}"),
+        format!(
+            "[package]\nname = \"{package}\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{ENGINE_DEPENDENCIES}{runtime_package} = {{ path = \"../runtime\" }}\n"
+        ),
     )
     .map_err(|e| e.to_string())?;
-    let core = inlined_core();
-    let files: Vec<(String, String)> = std::iter::once(("lib.rs", core.as_str())).chain(COMPAT).map(|(name, text)| (name.to_owned(), text.replace("#![", "// #!["))).collect();
+    let root = mapping_root(runtime);
+    let files: Vec<(String, String)> = std::iter::once(("lib.rs", root.as_str()))
+        .chain(COMPAT.into_iter().filter(|(n, _)| !CORE_FILES.contains(n)))
+        .map(|(name, text)| (name.to_owned(), text.replace("#![", "// #![")))
+        .collect();
     sync_dir(&dir.join("src"), &files)
 }
 
@@ -5663,6 +5686,11 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j).into_iter().chain(crate::nested_mod_metadata(j))).collect();
     program.scan_files = jars.iter().map(|j| (crate::mod_metadata(j).into_iter().map(|m| m.0).collect(), crate::class_names(j))).collect();
     program.use_mixin_configs(&crate::mixin_configs_of(jars));
+    // Translated here before: each class and lambda keeps the id it had, so the crates of the
+    // mods that didn't change come out the same text and are not built again.
+    if let Ok(ids) = fs::read_to_string(out.join(IDS)) {
+        program.keep_ids(&ids);
+    }
     let src = out.join("engine/src");
     let package = |name: &str| name.replace('_', "-");
     // The bundle's crates, the engine last (horizon-mixin.toml lists them).
@@ -5676,16 +5704,17 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
         None => {
             // The runtime, each mod's code and the engine as crates of their own (`crate::split`):
             // a mod's crates may depend on each other, and each compiles in a rustc of its own.
-            let runtime_crate = format!("{prefix}_runtime");
+            let (runtime_crate, mapping_crate) = (format!("{prefix}_runtime"), format!("{prefix}_mapping"));
             write_runtime(&out.join("runtime"), &package(&runtime_crate))?;
-            crate_ids.push("runtime".into());
+            write_mapping(&out.join("mapping"), &package(&mapping_crate), &runtime_crate, &package(&runtime_crate))?;
+            crate_ids.extend(["runtime".to_owned(), "mapping".to_owned()]);
             let owners: Vec<std::collections::HashSet<String>> = members.iter().map(|(j, _)| crate::class_names(j)).collect();
             let group = |c: &str| owners.iter().position(|o| o.contains(c)).unwrap_or(owners.len());
             let (parts, lib) = program.emit_groups(40, owners.len() + 1, &group);
             // A class no member jar holds is a library's they bundle.
             let groups: Vec<(String, Vec<String>)> = members.iter().map(|(_, ns)| ns.clone()).chain(["lib".to_owned()]).zip(parts).collect();
             let split = crate::split::split(&groups, &runtime_crate, &prefix, crate_bytes(), &program.dispatchers());
-            let mut deps = format!("{ENGINE_DEPENDENCIES}{} = {{ path = \"../runtime\" }}\n", package(&runtime_crate));
+            let mut deps = format!("{ENGINE_DEPENDENCIES}{} = {{ path = \"../runtime\" }}\n{} = {{ path = \"../mapping\" }}\n", package(&runtime_crate), package(&mapping_crate));
             for c in &split.crates {
                 let name = package(&crate::split::crate_name(&prefix, &c.id));
                 put(
@@ -5710,7 +5739,9 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
             (
                 vec![("lib.rs".to_owned(), format!("{lib}\n{}", split.engine))],
                 deps,
-                format!("/// The runtime (also for the hook helpers compiled into the game).\npub use {runtime_crate} as compat;\npub use compat as horizon_compat;\nuse horizon_compat::"),
+                format!(
+                    "/// The runtime with its API mapping (also for the hook helpers compiled into the game).\npub use {mapping_crate} as compat;\npub use compat as horizon_compat;\n\n/// A runtime, the API mapping installed for it (once).\nfn new_runtime() -> Rt {{\n    horizon_compat::install();\n    Rt::new()\n}}\n\nuse horizon_compat::"
+                ),
             )
         }
     };
@@ -5754,6 +5785,10 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
                  /// mod's feature places a vanilla one, which asks), this thread's probe runtime. None while both are.\n\
                  pub fn with_worldgen_query<R>(f: impl FnOnce(&mut Rt) -> R) -> Option<R> {{\n    let mut f = Some(f);\n    if let Some(r) = with_worldgen_runtime(|rt| f.take().map(|f| f(rt))).flatten() {{\n        return Some(r);\n    }}\n    let f = f.take()?;\n    PROBE.with(|cell| {{\n        let mut slot = cell.try_borrow_mut().ok()?;\n        let rt = slot.get_or_insert_with(|| {{\n            let mut rt = Rt::new();\n            rt.namespace = {id:?}.into();\n            rt.use_game_dir();\n            rt.seed_from_entropy();\n            init(&mut rt);\n            start(&mut rt);\n            rt\n        }});\n        Some(f(rt))\n    }})\n}}\n"
             ));
+        }
+        // A split engine's runtimes take the mapping from its crate.
+        if name == "lib.rs" && runtime.is_none() {
+            text = text.replace("let mut rt = Rt::new();", "let mut rt = new_runtime();");
         }
         if name == "lib.rs" {
             text.push_str(&format!(
@@ -5846,6 +5881,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
             }
         }
     }
+    put(out.join(IDS), program.ids()).map_err(|e| e.to_string())?;
     let left: Vec<String> = program.unsupported.iter().map(|(k, n)| format!("{k} ({n})")).collect();
     Ok((id, left))
 }
@@ -6189,18 +6225,39 @@ mod tests {
         let mut carried: Vec<String> = super::COMPAT.iter().map(|(n, _)| n.to_string()).collect();
         carried.sort();
         assert_eq!(carried, on_disk);
-        // The inlined runtime is one crate with the core's entry points left out: carried code names
-        // the core as `crate`, never as the `horizon_compat_core` crate (tests aside).
+        // The mapping's modules name the core through their crate's root (`crate::Rt`), which names
+        // the bundle's runtime crate for it ([`super::mapping_root`]): never the core crate itself.
         for (n, text) in super::COMPAT {
             let code = text.split("#[cfg(test)]").next().unwrap_or(text);
             let named = code.lines().filter(|l| !l.trim_start().starts_with("//")).any(|l| l.contains("horizon_compat_core::"));
-            assert!(!named, "{n} calls the core crate, which an inlined runtime doesn't have");
+            assert!(!named, "{n} names the core crate, which a bundle has under another name");
         }
-        // The inlined core declares every carried mapping module and drops the installable entry points.
-        let core = super::inlined_core();
-        assert!(!core.contains("pub fn install_fns"));
-        for n in carried.iter().filter(|n| *n != "host.rs") {
-            assert!(core.contains(&format!("pub mod {};", n.trim_end_matches(".rs"))), "{n}");
+        // The mapping's root declares every module the mapping crate carries, and none it doesn't.
+        let root = super::mapping_root("m_translated_runtime");
+        assert!(
+            root.contains("pub use m_translated_runtime::*;")
+                && !root.contains("horizon_compat_core")
+        );
+        for n in carried
+            .iter()
+            .filter(|n| !super::CORE_FILES.contains(&n.as_str()))
+        {
+            assert!(
+                root.contains(&format!("pub mod {};", n.trim_end_matches(".rs"))),
+                "{n}"
+            );
+        }
+        for n in super::TOOL_ONLY {
+            assert!(
+                !root.contains(&format!("pub mod {};", n.trim_end_matches(".rs"))),
+                "{n}"
+            );
+        }
+        for n in super::CORE_FILES {
+            assert!(
+                super::CORE.contains(&format!("pub mod {};", n.trim_end_matches(".rs"))),
+                "{n}"
+            );
         }
     }
 }

@@ -17,6 +17,77 @@ use std::{
 
 /// The pseudo-instruction offset of a method's unwind block.
 const THROW: usize = usize::MAX - 1;
+/// What a piece of a long block leaves in `pc` when it returned from the method, and when it ran to
+/// its end ([`cut`]).
+const LEFT: usize = usize::MAX - 2;
+const FELL: usize = usize::MAX - 3;
+/// A basic block of more text than this is cut into functions of its own: one initialiser of
+/// keyframes was a block of 3 MB, and the compiler took 7 GB for a crate of those.
+const LONG_BLOCK: usize = 64 << 10;
+/// About how much of a long block each of its functions holds.
+const BLOCK_PIECE: usize = 24 << 10;
+/// A part's classes hold about this much bytecode at most, so that a part fits a crate
+/// ([`crate::split`]): dense code translates to some fifty times its size, and forty classes of
+/// keyframes made a part of 26 MB.
+const PART_CODE: usize = 160 << 10;
+
+/// `classes` in runs of at most `count` classes and about [`PART_CODE`] of bytecode: a part each.
+fn parts_of<'a>(classes: &[&'a ClassFile], count: usize) -> Vec<Vec<&'a ClassFile>> {
+    let mut parts: Vec<Vec<&ClassFile>> = Vec::new();
+    let mut size = 0;
+    for c in classes {
+        let code: usize = c
+            .methods
+            .iter()
+            .filter_map(|m| m.code.as_ref())
+            .map(|code| code.bytes.len())
+            .sum();
+        match parts.last_mut() {
+            Some(last) if last.len() < count.max(1) && size + code <= PART_CODE => last.push(c),
+            _ => {
+                parts.push(vec![c]);
+                size = 0;
+            }
+        }
+        size += code;
+    }
+    parts
+}
+
+/// A long basic block (`bodies`, its instructions' code) of the method `f`, as calls of functions
+/// that each hold a piece of it, written to `out`. A piece runs once: where its code went on to
+/// another block (`continue`) it leaves that block in `at`, where it returned, [`LEFT`].
+fn cut(
+    f: &str,
+    block: usize,
+    bodies: &[String],
+    piece: usize,
+    (locals, stack): (usize, usize),
+    out: &mut String,
+) -> String {
+    let mut arm = String::from(" let mut at = (0usize, thrown_at);");
+    let mut pieces: Vec<String> = vec![String::new()];
+    for b in bodies {
+        if pieces.last().is_some_and(|p| p.len() >= piece) {
+            pieces.push(String::new());
+        }
+        let last = pieces.last_mut().expect("starts with one");
+        last.push(' ');
+        last.push_str(b);
+    }
+    for (k, piece) in pieces.iter().enumerate() {
+        let name = format!("{f}__b{block}_{k}");
+        let _ = writeln!(
+            out,
+            "#[inline(never)]\nfn {name}(rt: &mut Rt, args: &[V], l: &mut [V; {locals}], s: &mut horizon_compat::Stack<{stack}>, at: &mut (usize, usize)) -> V {{\n    let (mut pc, mut thrown_at): (usize, usize) = ({FELL}, at.1);\n    let mut once = true;\n    loop {{\n        if !once {{ break; }}\n        once = false;\n       {piece}\n        break;\n    }}\n    *at = (pc, thrown_at);\n    V::Void\n}}\n"
+        );
+        let _ = write!(
+            arm,
+            " at.0 = {LEFT}; let r = {name}(rt, args, &mut l, &mut s, &mut at); if at.0 == {LEFT} {{ return r; }} thrown_at = at.1; if at.0 != {FELL} {{ pc = at.0; continue; }}"
+        );
+    }
+    arm
+}
 
 /// FNV-1a, for short stable suffixes on generated names.
 fn hash(s: &str) -> u32 {
@@ -242,16 +313,22 @@ pub struct Program<'a> {
     synthetic: Vec<String>,
     /// `META-INF/services`: interface → implementations (internal names), for `ServiceLoader`.
     pub services: BTreeMap<String, Vec<String>>,
-    /// Each mod class's id (1.., in name order): objects carry it, and virtual calls jump on it.
+    /// Each mod class's id (1.., in name order, or as an earlier translation numbered them:
+    /// [`Program::keep_ids`]): objects carry it, and virtual calls jump on it.
     class_ids: BTreeMap<String, u32>,
+    /// The ids an earlier translation gave classes this one doesn't have.
+    kept_classes: BTreeMap<String, u32>,
     /// Instance methods (`name.desc`) some mod class implements: each gets a dispatcher.
     vkeys: BTreeSet<String>,
     /// Each lambda implementation's id in `lambda_call` (as first seen).
     lambda_ids: BTreeMap<String, u32>,
-    /// Those keys in id order: a part registers the lambdas it saw first ([`Program::part`]).
+    /// Those keys as first seen: a part registers the lambdas it saw first ([`Program::part`]).
     lambda_order: Vec<String>,
-    /// The parts emitted so far: each part's registry is `REGISTRY_<n>`.
-    parts: usize,
+    /// The ids an earlier translation gave lambdas, and the next free one.
+    kept_lambdas: BTreeMap<String, u32>,
+    next_lambda: u32,
+    /// The registries of the parts emitted so far (`REGISTRY_<n>`), by number.
+    registries: BTreeSet<u32>,
     /// The mod's id: picks its `@Mod` class among several (libraries bundled in its jar have theirs).
     pub mod_id: Option<String>,
     /// The mods built on it translated with it (its addons), in loading order: FML constructs a
@@ -263,6 +340,9 @@ pub struct Program<'a> {
     /// Each jar translated: the ids of the mods it declares and the classes it has
     /// ([`crate::class_names`]), for FML's scan of it. Empty: one jar of every class.
     pub scan_files: Vec<(Vec<String>, std::collections::HashSet<String>)>,
+    /// A basic block of more text than the first is cut into functions of about the second
+    /// ([`cut`]): [`LONG_BLOCK`] and [`BLOCK_PIECE`] unless a test asks for less.
+    pub long_block: (usize, usize),
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
     /// them record the calling class first. Everything else keeps no call stack.
     caller_sensitive: BTreeSet<String>,
@@ -523,11 +603,15 @@ impl<'a> Program<'a> {
                 .collect(),
             lambda_ids: BTreeMap::new(),
             lambda_order: Vec::new(),
-            parts: 0,
+            kept_classes: BTreeMap::new(),
+            kept_lambdas: BTreeMap::new(),
+            next_lambda: 0,
+            registries: BTreeSet::new(),
             mod_id: None,
             addons: Vec::new(),
             metadata: Vec::new(),
             scan_files: Vec::new(),
+            long_block: (LONG_BLOCK, BLOCK_PIECE),
             caller_sensitive: classes
                 .iter()
                 .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
@@ -695,10 +779,73 @@ impl<'a> Program<'a> {
         if let Some(&id) = self.lambda_ids.get(key) {
             return id;
         }
-        let id = self.lambda_order.len() as u32;
+        // The id an earlier translation gave it ([`Program::keep_ids`]), else the next free one.
+        let id = match self.kept_lambdas.get(key) {
+            Some(&id) => id,
+            None => {
+                self.next_lambda += 1;
+                self.next_lambda - 1
+            }
+        };
         self.lambda_ids.insert(key.to_owned(), id);
         self.lambda_order.push(key.to_owned());
         id
+    }
+
+    /// Gives each class and lambda the id an earlier translation gave it (`ids`: what
+    /// [`Program::ids`] wrote then), and the rest ids past those. A class's id and a lambda's are
+    /// part of the text of every crate that makes one, so numbering them afresh in order would
+    /// change, and build again, every crate after a class added or dropped; kept, a translation
+    /// of the same mods with one more changes only the crates that mod's code is in.
+    pub fn keep_ids(&mut self, ids: &str) {
+        let (mut classes, mut lambdas) = (BTreeMap::new(), BTreeMap::new());
+        for line in ids.lines() {
+            let mut parts = line.splitn(3, ' ');
+            let (Some(kind), Some(Ok(id)), Some(key)) = (
+                parts.next(),
+                parts.next().map(str::parse::<u32>),
+                parts.next(),
+            ) else {
+                continue;
+            };
+            match kind {
+                "c" if id > 0 => classes.insert(key.to_owned(), id),
+                "l" => lambdas.insert(key.to_owned(), id),
+                _ => None,
+            };
+        }
+        let mut next = classes.values().copied().max().unwrap_or(0) + 1;
+        for (name, id) in &mut self.class_ids {
+            *id = match classes.get(name) {
+                Some(&kept) => kept,
+                None => {
+                    next += 1;
+                    next - 1
+                }
+            };
+        }
+        self.next_lambda = lambdas.values().copied().max().map_or(0, |m| m + 1);
+        // What this translation has no use for keeps its id, should it come back.
+        classes.retain(|name, _| !self.class_ids.contains_key(name));
+        self.kept_classes = classes;
+        self.kept_lambdas = lambdas;
+    }
+
+    /// The ids of the classes and the lambdas, a line each (`c <id> <class>`, `l <id> <lambda>`),
+    /// for the next translation to keep ([`Program::keep_ids`]): after the program is emitted.
+    pub fn ids(&self) -> String {
+        let mut out = String::new();
+        for (name, id) in self.class_ids.iter().chain(&self.kept_classes) {
+            let _ = writeln!(out, "c {id} {name}");
+        }
+        let kept = self
+            .kept_lambdas
+            .iter()
+            .filter(|(key, _)| !self.lambda_ids.contains_key(*key));
+        for (key, id) in self.lambda_ids.iter().chain(kept) {
+            let _ = writeln!(out, "l {id} {key}");
+        }
+        out
     }
 
     /// The mod class that implements `name desc` for an object of `class`
@@ -799,7 +946,7 @@ impl<'a> Program<'a> {
         let mut files = Vec::new();
         let mut lib = format!("{LIB_HEADER}use horizon_compat::{{api, Rt, V}};\n");
         let mut registries = Vec::new();
-        for (n, chunk) in classes.chunks(per_file.max(1)).enumerate() {
+        for (n, chunk) in parts_of(&classes, per_file).iter().enumerate() {
             let _ = writeln!(lib, "mod part{n};\npub use part{n}::*;");
             let part = self.part(chunk);
             registries.extend(registries_in(&part));
@@ -821,8 +968,8 @@ impl<'a> Program<'a> {
         let mut parts = vec![Vec::new(); groups];
         for (g, list) in parts.iter_mut().enumerate() {
             let mine: Vec<&ClassFile> = classes.iter().copied().filter(|c| group(&c.name).min(groups - 1) == g).collect();
-            for chunk in mine.chunks(per_file.max(1)) {
-                list.push(self.part(chunk));
+            for chunk in parts_of(&mine, per_file) {
+                list.push(self.part(&chunk));
             }
         }
         let lib = format!("{LIB_HEADER}use horizon_compat::{{api, Rt, V}};\n{}", self.tables(&classes));
@@ -1052,8 +1199,12 @@ impl<'a> Program<'a> {
                 let _ = writeln!(options, "        ({key:?}, ({priority}, {canceled})),");
             }
         }
-        let n = self.parts;
-        self.parts += 1;
+        // Named by the part's first class, so that a part added to another crate renames none of
+        // this one's (a number in order would, and with it change the text of every later part).
+        let mut n = hash(classes.first().map_or("", |c| c.name.as_str()));
+        while !self.registries.insert(n) {
+            n = n.wrapping_add(1);
+        }
         format!(
             "{code}/// What this part registers with the engine's class space.\n\
              pub static REGISTRY_{n}: Registry = Registry {{\n    classes: &[\n{defs}    ],\n    lambdas: &[\n{lambdas}    ],\n    added: &[\n{added}    ],\n    game_interfaces: &[\n{game}    ],\n    subscriber_options: &[\n{options}    ],\n}};\n"
@@ -1080,8 +1231,17 @@ impl<'a> Program<'a> {
             }
         }
         // A class's declared fields (`getDeclaredFields`, `Field.getType`): a line of `access name
-        // descriptor` per field.
-        let fields = c.fields.iter().map(|f| format!("{} {} {}", f.access, f.name, f.desc)).collect::<Vec<_>>().join("\n");
+        // descriptor` per field, with its generic signature after where it has one (what a list
+        // holds, for whoever fills one by the field's type); and before them the class's own
+        // (`0 <class> signature`: its supertypes' type arguments).
+        let class_signature = c.signature.iter().map(|s| format!("0 <class> {s}"));
+        let fields = class_signature
+            .chain(c.fields.iter().map(|f| match &f.signature {
+                Some(s) => format!("{} {} {} {s}", f.access, f.name, f.desc),
+                None => format!("{} {} {}", f.access, f.name, f.desc),
+            }))
+            .collect::<Vec<_>>()
+            .join("\n");
         let annotations = annotation_lines(c).unwrap_or_default();
         // `@SubscribeEvent` methods: what `bus.register(...)` and `@EventBusSubscriber` listen with.
         let subscribers: Vec<String> = subscribers_of(c)
@@ -1417,6 +1577,10 @@ impl<'a> Program<'a> {
         }
         // The head's weaves; a whole method's wrapper goes round this body instead.
         let head: Vec<Weave> = cur.weaves.iter().filter(|w| w.at == At::Head && w.kind != Kind::WrapMethod).cloned().collect();
+        // A long block is cut into functions ([`cut`]) where nothing is woven: woven code names
+        // what this function holds.
+        let cuts = cur.weaves.is_empty();
+        let (mut block, mut block_at, mut pieces) = (Vec::new(), 0, String::new());
         self.cur = Some(cur);
         for w in &head {
             let code = match w.kind {
@@ -1458,9 +1622,29 @@ impl<'a> Program<'a> {
             // An arm per basic block: an instruction joined to the one before goes on in its arm.
             if !joined.contains(&i.at) {
                 let _ = write!(s, "            {} => {{", i.at);
+                block_at = i.at;
             }
-            let _ = write!(s, " {body}");
+            block.push(body);
             if !joined.contains(&next) {
+                if cuts && block.iter().map(String::len).sum::<usize>() > self.long_block.0 {
+                    let sizes = (
+                        (code.max_locals as usize).max(1),
+                        usize::from(code.max_stack.max(1)),
+                    );
+                    s.push_str(&cut(
+                        &f,
+                        block_at,
+                        &block,
+                        self.long_block.1,
+                        sizes,
+                        &mut pieces,
+                    ));
+                } else {
+                    for body in &block {
+                        let _ = write!(s, " {body}");
+                    }
+                }
+                block.clear();
                 let _ = writeln!(s, " }}");
             }
         }
@@ -1481,6 +1665,7 @@ impl<'a> Program<'a> {
         let _ = writeln!(s, "            }}");
         let _ = writeln!(s, "            _ => return V::Void,");
         let _ = writeln!(s, "        }}\n    }}\n}}\n");
+        s.push_str(&pieces);
         self.cur = None;
         if let Some(w) = wrap {
             let lkey = format!("{key}#wrap");
@@ -1496,7 +1681,8 @@ impl<'a> Program<'a> {
             let op_fn = format!("{f}__op");
             let _ = writeln!(
                 s,
-                "pub fn {op_fn}(rt: &mut Rt, all: &[V]) -> V {{\n    let arr = all.last().copied().unwrap_or_default();\n    let mut a: Vec<V> = all.get(..{recv}).unwrap_or_default().to_vec();\n    a.extend([{}]);\n    let r = {body_name}(rt, &a);\n    {}\n}}\n",
+                "pub fn {op_fn}(rt: &mut Rt, all: &[V]) -> V {{\n    let arr = all.last().copied().unwrap_or_default();\n    let mut a: Vec<V> = all.get(..{recv}).unwrap_or_default().to_vec();\n    a.extend::<[V; {}]>([{}]);\n    let r = {body_name}(rt, &a);\n    {}\n}}\n",
+                arg_kinds(desc).len(),
                 unboxed_items(&arg_kinds(desc)),
                 boxed(return_kind(desc))
             );
@@ -1799,10 +1985,10 @@ impl<'a> Program<'a> {
             0x5d => format!(
                 "let a = {pop}; if matches!(a, V::J(_) | V::D(_)) {{ let b = {pop}; s.push(a); s.push(b); s.push(a); }} else {{ let b = {pop}; let c = {pop}; s.push(b); s.push(a); s.push(c); s.push(b); s.push(a); }} {go}"
             ),
-            0x5e => {
-                self.unsupported("dup2_x2");
-                go
-            }
+            // dup2_x2, by what the top values are (JVMS 6.5): a long or double is one value here.
+            0x5e => format!(
+                "let a = {pop}; let b = {pop}; if matches!(a, V::J(_) | V::D(_)) {{ if matches!(b, V::J(_) | V::D(_)) {{ s.push(a); s.push(b); s.push(a); }} else {{ let c = {pop}; s.push(a); s.push(c); s.push(b); s.push(a); }} }} else {{ let c = {pop}; if matches!(c, V::J(_) | V::D(_)) {{ s.push(b); s.push(a); s.push(c); s.push(b); s.push(a); }} else {{ let d = {pop}; s.push(b); s.push(a); s.push(d); s.push(c); s.push(b); s.push(a); }} }} {go}"
+            ),
             0x5f => format!("let a = {pop}; let b = {pop}; s.push(a); s.push(b); {go}"),
             0x60 => bin("i", "I", "a.wrapping_add(b)"),
             0x61 => bin("j", "J", "a.wrapping_add(b)"),
@@ -2676,6 +2862,92 @@ mod field_tests {
         let p = super::Program::new(&classes);
         assert_eq!(p.field_owner("m/Child", "SHAPED"), "api/Serializer");
         assert_eq!(p.field_owner("m/MyItem", "ID"), "api/Item");
+    }
+
+    /// A class added between two others takes an id past theirs when the earlier translation's
+    /// ids are kept, so what the others' crates say of themselves stays the same text.
+    #[test]
+    fn kept_ids_number_only_what_is_new() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("horizon-kept-ids-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        let files = [
+            (
+                "m/A.java",
+                "package m; public class A { Runnable r() { return () -> new C(); } }",
+            ),
+            (
+                "m/B.java",
+                "package m; public class B { Runnable r() { return () -> new A(); } }",
+            ),
+            (
+                "m/C.java",
+                "package m; public class C { Runnable r() { return () -> new C(); } }",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let class = |c: &str| ClassFile::parse(&std::fs::read(root.join(c)).unwrap()).unwrap();
+        let (two, three) = (
+            vec![class("m/A.class"), class("m/C.class")],
+            vec![class("m/A.class"), class("m/B.class"), class("m/C.class")],
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let mut first = super::Program::new(&two);
+        let before = first.emit();
+        let ids = first.ids();
+        assert!(
+            ids.contains("c 1 m/A\n") && ids.contains("c 2 m/C\n"),
+            "{ids}"
+        );
+        // Numbered afresh, the class in the middle takes the last one's id.
+        let mut afresh = super::Program::new(&three);
+        afresh.emit();
+        assert!(afresh.ids().contains("c 2 m/B\n") && afresh.ids().contains("c 3 m/C\n"));
+        let mut kept = super::Program::new(&three);
+        kept.keep_ids(&ids);
+        let after = kept.emit();
+        let now = kept.ids();
+        assert!(
+            now.contains("c 1 m/A\n") && now.contains("c 2 m/C\n") && now.contains("c 3 m/B\n"),
+            "{now}"
+        );
+        for line in ids.lines() {
+            assert!(
+                now.lines().any(|l| l == line),
+                "{line} is not kept in\n{now}"
+            );
+        }
+        assert_eq!(now.lines().filter(|l| l.starts_with("l ")).count(), 3);
+        // What the first program said of `C` it says again: its objects' id, its lambda's.
+        let mentions = |text: &str| {
+            text.lines()
+                .filter(|l| l.contains("\"m/C\"") && l.contains("new_object_id"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert!(!mentions(&before).is_empty());
+        assert!(mentions(&before).iter().all(|l| after.contains(l.as_str())));
+        // A class the next translation lacks keeps its id for when it is back.
+        let mut without = super::Program::new(&two);
+        without.keep_ids(&now);
+        without.emit();
+        assert!(without.ids().contains("c 3 m/B\n"));
+        // And a part's registry is named by its first class, whatever was emitted before it.
+        assert_eq!(super::registries_in(&before), super::registries_in(&after));
     }
 
     /// A write to `Entity.hurtMarked` is kept, then told to the runtime (a server sends the marked

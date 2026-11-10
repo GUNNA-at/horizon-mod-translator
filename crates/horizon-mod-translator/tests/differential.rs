@@ -16,6 +16,13 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("floats", "(I)D", &["0", "10", "1000"]),
     ("bits", "(I)I", &["0", "-1", "123456789", "-2147483648"]),
     ("longBits", "(J)J", &["0", "-1", "123456789012"]),
+    ("wideStores", "(J)J", &["0", "7", "-123456789012"]),
+    ("charParts", "(I)I", &["0", "3", "30"]),
+    ("threads", "(I)I", &["0", "4"]),
+    ("jdkStatics", "(I)J", &["0", "9", "20", "36"]),
+    ("jdkColor", "(I)J", &["0", "77", "300"]),
+    ("jdkMath", "(I)J", &["0", "5", "12345"]),
+    ("jdkText", "(I)J", &["0", "9", "25"]),
     ("overflow", "(I)I", &["0", "3000", "-77777"]),
     ("casts", "(D)I", &["0", "1e10", "-3.75", "65601.5", "NaN"]),
     ("nested", "(I)I", &["0", "5", "40"]),
@@ -64,6 +71,15 @@ fn rust_value(desc: &str, input: &str) -> String {
 fn translated_fixture_matches_the_jvm() {
     if !has("javac") || !has("java") {
         eprintln!("no JDK: skipped");
+        return;
+    }
+    // The game's Java runtime, whose own code the fixture's `jdk` cases run.
+    let image = horizon_mod_translator::find_java_image();
+    if image.is_none() {
+        eprintln!(
+            "no Java {} runtime: skipped",
+            horizon_mod_translator::JAVA_VERSION
+        );
         return;
     }
     let root = std::env::temp_dir().join(format!("mod-translator-diff-{}", std::process::id()));
@@ -119,7 +135,15 @@ fn translated_fixture_matches_the_jvm() {
     jar_of(&jar, &packed, ".");
 
     // Translate what the mod can run: the library as far as it reaches.
-    let parsed = horizon_mod_translator::classes(&jar).unwrap();
+    // With the Java runtime's own code (`jdk_code`), as a bundle takes it.
+    let image = image.unwrap();
+    let mut parsed = horizon_mod_translator::program_with(&[&jar], &[], &[&image])
+        .unwrap()
+        .0;
+    assert!(
+        parsed.iter().any(|c| c.name == "java/awt/Color"),
+        "the JDK's classes are part of the program"
+    );
     let methods = |class: &str| -> Option<Vec<String>> {
         let c = parsed.iter().find(|c| c.name == class)?;
         Some(c.methods.iter().filter(|m| m.code.is_some()).map(|m| m.name.clone()).collect())
@@ -130,9 +154,63 @@ fn translated_fixture_matches_the_jvm() {
     assert!(methods("lib/Circle").unwrap().iter().all(|m| m == "<init>"), "never made, so none of its methods run");
     assert!(methods("lib/Counter").unwrap().contains(&"peek".to_owned()), "handed out as a JDK interface: all of it stays");
     assert_eq!(methods("lib/Callback").unwrap(), ["accept"], "a lambda is of its interface: the default method called on it runs");
+    // And the JDK's static methods the runtime has no answer for, where their own code can stand
+    // (`derive`), carried as a bundle carries them.
+    let carried = {
+        use horizon_mod_translator::derive::{Deriver, Game, Mapped, is_jdk};
+        let game = Game::open(&[&image]).unwrap();
+        let own: std::collections::HashSet<&str> = parsed.iter().map(|c| c.name.as_str()).collect();
+        let refs: Vec<_> = parsed.iter().collect();
+        let calls = horizon_mod_translator::code_calls(&refs, &|c| is_jdk(c) && !own.contains(c));
+        let asks = |m: &horizon_mod_translator::class::Member, _: bool| {
+            let key: &'static str =
+                Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
+            let mut rt = horizon_compat::Rt::new();
+            horizon_compat::api::call(&mut rt, key, &[horizon_compat::V::NULL; 6]);
+            rt.unmapped.is_empty()
+        };
+        let mapped = Mapped {
+            method: &asks,
+            field: &|_, _, _| false,
+            constant: &|_| false,
+            translated: &|c| own.contains(c),
+        };
+        let mut deriver = Deriver::new(&game, mapped);
+        let mut stood = Vec::new();
+        for (m, (_, is_static)) in &calls {
+            if *is_static
+                && !asks(m, true)
+                && deriver
+                    .blockers(&m.owner, &m.name, &m.desc, false)
+                    .is_empty()
+            {
+                stood.push(format!("{}.{}", m.owner, m.name));
+            }
+        }
+        for want in [
+            "java/util/Arrays.binarySearch",
+            "java/util/Arrays.toString",
+            "java/lang/Long.rotateLeft",
+            "java/lang/Character.isISOControl",
+        ] {
+            assert!(
+                stood.iter().any(|s| s == want),
+                "{want} does not stand: {stood:?}"
+            );
+        }
+        horizon_mod_translator::codegen::set_accessors(deriver.accessors.clone());
+        deriver.classes()
+    };
+    parsed.extend(carried);
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);
     program.services = horizon_mod_translator::services(&jar).unwrap();
+    // Small enough that the fixture's longer blocks are cut into functions, and its short ones not.
+    program.long_block = (600, 200);
     let module = program.emit();
+    assert!(
+        module.contains("#[inline(never)]\nfn j_"),
+        "no block of the fixture was cut"
+    );
 
     // The generated crate.
     let krate = root.join("gen");
@@ -163,8 +241,14 @@ fn translated_fixture_matches_the_jvm() {
                 "    let r = {f}(&mut rt, &[{}]); println!(\"{name}({input}) = {{}}\", {fmt});\n",
                 rust_value(desc, input)
             ));
+            // What it left thrown, for whoever reads a mismatch.
+            main.push_str(&format!(
+                "    if let Some(t) = rt.thrown.take() {{ eprintln!(\"{name}({input}) threw {{}}\", rt.class_of(t)); }}\n"
+            ));
         }
     }
+    // And what the runtime had no answer for.
+    main.push_str("    let mut unmapped: Vec<_> = rt.unmapped.keys().collect();\n    unmapped.sort();\n    for k in unmapped { eprintln!(\"unmapped {k}\"); }\n");
     main.push_str("}\n");
     fs::write(krate.join("src/main.rs"), main).unwrap();
     fs::write(krate.join("src/fixture.rs"), &module).unwrap();
@@ -176,8 +260,9 @@ fn translated_fixture_matches_the_jvm() {
         .unwrap();
     assert!(out.status.success(), "generated crate failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let actual = String::from_utf8(out.stdout).unwrap();
+    let notes = String::from_utf8_lossy(&out.stderr);
     for (e, a) in expected.lines().zip(actual.lines()) {
-        assert_eq!(a, e);
+        assert_eq!(a, e, "{notes}");
     }
     assert_eq!(expected.lines().count(), CASES.iter().map(|c| c.2.len()).sum::<usize>(), "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());

@@ -961,8 +961,15 @@ fn derived_classes(
     let game = horizon_mod_translator::derive::Game::open(game)?;
     let own: std::collections::HashSet<&str> = program.iter().map(|c| c.name.as_str()).collect();
     let all: Vec<&horizon_mod_translator::class::ClassFile> = program.iter().collect();
-    let calls = horizon_mod_translator::code_calls(&all, &|c| {
-        horizon_mod_translator::is_api(c) && !own.contains(c)
+    // What the program calls of the API, and the static methods it calls of the Java runtime's
+    // classes (`Arrays.binarySearch`, `Math.nextUp`): where the runtime has no answer, the JDK's
+    // own code may stand as the game's does.
+    let mut calls = horizon_mod_translator::code_calls(&all, &|c| {
+        (horizon_mod_translator::is_api(c) || horizon_mod_translator::derive::is_jdk(c))
+            && !own.contains(c)
+    });
+    calls.retain(|m, (_, is_static)| {
+        *is_static || !horizon_mod_translator::derive::is_jdk(&m.owner)
     });
     let statics_called = calls
         .iter()
@@ -1028,6 +1035,15 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // A jar of the pack that is no mod (a language loader's library, code two mods share) is a
+        // library: what the mods reach of it is translated.
+        let (with, plain): (Vec<&Path>, Vec<&Path>) = with
+            .into_iter()
+            .partition(|j| horizon_mod_translator::bundle::mod_id(j).is_some());
+        for j in &plain {
+            println!("{}: no mod of its own, taken as a library", j.display());
+        }
+        libraries.extend(plain);
         let jars: Vec<&Path> = std::iter::once(Path::new(&args[1])).chain(with).collect();
         // No `--game`: the player's own NeoForge install, where a launcher keeps one.
         let found = if game.is_empty() && find_game {
@@ -1046,12 +1062,40 @@ fn main() -> ExitCode {
             );
         }
         game.extend(found.iter().map(|p| p.as_path()));
+        // With the game's own code, the Java runtime's: the classes of it that are plain code
+        // (`jdk_code`), from the runtime a launcher installed for the game.
+        let java = if game.is_empty() {
+            None
+        } else {
+            horizon_mod_translator::find_java_image()
+        };
+        if let Some(image) = &java {
+            println!("the Java runtime's own code from {}", image.display());
+            game.push(image);
+        }
         let result = horizon_mod_translator::program_with(&jars, &libraries, &game).and_then(|(mut c, library, kept)| {
             println!("{} classes, {kept} of them of the {library} in the libraries the jars bundle", c.len());
             if !game.is_empty() {
+                let jdk = c.iter().filter(|k| horizon_mod_translator::jdk_code(&k.name)).count();
+                if java.is_some() {
+                    println!("  of the Java runtime's own code: {jdk} classes");
+                }
                 let own = c.iter().filter(|k| horizon_mod_translator::game_code(&k.name)).count();
                 let derived = derived_classes(&c, &game)?;
                 println!("  of the game's own code: {own} classes the runtime doesn't model, and {} methods of {} it does", derived.iter().map(|k| k.methods.len()).sum::<usize>(), derived.len());
+                let of_java = |k: &&horizon_mod_translator::class::ClassFile| {
+                    k.name.strip_prefix(horizon_compat::linked::DERIVED).is_some_and(horizon_mod_translator::derive::is_jdk)
+                };
+                if java.is_some() {
+                    println!("  and of the Java runtime's: {} methods of {} classes it models", derived.iter().filter(of_java).map(|k| k.methods.len()).sum::<usize>(), derived.iter().filter(of_java).count());
+                }
+                if std::env::var_os("HZ_DEBUG_DERIVED_JDK").is_some() {
+                    for k in derived.iter().filter(of_java) {
+                        for m in &k.methods {
+                            eprintln!("jdk-derived {}.{}.{}", k.name, m.name, m.desc);
+                        }
+                    }
+                }
                 c.extend(derived);
             }
             horizon_mod_translator::bundle::write_group(&jars, &c, Path::new(&args[2]), runtime)
@@ -1251,7 +1295,7 @@ fn main() -> ExitCode {
         // GAME_JARS (the NeoForge install's jars, `:` between them): the game's own code the mod
         // reaches is translated with it (`program_with`), so a call into it is no call of the API:
         // it runs the game's method, where the class (or one below it) has it with code.
-        let game_jars: Vec<std::path::PathBuf> = std::env::var("GAME_JARS")
+        let mut game_jars: Vec<std::path::PathBuf> = std::env::var("GAME_JARS")
             .map(|v| {
                 v.split(':')
                     .filter(|p| !p.is_empty())
@@ -1259,6 +1303,10 @@ fn main() -> ExitCode {
                     .collect()
             })
             .unwrap_or_default();
+        // And the Java runtime's own code with it, as `bundle` takes it.
+        if !game_jars.is_empty() {
+            game_jars.extend(horizon_mod_translator::find_java_image());
+        }
         let game_refs: Vec<&Path> = game_jars.iter().map(|p| p.as_path()).collect();
         let with_game = if game_refs.is_empty() {
             Vec::new()
@@ -1402,14 +1450,17 @@ fn main() -> ExitCode {
         // count as mapped; for the rest, what blocks it (listed with DERIVE=1).
         let (mut stands, mut stand_sites) = (0usize, 0usize);
         let mut derive_lines = Vec::new();
-        if !game_refs.is_empty()
-            && let Ok(game) = horizon_mod_translator::derive::Game::open(&game_refs)
-        {
+        let game = if game_refs.is_empty() {
+            None
+        } else {
+            horizon_mod_translator::derive::Game::open(&game_refs).ok()
+        };
+        if let Some(game) = &game {
             let constant = |field: &str| probe.constant(field);
             let reads = |owner: &str, name: &str, desc: &str| probe.reads(owner, name, desc);
             let translated = |c: &str| game_part.contains_key(c);
             let mut deriver = horizon_mod_translator::derive::Deriver::new(
-                &game,
+                game,
                 horizon_mod_translator::derive::Mapped {
                     method: &asks,
                     field: &reads,
@@ -1515,6 +1566,31 @@ fn main() -> ExitCode {
             };
             let (mut mapped, mut sites, mut mapped_sites) = (0usize, 0usize, 0usize);
             let mut missing: Vec<(usize, String)> = Vec::new();
+            // What the Java runtime's own code answers, as a bundle made with the install takes
+            // it: a class of it translated with the mod (`jdk_code`), and a static method of a
+            // class the runtime models whose code stands over what it maps (`derive`).
+            let jdk_classes: std::collections::HashSet<&str> = with_game
+                .iter()
+                .map(|c| c.name.as_str())
+                .filter(|n| horizon_mod_translator::jdk_code(n))
+                .collect();
+            let (constant, reads, translated) = (
+                |field: &str| probe.constant(field),
+                |owner: &str, name: &str, desc: &str| probe.reads(owner, name, desc),
+                |c: &str| game_part.contains_key(c) || jdk_classes.contains(c),
+            );
+            let mut jdk_deriver = game.as_ref().map(|game| {
+                horizon_mod_translator::derive::Deriver::new(
+                    game,
+                    horizon_mod_translator::derive::Mapped {
+                        method: &asks,
+                        field: &reads,
+                        constant: &constant,
+                        translated: &translated,
+                    },
+                )
+            });
+            let (mut jdk_code, mut jdk_stands) = (0usize, 0usize);
             for (m, n) in &libs {
                 let key: &'static str =
                     Box::leak(format!("{}.{}.{}", m.owner, m.name, m.desc).into_boxed_str());
@@ -1522,6 +1598,12 @@ fn main() -> ExitCode {
                 let arity = horizon_mod_translator::codegen::arg_kinds(&m.desc).len()
                     + usize::from(!is_static);
                 sites += n;
+                if jdk_classes.contains(m.owner.as_str()) {
+                    jdk_code += 1;
+                    mapped += 1;
+                    mapped_sites += n;
+                    continue;
+                }
                 let owner: &'static str = Box::leak(m.owner.clone().into_boxed_str());
                 let mut receivers = vec![Receiver::Null, Receiver::Bare, Receiver::Init];
                 receivers.extend(made_lib.get(owner).map_or(&[][..], Vec::as_slice).iter().copied());
@@ -1532,7 +1614,14 @@ fn main() -> ExitCode {
                     fills.iter().any(|&fill| receivers.iter().any(|&r| answers(key, owner, arity, r, fill, true)))
                         || (hosted && answers(key, owner, arity, Receiver::Sample, Args::Instance, true))
                 };
-                if answered {
+                let stands = !answered
+                    && is_static
+                    && horizon_mod_translator::derive::is_jdk(&m.owner)
+                    && jdk_deriver
+                        .as_mut()
+                        .is_some_and(|d| d.blockers(&m.owner, &m.name, &m.desc, false).is_empty());
+                if answered || stands {
+                    jdk_stands += usize::from(stands);
                     mapped += 1;
                     mapped_sites += n;
                 } else {
@@ -1546,6 +1635,11 @@ fn main() -> ExitCode {
                 100.0 * mapped as f64 / libs.len().max(1) as f64,
                 100.0 * mapped_sites as f64 / sites.max(1) as f64
             );
+            if game.is_some() {
+                println!(
+                    "  by the Java runtime's own code: {jdk_code} methods of classes translated with the mod, {jdk_stands} static methods standing for unmapped ones"
+                );
+            }
             if std::env::var_os("MISSING").is_some() {
                 for (n, k) in &missing {
                     println!("  lib-missing {n:5} {k}");

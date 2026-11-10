@@ -200,10 +200,13 @@ fn declared_fields(rt: &mut Rt, class: &str) -> Option<Vec<(u16, String, String)
     Some(
         lines
             .lines()
+            // `access name descriptor`, then the field's generic signature where it has one; a
+            // name in angle brackets is no field (the class's own signature).
             .filter_map(|l| {
-                let mut p = l.splitn(3, ' ');
+                let mut p = l.splitn(4, ' ');
                 Some((p.next()?.parse().ok()?, p.next()?.to_owned(), p.next()?.to_owned()))
             })
+            .filter(|f: &(u16, String, String)| !f.1.starts_with('<'))
             .collect(),
     )
 }
@@ -546,7 +549,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let ks = kinds(desc);
     match owner {
         "java/lang/String" | "java/lang/CharSequence" => string(rt, name, desc, &ks, args),
-        "java/lang/StringBuilder" | "java/lang/StringBuffer" | "java/lang/AbstractStringBuilder" => builder(rt, name, &ks, args),
+        "java/lang/StringBuilder" | "java/lang/StringBuffer" | "java/lang/AbstractStringBuilder" => builder(rt, name, desc, &ks, args),
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Double" | "java/lang/Float" | "java/lang/Number" => number(rt, owner, name, desc, &ks, args),
         // One runtime runs on one thread, so a thread-local is one value, made by its supplier on
         // the first `get` (`ThreadLocal.withInitial(ArrayList::new)`).
@@ -881,6 +884,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),
             "isInterface" | "isRecord" => V::I(0),
+            // Every class a mod can name is one it may use: public.
+            "getModifiers" => V::I(1),
             // A mod class's annotations (`@Inherited` ones from its superclasses unless asked
             // for the declared ones).
             "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
@@ -985,17 +990,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
         // One runtime runs on one game thread, so it is the same `Thread` each time it asks: ESL's
         // transactions (Create: New Age's energy) check `this.thread != Thread.currentThread()`.
-        "java/lang/Thread" => Some(match name {
-            "currentThread" => rt.intern("compat:thread".into(), |rt| rt.new_object("java/lang/Thread")),
-            "getName" => {
-                let name = if crate::neo::is_client(rt) { "Render thread" } else { "Server thread" };
-                rt.string(name)
-            }
-            "isAlive" => V::I(1),
-            "isInterrupted" | "isDaemon" | "interrupted" => V::I(0),
-            "sleep" | "yield" | "onSpinWait" | "interrupt" => V::Void,
-            _ => return None,
-        }),
+        // A thread a mod starts runs its body there at once.
+        "java/lang/Thread" => crate::jsystem::thread(rt, name, desc, args),
         "java/lang/Runtime" => Some(match name {
             "getRuntime" => rt.new_object("java/lang/Runtime"),
             "availableProcessors" => V::I(std::thread::available_parallelism().map_or(4, |n| n.get() as i32)),
@@ -1040,7 +1036,13 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
             let s = match ks.first() {
                 Some('L') if rt.class_of(a(0)).starts_with('[') => {
                     let chars: Vec<u16> = crate::jutil::elements(rt, a(0)).iter().map(|v| v.i() as u16).collect();
-                    from16(&chars)
+                    // `valueOf(chars, offset, count)`: that part.
+                    let range = if desc.starts_with("([CII)") {
+                        span(a(1), a(2), chars.len())
+                    } else {
+                        0..chars.len()
+                    };
+                    from16(&chars[range])
                 }
                 Some(&k) => rt.to_java_string(a(0), k),
                 None => String::new(),
@@ -1075,6 +1077,15 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
                     let points: Vec<i32> = crate::jutil::elements(rt, a(1)).iter().map(|v| v.i()).collect();
                     let range = span(a(2), a(3), points.len());
                     points.get(range).unwrap_or(&[]).iter().map(|&p| char::from_u32(p as u32).unwrap_or('\u{FFFD}')).collect()
+                }
+                // `new String(ascii, hibyte, offset, count)`: each byte a character, under the
+                // high byte given (the JDK's own code builds its ASCII strings so).
+                "([BIII)V" => {
+                    let bytes: Vec<u16> = crate::jutil::elements(rt, a(1))
+                        .iter()
+                        .map(|v| (a(2).i() as u16) << 8 | u16::from(v.i() as u8))
+                        .collect();
+                    from16(bytes.get(span(a(3), a(4), bytes.len())).unwrap_or(&[]))
                 }
                 d if d.starts_with("([B") => {
                     let bytes: Vec<u8> = crate::jutil::elements(rt, a(1)).iter().map(|v| v.i() as u8).collect();
@@ -1440,9 +1451,18 @@ fn fixed_half_up(x: f64, prec: usize) -> String {
     out
 }
 
-fn builder(rt: &mut Rt, name: &str, ks: &[char], args: &[V]) -> Option<V> {
+fn builder(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
+    // A `char[]` argument's text: an array has no class of its elements unless a string made it.
+    let chars = |rt: &Rt, v: V| {
+        from16(
+            &crate::jutil::elements(rt, v)
+                .iter()
+                .map(|v| v.i() as u16)
+                .collect::<Vec<_>>(),
+        )
+    };
     let cur = |rt: &Rt| match rt.heap.get(this.r() as usize).map(|o| &o.data) {
         Some(Data::Str(s)) => s.clone(),
         _ => String::new(),
@@ -1463,9 +1483,20 @@ fn builder(rt: &mut Rt, name: &str, ks: &[char], args: &[V]) -> Option<V> {
         }
         "append" => {
             let piece = match ks.first() {
-                Some('L') if rt.class_of(a(1)) == "[C" => from16(&crate::jutil::elements(rt, a(1)).iter().map(|v| v.i() as u16).collect::<Vec<_>>()),
+                Some('L') if desc.starts_with("([C") || rt.class_of(a(1)) == "[C" => {
+                    chars(rt, a(1))
+                }
                 Some(&k) => rt.to_java_string(a(1), k),
                 None => String::new(),
+            };
+            // `append(CharSequence, start, end)` and `append(char[], offset, count)`: that part.
+            let piece = if ks.len() == 3 {
+                let u = utf16(&piece);
+                let (x, y) = (a(2).i().max(0) as usize, a(3).i().max(0) as usize);
+                let to = if desc.starts_with("([C") { x + y } else { y }.min(u.len());
+                from16(&u[x.min(to)..to])
+            } else {
+                piece
             };
             let s = cur(rt) + &piece;
             set(rt, s);
@@ -1474,7 +1505,12 @@ fn builder(rt: &mut Rt, name: &str, ks: &[char], args: &[V]) -> Option<V> {
         "insert" => {
             let mut u = utf16(&cur(rt));
             let at = (a(1).i().max(0) as usize).min(u.len());
-            let piece = utf16(&rt.to_java_string(a(2), ks.get(1).copied().unwrap_or('L')));
+            let piece = if desc.starts_with("(I[C") {
+                chars(rt, a(2))
+            } else {
+                rt.to_java_string(a(2), ks.get(1).copied().unwrap_or('L'))
+            };
+            let piece = utf16(&piece);
             u.splice(at..at, piece);
             set(rt, from16(&u));
             this
@@ -1561,6 +1597,11 @@ fn index_of(hay: &[u16], needle: &[u16], from: Option<i32>, last: bool) -> i32 {
 
 fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // A number class of a mod's or a library's (`BigInteger` as the JDK's own code) starts as any
+    // object does.
+    if owner == "java/lang/Number" && name == "<init>" {
+        return Some(V::Void);
+    }
     let simple = owner.rsplit('/').next().unwrap_or(owner);
     let boxed = |rt: &mut Rt, v: V| {
         let class: &'static str = match simple {
@@ -1618,6 +1659,16 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
             Some(_) => boxed(rt, a(1)),
             None => V::NULL,
         },
+        // `parseInt(text, begin, end, radix)`: that part of the text.
+        "parseInt" | "parseLong" if desc.starts_with("(Ljava/lang/CharSequence;III)") => {
+            let u = utf16(&text(rt, a(0)));
+            let part = from16(
+                u.get(span(a(1), V::I(a(2).i() - a(1).i()), u.len()))
+                    .unwrap_or(&[]),
+            );
+            let part = new_str(rt, part);
+            parse_number(rt, simple, part, a(3).i())
+        }
         "parseInt" | "parseLong" | "parseDouble" | "parseFloat" | "parseShort" | "parseByte" => parse_number(rt, simple, a(0), radix),
         "parseUnsignedInt" | "parseUnsignedLong" => {
             let long = name == "parseUnsignedLong";
@@ -1762,10 +1813,22 @@ fn number(rt: &mut Rt, owner: &str, name: &str, desc: &str, ks: &[char], args: &
             V::J(j) => j.trailing_zeros() as i32,
             v => v.i().trailing_zeros() as i32,
         }),
-        "highestOneBit" => V::I(match a(0).i() {
-            0 => 0,
-            i => 1i32.wrapping_shl(31 - (i as u32).leading_zeros()),
-        }),
+        "highestOneBit" => match a(0) {
+            V::J(j) => V::J(if j == 0 {
+                0
+            } else {
+                1i64 << (63 - j.leading_zeros())
+            }),
+            v => V::I(if v.i() == 0 {
+                0
+            } else {
+                1i32 << (31 - v.i().leading_zeros())
+            }),
+        },
+        "lowestOneBit" => match a(0) {
+            V::J(j) => V::J(j & j.wrapping_neg()),
+            v => V::I(v.i() & v.i().wrapping_neg()),
+        },
         "isNaN" => V::I(match a(0) {
             V::F(f) => f.is_nan(),
             V::D(d) => d.is_nan(),
@@ -2597,7 +2660,9 @@ mod tests {
         fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
             let fields = match (class, what) {
                 ("t/Base", "fields") => "1 owner Ljava/util/UUID;",
-                ("t/Tank", "fields") => "2 stored J\n1 levels [I\n25 MAX I",
+                ("t/Tank", "fields") => {
+                    "0 <class> Lt/Base;Ljava/util/function/Supplier<Ljava/lang/String;>;\n2 stored J\n1 levels [I Ljava/util/List<Ljava/lang/String;>;\n25 MAX I"
+                }
                 _ => return None,
             };
             Some(rt.string(fields))
@@ -3973,7 +4038,15 @@ fn number_format(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "getMinimumFractionDigits" => V::I(Digits::read(rt, a(0)).min_frac as i32),
         "isGroupingUsed" => V::I(Digits::read(rt, a(0)).grouping as i32),
         // Rounding is always half even here, as `DecimalFormat`'s default.
-        "setRoundingMode" | "setMaximumIntegerDigits" | "setParseIntegerOnly" | "setDecimalFormatSymbols" => V::Void,
+        "setRoundingMode"
+        | "setMaximumIntegerDigits"
+        | "setParseIntegerOnly"
+        | "setDecimalFormatSymbols"
+        | "setDecimalSeparatorAlwaysShown"
+        | "setParseBigDecimal"
+        | "setNegativePrefix"
+        | "setPositivePrefix"
+        | "setCurrency" => V::Void,
         "format" => {
             let x = match a(1) {
                 V::I(i) => f64::from(i),

@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**91.1%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.6%** of their call sites. Java's libraries: **94.3%** of the calls. Create alone: **98.0%** of its call sites. Run 51, 9 November 2026.
+**91.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.6%** of their call sites. Java's libraries: **95.1%** of the calls. Create alone: **98.0%** of its call sites. Run 53, 10 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -39,13 +39,13 @@ game's own code: a method the runtime doesn't have counts when the game's own me
 player's NeoForge install, can answer it.</sub>
 
 <!-- progress:table -->
-| Run 51, 367 jars | Methods answered | Call sites answered |
+| Run 53, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **91.1%**<br><sub>118,625 of 130,262</sub> | **95.6%**<br><sub>356,370 of 372,790</sub> |
-| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.0%**<br><sub>7,768 of 130,262</sub> | **2.9%**<br><sub>10,882 of 372,790</sub> |
-| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **83.5%**<br><sub>61,862 of 74,081</sub> | **94.3%**<br><sub>336,967 of 357,517</sub> |
+| Minecraft and NeoForge API | **91.0%**<br><sub>120,424 of 132,302</sub> | **95.6%**<br><sub>360,141 of 376,860</sub> |
+| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.0%**<br><sub>7,962 of 132,302</sub> | **2.9%**<br><sub>11,107 of 376,860</sub> |
+| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **85.5%**<br><sub>65,557 of 76,713</sub> | **95.1%**<br><sub>354,933 of 373,410</sub> |
 | Create 6.0.10, its API calls | **89.8%**<br><sub>3,570 of 3,976</sub> | **98.0%**<br><sub>24,731 of 25,245</sub> |
-| Create 6.0.10, its library calls | **82.8%**<br><sub>1,326 of 1,602</sub> | **97.5%**<br><sub>14,053 of 14,416</sub> |
+| Create 6.0.10, its library calls | **83.5%**<br><sub>1,338 of 1,602</sub> | **97.6%**<br><sub>14,066 of 14,416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -63,6 +63,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 53 | 2026-11-10 | 91.0% | 95.6% | 98.0% |
 | 51 | 2026-11-09 | 91.1% | 95.6% | 98.0% |
 | 50 | 2026-11-09 | 90.0% | 95.2% | 97.8% |
 | 49 | 2026-11-09 | 85.2% | 92.7% | 96.8% |
@@ -168,7 +169,7 @@ result comes from a scene set up by command, read back from the world's data and
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
   played both mods in one world.
 
-Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack has not been run in one game yet.
+Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in 87 minutes, but does not load into a world yet: its first launch stopped while the mods were being constructed.
 
 ## Try it
 
@@ -277,14 +278,14 @@ The API methods the most jars still miss, from the latest run:
 <!-- progress:gaps -->
 | Missing API method | Jars | Call sites |
 |---|---:|---:|
-| `Minecraft.getTextureManager()` | 46 | 106 |
-| `RenderSystem.getModelViewStack()` | 24 | 40 |
+| `Minecraft.getTextureManager()` | 47 | 107 |
+| `RenderSystem.getModelViewStack()` | 25 | 41 |
 | `TextureManager.register(ResourceLocation, AbstractTexture)` | 24 | 40 |
+| `ChunkMap.getPlayers(ChunkPos, boolean)` | 23 | 33 |
 | `Level.broadcastEntityEvent(Entity, byte)` | 22 | 78 |
 | `new DynamicTexture(NativeImage)` | 22 | 39 |
-| `ChunkMap.getPlayers(ChunkPos, boolean)` | 21 | 31 |
+| `BlockEntityRenderDispatcher.getRenderer(BlockEntity)` | 21 | 33 |
 | `PlayerEvent.PlayerChangedDimensionEvent.getEntity()` | 21 | 22 |
-| `MinecraftServer.reloadableRegistries()` | 20 | 43 |
 <!-- /progress -->
 
 <details>
@@ -293,14 +294,14 @@ The API methods the most jars still miss, from the latest run:
 <!-- progress:lib_gaps -->
 | Missing library method | Jars | Call sites |
 |---|---:|---:|
-| `Method.invoke(Object, Object[])` | 57 | 126 |
-| `Class.getDeclaredFields()` | 45 | 84 |
-| `Field.getType()` | 43 | 94 |
+| `Method.invoke(Object, Object[])` | 59 | 140 |
+| `Class.getDeclaredFields()` | 46 | 90 |
+| `Field.getType()` | 44 | 99 |
 | `Gson.fromJson(Reader, Class)` | 40 | 55 |
+| `Array.newInstance(Class, int)` | 36 | 76 |
 | `Gson.fromJson(String, Class)` | 35 | 68 |
-| `Modifier.isStatic(int)` | 34 | 65 |
-| `Array.newInstance(Class, int)` | 33 | 62 |
-| `new FileWriter(File)` | 33 | 46 |
+| `new FileWriter(File)` | 34 | 47 |
+| `Field.getModifiers()` | 32 | 75 |
 <!-- /progress -->
 
 </details>

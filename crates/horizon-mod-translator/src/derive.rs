@@ -24,6 +24,32 @@ use std::{
 /// method found here or above isn't the one to run (`Linked::derived` in horizon-compat-core).
 pub const MARK: &str = "!";
 
+/// Whether a class is the Java runtime's own (`java.*`, `javax.*`).
+pub fn is_jdk(class: &str) -> bool {
+    class.starts_with("java/") || class.starts_with("javax/")
+}
+
+/// The Java runtime's classes read for their code ([`Game::open`]): those of `java.lang`,
+/// `java.util` and `java.util.function` themselves, where the static helpers a mod calls are
+/// (`Arrays`, `Collections`, `Math`, `Character`).
+fn jdk_core(class: &str) -> bool {
+    ["java/lang/", "java/util/", "java/util/function/"]
+        .iter()
+        .any(|p| {
+            class
+                .strip_prefix(p)
+                .is_some_and(|rest| !rest.contains('/'))
+        })
+}
+
+/// The bootstrap methods the translator answers by itself (a lambda, a string joined from
+/// parts, a record's `toString`): an `invokedynamic` of one of them is no call to look into.
+const BOOTSTRAPS: [&str; 3] = [
+    "java/lang/invoke/LambdaMetafactory",
+    "java/lang/invoke/StringConcatFactory",
+    "java/lang/runtime/ObjectMethods",
+];
+
 /// More classes with code for one call than this, and it is not looked into: an interface every
 /// widget implements is the runtime's to answer.
 const MOST_CLASSES: usize = 24;
@@ -45,6 +71,22 @@ impl Game {
     pub fn open(jars: &[&Path]) -> Result<Game, String> {
         let mut classes = HashMap::new();
         for jar in jars {
+            // A Java runtime's image: the classes of its core packages, whose own code can stand
+            // for a static method of theirs the runtime doesn't map ([`is_jdk`]).
+            if crate::is_image(jar) {
+                let mut image = crate::jimage::Image::open(jar)?;
+                let names: Vec<String> = image
+                    .names()
+                    .filter(|n| jdk_core(n) && !crate::jdk_code(n) && !classes.contains_key(*n))
+                    .map(str::to_owned)
+                    .collect();
+                for name in names {
+                    if let Some(c) = image.class(&name).and_then(|b| ClassFile::parse(&b).ok()) {
+                        classes.insert(name, c);
+                    }
+                }
+                continue;
+            }
             let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
             let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", jar.display()))?;
             for i in 0..zip.len() {
@@ -374,6 +416,10 @@ impl<'a> Deriver<'a> {
         let Ok(insns) = insn::decode(&code.bytes) else {
             return BTreeSet::from([format!("{}.{}.{} [unreadable]", c.name, m.name, m.desc)]);
         };
+        // The Java runtime's own code is held to everything it asks: the game's may take the
+        // libraries for answered (the runtime models them as far as the game uses them), but
+        // the JDK's code reaches under itself, for what only a JVM has.
+        let strict = is_jdk(&c.name);
         let mut out = BTreeSet::new();
         for i in insns {
             let idx = match i.arg {
@@ -384,12 +430,17 @@ impl<'a> Deriver<'a> {
             match i.op {
                 0xb6..=0xb9 => {
                     if let Some(r) = c.member(idx) {
-                        out.extend(self.call(&r, i.op == 0xb8, matches!(i.op, 0xb6 | 0xb9)));
+                        out.extend(self.call(
+                            &r,
+                            i.op == 0xb8,
+                            matches!(i.op, 0xb6 | 0xb9),
+                            strict,
+                        ));
                     }
                 }
                 0xb2..=0xb5 => {
                     let Some(r) = c.member(idx) else { continue };
-                    if !crate::is_api(&r.owner) || (self.mapped.translated)(&r.owner) {
+                    if !(crate::is_api(&r.owner) || strict) || (self.mapped.translated)(&r.owner) {
                         continue;
                     }
                     let class = game
@@ -436,11 +487,14 @@ impl<'a> Deriver<'a> {
                     let Some((h, args)) = c.bootstrap.get(usize::from(bsm)).cloned() else {
                         continue;
                     };
-                    for a in std::iter::once(h).chain(args) {
+                    for (at, a) in std::iter::once(h).chain(args).enumerate() {
                         if let Some(Const::MethodHandle(kind, _)) = c.pool.get(usize::from(a))
                             && let Some((_, r)) = c.handle(a)
                         {
-                            out.extend(self.call(&r, *kind == 6, matches!(*kind, 5 | 9)));
+                            if at == 0 && BOOTSTRAPS.contains(&r.owner.as_str()) {
+                                continue;
+                            }
+                            out.extend(self.call(&r, *kind == 6, matches!(*kind, 5 | 9), strict));
                         }
                     }
                 }
@@ -477,9 +531,17 @@ impl<'a> Deriver<'a> {
         Some(key)
     }
 
-    /// The blockers of a call of `r` from code that stands.
-    fn call(&mut self, r: &Member, is_static: bool, dispatched: bool) -> BTreeSet<String> {
-        if !crate::is_api(&r.owner)
+    /// The blockers of a call of `r` from code that stands. `strict`: from the Java runtime's own
+    /// code, where a call of anything (but an array's own `clone`) must be answered or stand;
+    /// from the game's, a library's method is taken for answered.
+    fn call(
+        &mut self,
+        r: &Member,
+        is_static: bool,
+        dispatched: bool,
+        strict: bool,
+    ) -> BTreeSet<String> {
+        if !(crate::is_api(&r.owner) || (strict && !r.owner.starts_with('[')))
             || (self.mapped.translated)(&r.owner)
             || self.answers(r, is_static)
         {
@@ -570,6 +632,7 @@ impl<'a> Deriver<'a> {
                         name: format!("{MARK}{n}"),
                         desc: (*d).to_owned(),
                         annotations: Vec::new(),
+                        signature: None,
                     })
                     .collect(),
                 methods: methods
@@ -580,6 +643,7 @@ impl<'a> Deriver<'a> {
                     .collect(),
                 bootstrap: c.bootstrap.clone(),
                 annotations: Vec::new(),
+                signature: None,
             })
             .collect()
     }

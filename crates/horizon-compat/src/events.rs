@@ -155,6 +155,10 @@ fn for_player(rt: &mut Rt, class: &'static str, player: V, hand: V) -> V {
 /// gives the result a listener canceled it with, else null.
 fn hook(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // A mod vouching for a data component's class (NeoForge checks them in development only).
+    if name == "markComponentClassAsValid" {
+        return Some(V::Void);
+    }
     let ev = match name {
         // `(player, hand, pos, hit)`: the face is the hit's.
         "onRightClickBlock" => {
@@ -473,7 +477,14 @@ fn listened(rt: &mut Rt, class: &str) -> bool {
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     owner == TRI_STATE
-        || (owner == HOOKS && matches!(name, "onRightClickBlock" | "onLeftClickBlock" | "onInteractEntity"))
+        || (owner == HOOKS
+            && matches!(
+                name,
+                "onRightClickBlock"
+                    | "onLeftClickBlock"
+                    | "onInteractEntity"
+                    | "markComponentClassAsValid"
+            ))
         || owner == ATTACK
         || owner.starts_with(INTERACT)
         || owner.starts_with(PLAYER_EVENT)

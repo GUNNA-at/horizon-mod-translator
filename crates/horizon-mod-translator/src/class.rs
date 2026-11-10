@@ -122,6 +122,8 @@ pub struct Field {
     pub desc: String,
     /// Its annotations, the class-file-only ones (a mixin's `@Shadow`, `@Unique`) too.
     pub annotations: Vec<Annotation>,
+    /// Its generic signature (`Signature`: `Ljava/util/List<Lcom/.../Entry;>;`), if any.
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +139,9 @@ pub struct ClassFile {
     pub bootstrap: Vec<(u16, Vec<u16>)>,
     /// Its annotations (`@Mod`, `@EventBusSubscriber`...), the class-file-only ones (`@Mixin`) too.
     pub annotations: Vec<Annotation>,
+    /// Its generic signature (`Signature`: its type parameters and its supertypes' arguments), if
+    /// any.
+    pub signature: Option<String>,
 }
 
 struct Reader<'a> {
@@ -272,6 +277,7 @@ impl ClassFile {
             methods: Vec::new(),
             bootstrap: Vec::new(),
             annotations: Vec::new(),
+            signature: None,
         };
         cf.access = r.u2()?;
         cf.name = cf.class_name(r.u2()?)?;
@@ -283,7 +289,7 @@ impl ClassFile {
         }
         for _ in 0..r.u2()? {
             let (access, name, desc) = (r.u2()?, r.u2()?, r.u2()?);
-            let mut annotations = Vec::new();
+            let (mut annotations, mut signature) = (Vec::new(), None);
             for _ in 0..r.u2()? {
                 let an = r.u2()?;
                 let len = r.u4()? as usize;
@@ -292,8 +298,17 @@ impl ClassFile {
                 if matches!(attribute.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
                     annotations.extend(cf.annotations(&attribute, body)?);
                 }
+                if attribute == "Signature" && body.len() == 2 {
+                    signature = Some(cf.utf8(u16::from_be_bytes([body[0], body[1]]))?);
+                }
             }
-            cf.fields.push(Field { access, name: cf.utf8(name)?, desc: cf.utf8(desc)?, annotations });
+            cf.fields.push(Field {
+                access,
+                name: cf.utf8(name)?,
+                desc: cf.utf8(desc)?,
+                annotations,
+                signature,
+            });
         }
         for _ in 0..r.u2()? {
             let (access, name, desc) = (r.u2()?, r.u2()?, r.u2()?);
@@ -389,6 +404,9 @@ impl ClassFile {
             if matches!(attribute.as_str(), "RuntimeVisibleAnnotations" | "RuntimeInvisibleAnnotations") {
                 let more = cf.annotations(&attribute, body)?;
                 cf.annotations.extend(more);
+            }
+            if attribute == "Signature" && body.len() == 2 {
+                cf.signature = Some(cf.utf8(u16::from_be_bytes([body[0], body[1]]))?);
             }
             if cf.utf8(an)? == "BootstrapMethods" {
                 let mut b = Reader { b: body, i: 0 };

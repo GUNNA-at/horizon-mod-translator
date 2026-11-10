@@ -214,10 +214,10 @@ impl<'a> Walk<'a> {
         }
         self.init(class);
         let outside = self.is_library(class) && self.outside_supertype(class);
-        // The game's own code is too large to run whole behind each class with a supertype the
-        // runtime has: only what can be called there, and what a call through a type above the
+        // The game's own code (and the Java runtime's) is too large to run whole behind each class
+        // with a supertype the runtime has: only what can be called there, and what a call through a type above the
         // class reaches.
-        let narrow = (self.game.is_some() && crate::game_code(class))
+        let narrow = (self.game.is_some() && crate::install_code(class))
             .then(|| self.called_from_outside(class));
         for a in self.ancestors(class) {
             self.above_created.insert(a.to_owned());
@@ -264,7 +264,7 @@ impl<'a> Walk<'a> {
             // A method of the game's own: only where an object the call can reach has it (the
             // class is below the call's type, or above it and so inherited there).
             if self.game.is_some()
-                && crate::game_code(c)
+                && crate::install_code(c)
                 && self.known(owner)
                 && !self.ups(c).contains(owner)
                 && !self.ups(owner).contains(c)

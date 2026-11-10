@@ -2,6 +2,7 @@
 //! Horizon mods (`docs/mod-translator.md`).
 pub mod class;
 pub mod derive;
+pub mod jimage;
 pub mod reach;
 
 use class::{ClassFile, Member};
@@ -162,14 +163,134 @@ pub fn find_game_jars() -> Option<Vec<std::path::PathBuf>> {
     places.iter().find_map(|p| game_jars_in(p))
 }
 
+/// The Java runtime's classes that are plain code over what the runtime models, with no state of
+/// the machine's behind them: a class by name (with those nested in it) or every class of a
+/// package (`/` at the end). The translator takes them from the player's own Java runtime
+/// ([`find_java_image`]) as a library's, so a mod's `new Color(r, g, b)` or `BigDecimal.add` runs
+/// the JDK's own code and nothing is written for it here. None of them may be a class the runtime
+/// answers for itself.
+pub const JDK_CODE: &[&str] = &[
+    "java/awt/Color",
+    "java/awt/Dimension",
+    "java/awt/Insets",
+    "java/awt/Point",
+    "java/awt/Rectangle",
+    "java/awt/geom/",
+    "java/lang/reflect/Modifier",
+    "java/math/",
+    "java/net/URI",
+    "java/net/URISyntaxException",
+    "java/text/FieldPosition",
+    "java/text/ParsePosition",
+    "java/util/Base64",
+    "java/util/StringTokenizer",
+];
+
+/// Whether a class of the Java runtime is code to translate as a library's ([`JDK_CODE`]).
+pub fn jdk_code(class: &str) -> bool {
+    JDK_CODE.iter().any(|p| match class.strip_prefix(p) {
+        Some(rest) => p.ends_with('/') || rest.is_empty() || rest.starts_with('$'),
+        None => false,
+    })
+}
+
+/// Whether a class is code of the player's install, the game's or the Java runtime's
+/// ([`game_code`], [`jdk_code`]): translated as far as the mods reach into it.
+pub fn install_code(class: &str) -> bool {
+    game_code(class) || jdk_code(class)
+}
+
+/// Whether a path among the game's jars is a Java runtime's image ([`jimage`]) and no jar.
+pub(crate) fn is_image(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == "modules")
+}
+
+/// The Java version the game runs on: the runtime whose code is taken ([`find_java_image`]).
+pub const JAVA_VERSION: u16 = 21;
+
+/// The image of a Java runtime on this machine, for its code ([`JDK_CODE`]): the one under
+/// `HORIZON_JAVA_HOME` when set, else the runtime a launcher installed for the game
+/// (`java-runtime-delta`: Minecraft's own launcher, CurseForge), else `JAVA_HOME`'s. Only of the
+/// game's Java version ([`JAVA_VERSION`]): another version's classes are other code, over other
+/// classes of its own.
+pub fn find_java_image() -> Option<std::path::PathBuf> {
+    java_images()
+        .into_iter()
+        .find(|p| jimage::Image::open(p).is_ok_and(|mut i| i.java_version() == Some(JAVA_VERSION)))
+}
+
+fn java_images() -> Vec<std::path::PathBuf> {
+    /// `lib/modules` at `dir` or a few folders below it (a launcher's runtime sits under its
+    /// platform's name, and on macOS inside a bundle).
+    fn image_under(dir: &Path, depth: usize) -> Option<std::path::PathBuf> {
+        let image = dir.join("lib/modules");
+        if image.is_file() {
+            return Some(image);
+        }
+        if depth == 0 {
+            return None;
+        }
+        let mut below: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        below.sort();
+        below.iter().find_map(|d| image_under(d, depth - 1))
+    }
+    if let Some(dir) = std::env::var_os("HORIZON_JAVA_HOME") {
+        return image_under(Path::new(&dir), 0).into_iter().collect();
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    let mut places = Vec::new();
+    if let Some(home) = &home {
+        places.extend([
+            home.join("Library/Application Support/minecraft/runtime"),
+            home.join(".minecraft/runtime"),
+            home.join("Documents/curseforge/minecraft/Install/runtime"),
+            home.join("curseforge/minecraft/Install/runtime"),
+        ]);
+    }
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        places.push(Path::new(&roaming).join(".minecraft/runtime"));
+    }
+    let java_home = std::env::var_os("JAVA_HOME").and_then(|d| image_under(Path::new(&d), 0));
+    places
+        .iter()
+        .filter_map(|p| image_under(&p.join("java-runtime-delta"), 5))
+        .chain(java_home)
+        .collect()
+}
+
 /// The classes of the game's own jars that are code ([`game_code`]) and name no LWJGL class,
-/// without their annotations (the loader's own `@EventBusSubscriber` classes are not a mod's).
+/// without their annotations (the loader's own `@EventBusSubscriber` classes are not a mod's);
+/// and of a Java runtime's image among them, those that are ([`jdk_code`]).
 fn game_classes(
     jars: &[&Path],
     have: &mut std::collections::HashSet<String>,
 ) -> Result<Vec<ClassFile>, String> {
     let mut out = Vec::new();
     for jar in jars {
+        if is_image(jar) {
+            let mut image = jimage::Image::open(jar)?;
+            let names: Vec<String> = image
+                .names()
+                .filter(|n| jdk_code(n) && !have.contains(*n))
+                .map(str::to_owned)
+                .collect();
+            for name in names {
+                if let Some(mut c) = image.class(&name).and_then(|b| ClassFile::parse(&b).ok())
+                    && have.insert(c.name.clone())
+                {
+                    c.annotations.clear();
+                    out.push(c);
+                }
+            }
+            continue;
+        }
         let f = std::fs::File::open(jar).map_err(|e| format!("{}: {e}", jar.display()))?;
         let mut zip = zip::ZipArchive::new(f).map_err(|e| format!("{}: {e}", jar.display()))?;
         for i in 0..zip.len() {
@@ -268,7 +389,8 @@ pub fn language_libraries(group: &[&Path], pack: &[std::path::PathBuf]) -> Vec<s
 
 /// The jars a jar bundles for NeoForge's jar-in-jar, as bytes: each `.jar` under
 /// `META-INF/jarjar/` and each path `META-INF/jarjar/metadata.json` lists (often
-/// `META-INF/jars/...`). Mixin's helper library (MixinExtras) is left out: only mixins use it.
+/// `META-INF/jars/...`), and the jars those bundle in turn. Mixin's helper library (MixinExtras)
+/// is left out: only mixins use it.
 fn nested_jars<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<Vec<u8>> {
     let mut paths: Vec<String> = Vec::new();
     for i in 0..zip.len() {
@@ -295,15 +417,22 @@ fn nested_jars<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Vec<Vec
         }
     }
     paths.retain(|p| !skipped.contains(p) && !p.rsplit('/').next().is_some_and(|f| f.starts_with("mixinextras")));
-    paths
-        .into_iter()
-        .filter_map(|p| {
-            let mut e = zip.by_name(&p).ok()?;
-            let mut b = Vec::new();
-            e.read_to_end(&mut b).ok()?;
-            Some(b)
-        })
-        .collect()
+    let mut jars = Vec::new();
+    for p in paths {
+        let mut b = Vec::new();
+        if zip
+            .by_name(&p)
+            .is_ok_and(|mut e| e.read_to_end(&mut b).is_ok())
+        {
+            // A bundled jar bundles jars too (Sable carries Veil, which carries its GLSL library).
+            let inner = zip::ZipArchive::new(std::io::Cursor::new(b.as_slice()))
+                .map(|mut z| nested_jars(&mut z))
+                .unwrap_or_default();
+            jars.push(b);
+            jars.extend(inner);
+        }
+    }
+    jars
 }
 
 /// The classes in a zip, `META-INF` left out, those `have` names already left out too.
@@ -1668,6 +1797,7 @@ mod mixin_census_tests {
                 methods: Vec::new(),
                 bootstrap: Vec::new(),
                 annotations: Vec::new(),
+                signature: None,
             }
         }
         let add = ("java/util/List", "add", "(Ljava/lang/Object;)Z");
@@ -1838,6 +1968,7 @@ mod mixin_census_tests {
                 methods: Vec::new(),
                 bootstrap: Vec::new(),
                 annotations,
+                signature: None,
             }
         }
         let annotation = |ty: &str, value: Option<&str>| Annotation {
@@ -2040,7 +2171,22 @@ mod mixin_census_tests {
             ("META-INF/neoforge.mods.toml", toml("modLoader = \"javafml\" #mandatory\n[[mods]] #mandatory\nmodId = \"aeronautics\" #mandatory\nversion = \"1.3.2\" #mandatory\n")),
             ("dev/a/Aeronautics.class", class("dev/a/Aeronautics")),
         ]);
-        let offroad = jar(&[("META-INF/neoforge.mods.toml", toml("[[ mods ]]\nmodId = \"offroad\"\n")), ("dev/o/Offroad.class", class("dev/o/Offroad"))]);
+        // A bundled mod that bundles a mod of its own.
+        let wheels = jar(&[
+            (
+                "META-INF/neoforge.mods.toml",
+                toml("[[mods]]\nmodId = \"wheels\"\n"),
+            ),
+            ("dev/w/Wheels.class", class("dev/w/Wheels")),
+        ]);
+        let offroad = jar(&[
+            (
+                "META-INF/neoforge.mods.toml",
+                toml("[[ mods ]]\nmodId = \"offroad\"\n"),
+            ),
+            ("dev/o/Offroad.class", class("dev/o/Offroad")),
+            ("META-INF/jarjar/wheels.jar", wheels),
+        ]);
         let library = jar(&[("lib/Unused.class", class("lib/Unused"))]);
         let bundle = jar(&[
             ("META-INF/neoforge.mods.toml", toml("[[mods]]\nmodId = \"bundled\"\n")),
@@ -2056,8 +2202,11 @@ mod mixin_census_tests {
         names.sort();
         let ids: Vec<String> = nested_mod_metadata(&path).into_iter().map(|m| m.0).collect();
         std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(names, ["dev/a/Aeronautics", "dev/o/Offroad"]);
-        assert_eq!(ids, ["aeronautics", "offroad"]);
+        assert_eq!(
+            names,
+            ["dev/a/Aeronautics", "dev/o/Offroad", "dev/w/Wheels"]
+        );
+        assert_eq!(ids, ["aeronautics", "offroad", "wheels"]);
     }
 
     #[test]

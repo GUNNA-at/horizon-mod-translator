@@ -42,6 +42,61 @@ public class Fixture {
     public static double floats(int n) { double d = 0; float f = 1.5f; for (int i = 0; i < n; i++) { d += Math.sqrt(i) * f; f *= 1.01f; } return Math.floor(d * 1000) / 1000; }
     public static int bits(int x) { return (x << 3) ^ (x >>> 2) ^ (x >> 1) | (x & 0xff); }
     public static long longBits(long x) { return (x << 13) ^ (x >>> 7) ^ ~x; }
+    // An assignment to a long or double array element used as a value: javac's dup2_x2.
+    public static long wideStores(long x) { long[] a = new long[2]; double[] d = new double[1]; long r = (a[0] = x); r += (a[1] += r * 3); d[0] = 0.5; return r + (long) (d[0] *= 4) + a[0] + a[1]; }
+    // The JDK's own plain classes, which the translator takes as code from the Java runtime (`jdk_code`).
+    public static long jdkColor(int n) {
+        java.awt.Color c = new java.awt.Color(n & 255, 40, 200);
+        long h = c.getRGB() + 31L * c.brighter().getGreen() + java.awt.Color.HSBtoRGB(n / 7f, 0.5f, 0.8f);
+        float[] hsb = java.awt.Color.RGBtoHSB(c.getRed(), c.getGreen(), c.getBlue(), null);
+        h = h * 31 + Float.floatToIntBits(hsb[0]) + Float.floatToIntBits(hsb[2]) + new java.awt.Color(0x80102030, true).getAlpha();
+        java.awt.Rectangle r = new java.awt.Rectangle(1, 2, 30 + n, 40);
+        h = h * 31 + (r.contains(new java.awt.Point(5, 5)) ? 7 : 3) + r.intersection(new java.awt.Rectangle(10, 10, 100, 100)).width;
+        return h * 31 + (long) new java.awt.geom.Point2D.Double(n, 3).distance(0, 0) + (c.equals(new java.awt.Color(c.getRGB())) ? 1 : 0);
+    }
+    public static long jdkMath(int n) {
+        java.math.BigInteger f = java.math.BigInteger.ONE;
+        for (int i = 2; i <= 25 + (n & 7); i++) f = f.multiply(java.math.BigInteger.valueOf(i));
+        long h = f.toString().hashCode() + f.mod(java.math.BigInteger.valueOf(1000003)).intValue() + f.bitLength() + f.pow(3).shiftRight(40).longValue();
+        java.math.BigDecimal d = new java.math.BigDecimal("1234.5678").multiply(java.math.BigDecimal.valueOf(n)).setScale(2, java.math.RoundingMode.HALF_UP);
+        h = h * 31 + d.toString().hashCode() + d.intValue() + Double.doubleToLongBits(d.doubleValue()) + d.compareTo(java.math.BigDecimal.TEN);
+        return h * 31 + new java.math.BigDecimal(f).divide(new java.math.BigDecimal("7.5"), 6, java.math.RoundingMode.HALF_EVEN).toPlainString().hashCode();
+    }
+    public static long jdkText(int n) {
+        java.net.URI u = java.net.URI.create("https://example.org:8080/a/b.c/" + n + "?q=1#frag");
+        long h = u.getHost().hashCode() + u.getPort() + u.getPath().hashCode() + u.getRawPath().length() + u.resolve("../x").toString().hashCode() + u.getScheme().length();
+        String b64 = java.util.Base64.getEncoder().encodeToString(("horizon" + n).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        h = h * 31 + b64.hashCode() + java.util.Base64.getDecoder().decode(b64).length;
+        h = h * 31 + (java.lang.reflect.Modifier.isPublic(n) ? 1 : 0) + (java.lang.reflect.Modifier.isStatic(n) ? 2 : 0) + (java.lang.reflect.Modifier.isFinal(n) ? 4 : 0);
+        java.util.StringTokenizer t = new java.util.StringTokenizer("a,b;c" + n, ",;");
+        while (t.hasMoreTokens()) h = h * 31 + t.nextToken().hashCode();
+        return h;
+    }
+    // Parts of character arrays and of texts in a builder, and a number read out of the middle of one.
+    public static int charParts(int n) {
+        char[] a = new char[6];
+        for (int i = 0; i < a.length; i++) a[i] = (char) ('a' + (i + n) % 26);
+        StringBuilder b = new StringBuilder().append(a).append('|').append(a, 1, 3).append('|').append("0123456789", 2, 5 + (n & 3)).insert(0, a);
+        String s = new String(a) + String.valueOf(a) + String.valueOf(a, 2, 3) + b;
+        return s.hashCode() + Integer.parseInt("x" + (1200 + n) + "y", 1, 5, 10) + (int) Long.parseLong("ff" + n % 10 + "z", 0, 3, 16);
+    }
+    // A thread a mod starts has run by the time it is joined; one that polls and sleeps stops at its sleep.
+    public static int threads(int n) {
+        int[] box = new int[2];
+        Thread task = new Thread(() -> box[0] = n * 3 + 1, "worker");
+        Thread poll = new Thread(() -> { try { while (true) { box[1]++; Thread.sleep(2); if (box[1] >= 1) return; } } catch (InterruptedException e) { box[1] += 0; } });
+        task.start();
+        poll.start();
+        try { task.join(); poll.join(); } catch (InterruptedException e) { return -1; }
+        String joined = new java.util.StringJoiner("-", "<", ">").add("a").add("b" + n).toString();
+        return box[0] * 31 + box[1] + (task.getName().equals("worker") ? 100 : 0) + (task.isAlive() ? 1000 : 0) + joined.hashCode();
+    }
+    // Static helpers of the JDK the runtime has no answer of its own for: the JDK's own code stands for them.
+    public static long jdkStatics(int n) {
+        int[] sorted = {1, 4, 9, 16, 25, 36, 49};
+        long h = java.util.Arrays.binarySearch(sorted, n) * 31L + java.util.Arrays.toString(new boolean[] {n > 3, false}).hashCode();
+        return h * 31 + Long.rotateLeft(n * 7919L, n & 63) + (Character.isISOControl((char) n) ? 5 : 0);
+    }
     public static int overflow(int x) { return x * 1_000_003 + Integer.MAX_VALUE; }
     public static int casts(double d) { return (int) d + (int) (float) d + (byte) (int) d + (char) (int) d; }
     public static int nested(int n) { int c = 0; outer: for (int i = 0; i < n; i++) { for (int j = 0; j < n; j++) { if (i * j > n) continue outer; c += i ^ j; } } return c; }
