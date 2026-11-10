@@ -9750,7 +9750,25 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     Java runtime's code, threads and the string fixes), and the game-code, hook and weave tests.
   - Open: the pack's second launch; `ByteBuffer` (31 jars, no model); a jar's own files for
     `Class.getResourceAsStream` (70 jars, only `assets/` and `data/` are carried); Gson's reading and writing
-    of a mod's own classes (40 jars); a jar whose classes are Groovy (1,224 `invokedynamic` left).
+    of a mod's own classes (40 jars; done in Part 147); a jar whose classes are Groovy (1,224
+    `invokedynamic` left).
+- [x] 2026-11-10 Part 147: Gson reads and writes a mod's own classes (`gson.rs`: `to_tree`, `from_tree`). 40
+  of the pack's jars read a config or a data file with `gson.fromJson(text, TheirClass.class)`, and the
+  first launch already asked for `toJson(Object)`; only trees (`JsonObject` and the rest) were answered.
+  - Reading: an object of the class is made by its constructor without arguments (so a field the file lacks
+    keeps its default), or bare where it has none (`reflect`'s new `allocate`), then each field the file
+    names is set by its type: primitives and their boxes, strings, enum constants by name, arrays, nested
+    objects, and lists, sets and maps by the element types of the field's generic signature, which the
+    class data carries since Part 146. Static, transient and compiler-made fields are left alone, and
+    `@SerializedName` renames one. With no class to go by (`Object`, a `Type` that is no class) the tree is
+    read by its own shape: maps, lists, strings, booleans, a whole number as `Integer` or `Long`.
+  - Writing is the reverse, field by field in declaration order (the class's before its superclasses'), a
+    null left out unless the builder asked for nulls; into a string, a `StringBuilder` or a writer, and as a
+    tree (`toJsonTree`).
+  - Not done: a `TypeToken`'s type (`new TypeToken<List<Entry>>() {}.getType()` reads as plain lists and
+    maps), type adapters a mod registers, `@Expose`, `@JsonAdapter`.
+  - Tests: a config class with nested entries, a typed map and skipped fields, read, checked field by field
+    and written back to the same text. 752 compat tests pass, 15 compat-core, 27 translator and the others.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

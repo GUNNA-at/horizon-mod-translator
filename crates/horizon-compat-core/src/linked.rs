@@ -666,6 +666,9 @@ pub fn reflect(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {
         return Some(v);
     }
     match what {
+        // An object of the class no constructor has run on (what a reader of saved objects makes
+        // when the class has no constructor without arguments).
+        "allocate" => Some(rt.new_object_id(d.name, d.id)),
         "fields" if !d.fields.is_empty() => Some(rt.string(d.fields)),
         "annotations" if !d.annotations.is_empty() => Some(rt.string(d.annotations)),
         _ => None,

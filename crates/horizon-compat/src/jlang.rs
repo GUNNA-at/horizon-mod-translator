@@ -192,6 +192,20 @@ pub(crate) fn descriptor_of(name: &str) -> String {
 /// The fields class `class` declares, as the mod's table lists them: (access, name, descriptor).
 /// None for a class that isn't the mod's.
 fn declared_fields(rt: &mut Rt, class: &str) -> Option<Vec<(u16, String, String)>> {
+    Some(
+        typed_fields(rt, class)?
+            .into_iter()
+            .map(|(access, name, desc, _)| (access, name, desc))
+            .collect(),
+    )
+}
+
+/// A mod class's declared fields: access, name, descriptor, and the generic signature where the
+/// field has one (`Ljava/util/List<Lcom/example/Entry;>;`). None for a class that isn't the mod's.
+pub(crate) fn typed_fields(
+    rt: &mut Rt,
+    class: &str,
+) -> Option<Vec<(u16, String, String, Option<String>)>> {
     if !rt.is_mod_class(class) {
         return None;
     }
@@ -200,13 +214,18 @@ fn declared_fields(rt: &mut Rt, class: &str) -> Option<Vec<(u16, String, String)
     Some(
         lines
             .lines()
-            // `access name descriptor`, then the field's generic signature where it has one; a
-            // name in angle brackets is no field (the class's own signature).
+            // `access name descriptor [signature]`; a name in angle brackets is no field (the
+            // class's own signature).
             .filter_map(|l| {
                 let mut p = l.splitn(4, ' ');
-                Some((p.next()?.parse().ok()?, p.next()?.to_owned(), p.next()?.to_owned()))
+                Some((
+                    p.next()?.parse().ok()?,
+                    p.next()?.to_owned(),
+                    p.next()?.to_owned(),
+                    p.next().map(str::to_owned),
+                ))
             })
-            .filter(|f: &(u16, String, String)| !f.1.starts_with('<'))
+            .filter(|f: &(u16, String, String, Option<String>)| !f.1.starts_with('<'))
             .collect(),
     )
 }
