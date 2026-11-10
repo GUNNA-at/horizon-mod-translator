@@ -1007,6 +1007,18 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             let c = rt.caller_class;
             rt.class_literal(c)
         }
+        // A walk of the stack sees no frame: none is kept here to show. What it is asked of
+        // every frame holds (Lucene's `ensureCaller`, which lets only its own classes call:
+        // unanswered, the mods that carry it stopped in their constructors), and what it would
+        // take from one is not there (Chisels & Bits' calling method's name: "unknown").
+        "java/lang/StackWalker.walk.(Ljava/util/function/Function;)Ljava/lang/Object;" => {
+            let frames = rt.alloc("java/util/stream/Stream", Data::Stream(Vec::new()));
+            rt.call_functional(
+                "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;",
+                a(1),
+                &[frames],
+            )
+        }
         "java/lang/Class.getName.()Ljava/lang/String;" | "java/lang/Class.getTypeName.()Ljava/lang/String;" | "java/lang/Class.getPackageName.()Ljava/lang/String;" | "java/lang/Class.getSimpleName.()Ljava/lang/String;" => {
             let n = rt.str_of(a(0)).unwrap_or("").replace('/', ".");
             let out = if key.contains("getPackageName") {
@@ -3553,6 +3565,71 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `StackWalker.walk` applies the function to a stream of no frames and gives back what it
+    /// answers: a check of every frame it looks at passes (Lucene's `skip(2).limit(1).allMatch`),
+    /// a search for a frame finds none.
+    #[test]
+    fn a_stack_walk_sees_no_frames() {
+        fn walked(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let frames = args[1];
+            Some(if id == 1 {
+                let s = call(
+                    rt,
+                    "java/util/stream/Stream.skip.(J)Ljava/util/stream/Stream;",
+                    &[frames, V::J(2)],
+                );
+                let s = call(
+                    rt,
+                    "java/util/stream/Stream.limit.(J)Ljava/util/stream/Stream;",
+                    &[s, V::J(1)],
+                );
+                let never = rt.lambda_id("java/util/function/Predicate", 3, vec![]);
+                let all = call(
+                    rt,
+                    "java/util/stream/Stream.allMatch.(Ljava/util/function/Predicate;)Z",
+                    &[s, never],
+                );
+                call(
+                    rt,
+                    "java/lang/Boolean.valueOf.(Z)Ljava/lang/Boolean;",
+                    &[all],
+                )
+            } else if id == 2 {
+                call(
+                    rt,
+                    "java/util/stream/Stream.findFirst.()Ljava/util/Optional;",
+                    &[frames],
+                )
+            } else {
+                // The predicate: no frame is one of its own.
+                V::I(0)
+            })
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(walked);
+        let walker = call(
+            &mut rt,
+            "java/lang/StackWalker.getInstance.()Ljava/lang/StackWalker;",
+            &[],
+        );
+        const WALK: &str =
+            "java/lang/StackWalker.walk.(Ljava/util/function/Function;)Ljava/lang/Object;";
+        let check = rt.lambda_id("java/util/function/Function", 1, vec![]);
+        let valid = call(&mut rt, WALK, &[walker, check]);
+        assert_eq!(
+            call(&mut rt, "java/lang/Boolean.booleanValue.()Z", &[valid]),
+            V::I(1)
+        );
+        let first = rt.lambda_id("java/util/function/Function", 2, vec![]);
+        let found = call(&mut rt, WALK, &[walker, first]);
+        assert_eq!(
+            call(&mut rt, "java/util/Optional.isPresent.()Z", &[found]),
+            V::I(0)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// A call nothing maps runs the game's own method the translator carried for it: the one of
     /// the receiver's class, or of a class above it (a static one too), and it is no miss. Where

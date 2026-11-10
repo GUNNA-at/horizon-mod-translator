@@ -110,9 +110,16 @@ pub fn places_heard(rt: &mut Rt) -> bool {
 }
 
 /// Whether the client is in a world: from its level's load to its unload. Before the game first
-/// told of one, it is taken to be (the level is made where the mods first reach for it).
+/// told of one, it is taken to be (the level is made where the mods first reach for it), but
+/// not while the mods load: the game opens no world before they have, and a mod that finds a
+/// player then takes the world for open (JourneyMap made its minimap in `FMLLoadCompleteEvent`
+/// and went on to draw the map around the player, which asks for the minimap being made: a
+/// loop without end, where a JVM's `Minecraft.player` is null and the minimap waits).
 pub fn client_in_world(rt: &Rt) -> bool {
-    rt.interned.get(CLIENT_LEVELS).is_none_or(|v| v.i() > 0)
+    match rt.interned.get(CLIENT_LEVELS) {
+        Some(held) => held.i() > 0,
+        None => !crate::neo::loading(rt),
+    }
 }
 
 fn put_all(rt: &mut Rt, ev: V, fields: &[(&'static str, V)]) {

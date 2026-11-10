@@ -476,6 +476,7 @@ pub(crate) fn static_initialiser_places(rt: &mut Rt, class: &str) {
 /// Fires what NeoForge's loading fires once the mods are constructed: `FMLConstructModEvent`
 /// (Dragons Plus makes its content in it), then `RegisterEvent` once per registry, then setup.
 pub fn fire_registrations(rt: &mut Rt) {
+    rt.interned.insert(LOADING.into(), V::I(1));
     listen_for_places(rt);
     let ev = rt.new_object(CONSTRUCT);
     post(rt, CONSTRUCT, ev);
@@ -572,6 +573,17 @@ pub fn fire_registrations(rt: &mut Rt) {
         post(rt, event, ev);
     }
     crate::network::fire_registration(rt);
+    rt.interned.remove(LOADING);
+}
+
+/// Set while the mods load ([`fire_registrations`]).
+const LOADING: &str = "compat:loading";
+
+/// Whether the mods are loading now: the game has no world open then, so the client's
+/// `Minecraft` has no level and no player, whichever side the loading step is played as
+/// ([`crate::world_events::client_in_world`]).
+pub(crate) fn loading(rt: &Rt) -> bool {
+    rt.interned.contains_key(LOADING)
 }
 
 fn is_registry(owner: &str) -> bool {
@@ -3576,6 +3588,47 @@ mod tests {
         fire_client_setup(&mut rt);
         assert!(is_client(&rt));
         assert_eq!(list_mut(&mut rt, log).len(), 8);
+    }
+
+    /// While the mods load no world is open: `Minecraft.player`, `.level` and `getConnection()`
+    /// are null to a listener of the client's setup, though the step is played as the client's.
+    /// A client's runtime the game has told of no level yet has them once the mods have loaded.
+    #[test]
+    fn the_client_has_no_world_while_the_mods_load() {
+        const INSTANCE: &str =
+            "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;";
+        const PLAYER: &str =
+            "net/minecraft/client/Minecraft.$player.()Lnet/minecraft/client/player/LocalPlayer;";
+        const LEVEL: &str = "net/minecraft/client/Minecraft.$level.()Lnet/minecraft/client/multiplayer/ClientLevel;";
+        const CONNECTION: &str = "net/minecraft/client/Minecraft.getConnection.()Lnet/minecraft/client/multiplayer/ClientPacketListener;";
+        /// Whether the client has a player, a level and a connection.
+        fn found(rt: &mut Rt) -> [bool; 3] {
+            let mc = crate::api::call(rt, INSTANCE, &[]);
+            let player = crate::api::game_field(rt, mc, "player", "$player", PLAYER);
+            let level = crate::api::game_field(rt, mc, "level", "$level", LEVEL);
+            let connection = crate::api::call(rt, CONNECTION, &[mc]);
+            [player.r() != 0, level.r() != 0, connection.r() != 0]
+        }
+        fn heard(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+            let there = found(rt).iter().filter(|t| **t).count() as i32;
+            let seen = V::I(there + if is_client(rt) { 10 } else { 0 });
+            rt.interned.insert("test:seen".into(), seen);
+            Some(V::Void)
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let listener = rt.lambda_id("java/util/function/Consumer", 1, vec![]);
+        rt.listeners.push((CLIENT_SETUP.to_owned(), listener));
+        fire_registrations(&mut rt);
+        assert_eq!(
+            rt.interned.get("test:seen"),
+            Some(&V::I(10)),
+            "heard as the client, with nothing of a world"
+        );
+        fire_client_setup(&mut rt);
+        assert_eq!(found(&mut rt), [true, true, true]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// NeoForge's loading order on the mod bus: construction (where Dragons Plus makes its blocks,

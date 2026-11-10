@@ -10385,6 +10385,23 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     every tick, Cucumber's recipe manager (the same in `ReloadableServerResources`) "is not
     available", Immersive Portals' server likewise.
   - Tests: 811 compat, 16 compat-core, 36 translator; the differential and weave tests.
+- [x] 2026-11-10 Part 171: no world while the mods load.
+  - Launch 14 (the build of Part 170: 854 s, 88 crates, 1.9985 GB) loaded the pack's mods with
+    two constructors failing (launch 13 had six), and ended 145 s in: the main thread's stack
+    ran out. Under the debugger the stack is JourneyMap's own code going round: its minimap,
+    made in `FMLLoadCompleteEvent`, found a player, drew the map around them, and that asks
+    for the minimap being made. A JVM's `Minecraft.player` is null then, and the minimap
+    waits. Here the client's part of the loading, played as the client since Part 170, found
+    the client "in a world" (it was taken to be until the game first told of a level), so
+    `Minecraft.getInstance()` handed out a level and a player, and kept them. While the mods
+    load the client is in no world now: `Minecraft.level` and `.player` are null and
+    `getConnection()` is, whichever side a loading step is played as.
+  - `StackWalker.walk`: a walk sees no frame (none is kept here), so what it asks of every
+    frame holds and what it would take from one is absent. Lucene lets only its own classes
+    call some of its code (`ensureCaller`: `allMatch` over the frames it looks at), which
+    stopped GuideME's client in its constructor (Ars Nouveau carries the same code); Chisels
+    & Bits reads its calling method's name there, and falls back to "unknown".
+  - Tests: 813 compat, 16 compat-core, 36 translator; the differential and weave tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
