@@ -134,6 +134,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("com/mojang/serialization/Codec" | "com/mojang/serialization/codecs/PrimitiveCodec", f) => match f {
             "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" | "LONG_STREAM" => prim(rt, &f.to_ascii_lowercase()),
             "PASSTHROUGH" => native(rt, "passthrough"),
+            // `Codec.EMPTY`: a map codec of no field, whose value is DFU's `Unit`.
+            "EMPTY" => {
+                let unit = crate::api::api_enum(rt, "com/mojang/datafixers/util/Unit", "INSTANCE", 0);
+                codec(rt, "compat:codec/unit", vec![unit])
+            }
             _ => return None,
         },
         ("net/minecraft/util/ExtraCodecs", f) => match f {
@@ -418,13 +423,39 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
             let r = run(rt, FUNCTION, part(1), &[v])?;
             result_of(rt, r)
         }
-        "either" => match decode(rt, part(0), j) {
+        "either" | "map_either" => match decode(rt, part(0), j) {
             Ok(v) => Ok(either(rt, true, v)),
             Err(left) => match decode(rt, part(1), j) {
                 Ok(v) => Ok(either(rt, false, v)),
                 Err(right) => Err(format!("Failed to parse either. First: {left}; Second: {right}")),
             },
         },
+        // `Codec.xor` of two codecs that read no map: exactly one of them reads.
+        "xor" if !j.is_object() => match (decode(rt, part(0), j), decode(rt, part(1), j)) {
+            (Ok(_), Ok(_)) => {
+                Err("Both alternatives read successfully, can not pick the correct one".into())
+            }
+            (Ok(v), Err(_)) => Ok(either(rt, true, v)),
+            (Err(_), Ok(v)) => Ok(either(rt, false, v)),
+            (Err(first), Err(second)) => Err(format!(
+                "Neither alternative read successfully! first: {first}; second: {second}"
+            )),
+        },
+        "of" => decode(rt, part(1), j),
+        "dispatched_map" => {
+            let Json::Object(o) = j else {
+                return Err(format!("Not a map: {j}"));
+            };
+            let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+            for (k, v) in o {
+                let key = decode(rt, part(0), &Json::String(k.clone()))?;
+                let of = run(rt, FUNCTION, part(1), &[key])?;
+                let of = as_codec(rt, of);
+                let value = decode(rt, of, v).map_err(|e| format!("{k}: {e}"))?;
+                jutil::table_put(rt, m, key, value);
+            }
+            Ok(m)
+        }
         "alt" => match decode(rt, part(0), j) {
             Ok(v) => Ok(v),
             Err(first) => {
@@ -468,7 +499,7 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
             let name = rt.str_of(part(0)).unwrap_or("").to_owned();
             crate::recipes::decode_native(rt, &name, j)
         }
-        "pair" => {
+        "pair" | "map_pair" => {
             let a = decode(rt, part(0), j)?;
             let b = decode(rt, part(1), j)?;
             Ok(pair(rt, a, b))
@@ -542,7 +573,7 @@ pub fn decode_map(rt: &mut Rt, c: V, o: &Map<String, Json>) -> Result<V, String>
                 alternative(rt, part(2), v)
             }
         },
-        "either" => match decode_map(rt, part(0), o) {
+        "either" | "map_either" => match decode_map(rt, part(0), o) {
             Ok(v) => Ok(either(rt, true, v)),
             Err(_) => decode_map(rt, part(1), o).map(|v| either(rt, false, v)),
         },
@@ -617,9 +648,16 @@ fn lazy(rt: &mut Rt, c: V) -> Result<V, String> {
         return Ok(made);
     }
     let supplier = parts.first().copied().unwrap_or_default();
-    let made = run(rt, SUPPLIER, supplier, &[])?;
+    // `Codec.recursive`'s (the third part): a function of this codec itself.
+    let recursive = parts.get(2).is_some_and(|f| f.i() != 0);
+    let made = if recursive {
+        run(rt, FUNCTION, supplier, &[c])?
+    } else {
+        run(rt, SUPPLIER, supplier, &[])?
+    };
+    let made = as_codec(rt, made);
     if let Some(o) = rt.heap.get_mut(c.r() as usize) {
-        o.data = Data::Array(vec![supplier, made]);
+        o.data = Data::Array(vec![supplier, made, V::I(recursive as i32)]);
     }
     Ok(made)
 }
@@ -628,7 +666,10 @@ fn lazy(rt: &mut Rt, c: V) -> Result<V, String> {
 /// one): what a dispatch hands the rest of its object to, as DFU's `KeyDispatchCodec` does.
 fn reads_object(rt: &mut Rt, c: V) -> bool {
     match kind(rt, c) {
-        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit" | "native_map" | "xor" | "dispatch_or_else" | "java_map" => true,
+        "field" | "optional" | "record" | "point" | "dispatch" | "of_map" | "unit"
+        | "native_map" | "xor" | "dispatch_or_else" | "java_map" | "map_pair" | "map_either" => {
+            true
+        }
         "xmap" | "validate" | "alt" => {
             let inner = rt.captured(c).first().copied().unwrap_or_default();
             reads_object(rt, inner)
@@ -863,10 +904,24 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             let v = result_of(rt, r)?;
             encode(rt, part(0), v)
         }
-        "either" => {
+        "either" | "map_either" | "xor" => {
             let left = rt.get_field(value, "$isLeft").i() != 0;
             let v = rt.get_field(value, if left { "$left" } else { "$right" });
             encode(rt, if left { part(0) } else { part(1) }, v)
+        }
+        "of" => encode(rt, part(0), value),
+        "dispatched_map" => {
+            let mut out = BTreeMap::new();
+            for (k, v) in jutil::table_pairs(rt, value) {
+                let Nbt::String(key) = encode(rt, part(0), k)? else {
+                    return Err("Not a string key".into());
+                };
+                let of = run(rt, FUNCTION, part(1), &[k])?;
+                let of = as_codec(rt, of);
+                let v = encode(rt, of, v).map_err(|e| format!("{key}: {e}"))?;
+                out.insert(key, v);
+            }
+            Ok(Nbt::Compound(out))
         }
         // `withAlternative`: written with the first.
         "alt" => encode(rt, part(0), value),
@@ -906,7 +961,7 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             write_native(rt, &name, value)
         }
         // `Codec.pair`: both halves into one map.
-        "pair" => {
+        "pair" | "map_pair" => {
             let mut out = BTreeMap::new();
             for (half, field) in [(part(0), "$first"), (part(1), "$second")] {
                 let v = rt.get_field(value, field);
@@ -917,7 +972,8 @@ pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
             }
             Ok(Nbt::Compound(out))
         }
-        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map" | "xor" | "dispatch_or_else" | "java_map" => {
+        "of_map" | "field" | "optional" | "record" | "point" | "dispatch" | "native_map"
+        | "dispatch_or_else" | "java_map" => {
             let mut out = BTreeMap::new();
             encode_map(rt, c, value, &mut out)?;
             Ok(Nbt::Compound(out))
@@ -1000,7 +1056,7 @@ fn encode_map(rt: &mut Rt, c: V, value: V, out: &mut BTreeMap<String, Nbt>) -> R
             }
         }
         "alt" => encode_map(rt, part(0), value, out)?,
-        "either" | "xor" | "dispatch_or_else" => {
+        "either" | "map_either" | "xor" | "dispatch_or_else" => {
             let left = rt.get_field(value, "$isLeft").i() != 0;
             let v = rt.get_field(value, if left { "$left" } else { "$right" });
             encode_map(rt, if left { part(0) } else { part(1) }, v, out)?;
@@ -1363,6 +1419,57 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         ("com/mojang/serialization/Codec", "unboundedMap") => return Some(codec(rt, "compat:codec/map", vec![a(0), a(1)])),
         ("com/mojang/serialization/Codec", "pair") => return Some(codec(rt, "compat:codec/pair", vec![a(0), a(1)])),
+        // `Codec.mapPair(first, second)`: both read the same map, a pair of what they read;
+        // `mapEither`, the first of the two that reads it. Map codecs both.
+        ("com/mojang/serialization/Codec", "mapPair") => {
+            return Some(codec(rt, "compat:codec/map_pair", vec![a(0), a(1)]));
+        }
+        ("com/mojang/serialization/Codec", "mapEither") => {
+            return Some(codec(rt, "compat:codec/map_either", vec![a(0), a(1)]));
+        }
+        // `Codec.xor(first, second)`: the one of the two that reads, an error where both do.
+        ("com/mojang/serialization/Codec", "xor") => {
+            return Some(codec(rt, "compat:codec/xor", vec![a(0), a(1)]));
+        }
+        // `Codec.simpleMap(keys, values, keyable)`: `unboundedMap`'s map as a map codec, its
+        // entries the fields; `MapCodec.assumeMapUnsafe(codec)`: a codec that writes a map, as one.
+        ("com/mojang/serialization/Codec", "simpleMap") => {
+            let map = codec(rt, "compat:codec/map", vec![a(0), a(1)]);
+            return Some(codec(rt, "compat:codec/of_map", vec![map]));
+        }
+        ("com/mojang/serialization/MapCodec", "assumeMapUnsafe") => {
+            return Some(codec(rt, "compat:codec/of_map", vec![a(0)]));
+        }
+        // `Codec.dispatchedMap(keys, valueCodecOf)`: a map whose every value is read and written
+        // with the codec its key picks.
+        ("com/mojang/serialization/Codec", "dispatchedMap") => {
+            return Some(codec(rt, "compat:codec/dispatched_map", vec![a(0), a(1)]));
+        }
+        // `Codec.of(encoder, decoder)`, `MapCodec.of(encoder, decoder[, keys])`: written with the
+        // one, read with the other (codecs of the runtime's, or classes of the mod's own).
+        ("com/mojang/serialization/Codec" | "com/mojang/serialization/MapCodec", "of")
+            if desc.starts_with(
+                "(Lcom/mojang/serialization/Encoder;Lcom/mojang/serialization/Decoder;",
+            ) || desc.starts_with(
+                "(Lcom/mojang/serialization/MapEncoder;Lcom/mojang/serialization/MapDecoder;",
+            ) =>
+        {
+            let (encoder, decoder) = (as_codec(rt, a(0)), as_codec(rt, a(1)));
+            return Some(codec(rt, "compat:codec/of", vec![encoder, decoder]));
+        }
+        // `Codec.recursive(name, wrapped)`: the codec the function makes of this one, asked once,
+        // when it is first read or written with.
+        ("com/mojang/serialization/Codec", "recursive") => {
+            return Some(codec(rt, "compat:codec/lazy", vec![a(1), V::NULL, V::I(1)]));
+        }
+        // `new MapCodec.MapCodecCodec<>(mapCodec)`: `mapCodec.codec()`.
+        ("com/mojang/serialization/MapCodec$MapCodecCodec", "<init>") => {
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.class = "compat:codec/of_map";
+                o.data = Data::Array(vec![a(1)]);
+            }
+            return Some(V::Void);
+        }
         ("com/mojang/serialization/Codec" | "com/mojang/serialization/MapCodec", "unit") => {
             // `unit(value)` or `unit(supplier)`.
             let v = if desc.starts_with("(Ljava/util/function/Supplier;)") { rt.call_functional(SUPPLIER, a(0), &[]) } else { a(0) };
@@ -1658,6 +1765,15 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
                 parts.extend(rt.captured(c));
                 codec(rt, "compat:codec/record", parts)
             }
+            // `t1()`...: the group's fields by their place.
+            t if t
+                .strip_prefix('t')
+                .and_then(|n| n.parse::<usize>().ok())
+                .is_some_and(|n| n >= 1) =>
+            {
+                let n = t[1..].parse::<usize>().unwrap_or(1);
+                rt.captured(c).get(n - 1).copied().unwrap_or(V::NULL)
+            }
             _ => return None,
         });
     }
@@ -1680,7 +1796,36 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
             codec(rt, "compat:codec/xmap", vec![c, a(1), V::I((method != "flatComapMap") as i32), a(2), V::I((method != "comapFlatMap") as i32)])
         }
         "validate" => codec(rt, "compat:codec/validate", vec![c, a(1)]),
+        // `MapCodecCodec.codec()`: the map codec it was made of.
+        "codec" if k == "of_map" && desc.ends_with(")Lcom/mojang/serialization/MapCodec;") => {
+            rt.captured(c).first().copied().unwrap_or(c)
+        }
         "codec" => codec(rt, "compat:codec/of_map", vec![c]),
+        // One way only: an encoder of what a function makes this codec's value from (`comap`,
+        // `flatComap`), a decoder of what one makes of the value read (`map`, `flatMap`).
+        "comap" | "flatComap" => codec(
+            rt,
+            "compat:codec/xmap",
+            vec![
+                c,
+                V::NULL,
+                V::I(0),
+                a(1),
+                V::I((method == "flatComap") as i32),
+            ],
+        ),
+        "map" | "flatMap" => codec(
+            rt,
+            "compat:codec/xmap",
+            vec![
+                c,
+                a(1),
+                V::I((method == "flatMap") as i32),
+                V::NULL,
+                V::I(0),
+            ],
+        ),
+        "decoder" | "encoder" => c,
         "forGetter" => codec(rt, "compat:codec/getter", vec![c, a(1)]),
         // On a record field (`fieldOf(...).forGetter(...)`): [builder, getter, encoder, decoderOf].
         "dependent" => codec(rt, "compat:codec/dependent", vec![c, a(1), a(2), a(3)]),
@@ -2354,6 +2499,166 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(crate::api::pos_of(&rt, rt.get_field(back[0], "pos")), [1, -2, 3]);
         assert_eq!(rt.str_of(rt.get_field(back[0], "slot")), Some("TOP_LEFT"));
+    }
+
+    /// DFU's rarer combinators: `mapPair` and `mapEither` read and write the fields of one map,
+    /// `simpleMap` its entries, `dispatchedMap` each value by the codec its key picks, `Codec.of`
+    /// with an encoder and a decoder, `recursive` with the codec its function makes of itself;
+    /// a group gives its fields by place (`t1()`).
+    #[test]
+    fn the_rarer_combinators_read_and_write() {
+        const STRING: &str = "com/mojang/serialization/Codec.STRING";
+        const INT: &str = "com/mojang/serialization/Codec.INT";
+        const FIELD: &str = "com/mojang/serialization/Codec.fieldOf.(Ljava/lang/String;)Lcom/mojang/serialization/MapCodec;";
+        /// 1: the codec of a key (`int` for `count`, strings else); 2: a recursive codec's
+        /// function (a list of itself, or an int).
+        fn fns(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            Some(match id {
+                1 => st(
+                    rt,
+                    if rt.str_of(args[1]) == Some("count") {
+                        INT
+                    } else {
+                        STRING
+                    },
+                ),
+                _ => {
+                    let list = c(
+                        rt,
+                        "com/mojang/serialization/Codec.listOf.()Lcom/mojang/serialization/Codec;",
+                        &[args[1]],
+                    );
+                    let int = st(rt, INT);
+                    c(
+                        rt,
+                        "com/mojang/serialization/Codec.either.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/Codec;",
+                        &[int, list],
+                    )
+                }
+            })
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(fns);
+        let field = |rt: &mut Rt, codec: &'static str, name: &str| {
+            let (codec, name) = (st(rt, codec), rt.string(name));
+            c(rt, FIELD, &[codec, name])
+        };
+        let json = |text: &str| serde_json::from_str::<Json>(text).unwrap();
+        let (name, count) = (field(&mut rt, STRING, "name"), field(&mut rt, INT, "count"));
+        // Both fields of one map, as a pair.
+        let both = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.mapPair.(Lcom/mojang/serialization/MapCodec;Lcom/mojang/serialization/MapCodec;)Lcom/mojang/serialization/MapCodec;",
+            &[name, count],
+        );
+        let read = decode(&mut rt, both, &json(r#"{"name": "gear", "count": 3}"#)).unwrap();
+        assert_eq!(rt.str_of(rt.get_field(read, "$first")), Some("gear"));
+        let written = encode(&mut rt, both, read).unwrap();
+        assert_eq!(
+            crate::recipes::nbt_json(&written),
+            json(r#"{"count": 3, "name": "gear"}"#)
+        );
+        // The first of two that reads the map.
+        let one = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.mapEither.(Lcom/mojang/serialization/MapCodec;Lcom/mojang/serialization/MapCodec;)Lcom/mojang/serialization/MapCodec;",
+            &[name, count],
+        );
+        let read = decode(&mut rt, one, &json(r#"{"count": 3}"#)).unwrap();
+        assert_eq!(rt.get_field(read, "$isLeft"), V::I(0));
+        let written = encode(&mut rt, one, read).unwrap();
+        assert_eq!(crate::recipes::nbt_json(&written), json(r#"{"count": 3}"#));
+        // A group's first field by its place.
+        let getter = rt.new_object("test/Getter");
+        let app = c(
+            &mut rt,
+            "com/mojang/serialization/MapCodec.forGetter.(Ljava/util/function/Function;)Lcom/mojang/serialization/codecs/RecordCodecBuilder;",
+            &[name, getter],
+        );
+        let instance = probe_receiver(
+            &mut rt,
+            "com/mojang/serialization/codecs/RecordCodecBuilder$Instance",
+        )
+        .unwrap();
+        let group = c(
+            &mut rt,
+            "com/mojang/serialization/codecs/RecordCodecBuilder$Instance.group.(Lcom/mojang/datafixers/kinds/App;)Lcom/mojang/datafixers/Products$P1;",
+            &[instance, app],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/mojang/datafixers/Products$P1.t1.()Lcom/mojang/datafixers/kinds/App;",
+                &[group]
+            ),
+            app
+        );
+        // A map as a map codec, and one whose values' codecs go by their keys.
+        let (string, int) = (st(&mut rt, STRING), st(&mut rt, INT));
+        let entries = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.simpleMap.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Keyable;)Lcom/mojang/serialization/codecs/SimpleMapCodec;",
+            &[string, int, V::NULL],
+        );
+        let read = decode(&mut rt, entries, &json(r#"{"iron": 2, "gold": 5}"#)).unwrap();
+        let written = encode(&mut rt, entries, read).unwrap();
+        assert_eq!(
+            crate::recipes::nbt_json(&written),
+            json(r#"{"gold": 5, "iron": 2}"#)
+        );
+        let by_key = rt.lambda_id("java/util/function/Function", 1, vec![]);
+        let keyed = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.dispatchedMap.(Lcom/mojang/serialization/Codec;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;",
+            &[string, by_key],
+        );
+        let read = decode(&mut rt, keyed, &json(r#"{"count": 4, "label": "four"}"#)).unwrap();
+        let written = encode(&mut rt, keyed, read).unwrap();
+        assert_eq!(
+            crate::recipes::nbt_json(&written),
+            json(r#"{"count": 4, "label": "four"}"#)
+        );
+        assert!(decode(&mut rt, keyed, &json(r#"{"count": "four"}"#)).is_err());
+        // An encoder and a decoder as one codec.
+        let of = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.of.(Lcom/mojang/serialization/Encoder;Lcom/mojang/serialization/Decoder;)Lcom/mojang/serialization/Codec;",
+            &[int, string],
+        );
+        let read = decode(&mut rt, of, &json(r#""seven""#)).unwrap();
+        assert_eq!(rt.str_of(read), Some("seven"));
+        let seven = crate::mixin::box_value(&mut rt, V::I(7), 'I');
+        assert_eq!(encode(&mut rt, of, seven), Ok(Nbt::Int(7)));
+        // A codec made of itself: an int, or a list of such.
+        let name = rt.string("tree");
+        let wrapped = rt.lambda_id("java/util/function/Function", 2, vec![]);
+        let tree = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.recursive.(Ljava/lang/String;Ljava/util/function/Function;)Lcom/mojang/serialization/Codec;",
+            &[name, wrapped],
+        );
+        let read = decode(&mut rt, tree, &json("[1, [2, 3]]")).unwrap();
+        let written = encode(&mut rt, tree, read).unwrap();
+        assert_eq!(crate::recipes::nbt_json(&written), json("[1, [2, 3]]"));
+        // `new MapCodec.MapCodecCodec<>(mapCodec)` is the map codec as a codec.
+        let made = rt.new_object("com/mojang/serialization/MapCodec$MapCodecCodec");
+        c(
+            &mut rt,
+            "com/mojang/serialization/MapCodec$MapCodecCodec.<init>.(Lcom/mojang/serialization/MapCodec;)V",
+            &[made, count],
+        );
+        let read = decode(&mut rt, made, &json(r#"{"count": 9}"#)).unwrap();
+        assert_eq!(rt.get_field(read, "value"), V::I(9));
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/mojang/serialization/MapCodec$MapCodecCodec.codec.()Lcom/mojang/serialization/MapCodec;",
+                &[made]
+            ),
+            count
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `codec.encodeStart(JsonOps.INSTANCE, value)` gives Gson's tree: a boolean is JSON's (the

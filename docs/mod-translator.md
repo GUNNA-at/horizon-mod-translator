@@ -10217,6 +10217,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     trident and spyglass model locations, `Minecraft`'s fields while it is in no world and
     `ON_OSX`, Gson's `LinkedTreeMap` as a map, `FeatureFlagSet.of`.
   - Tests: 792 compat, 16 compat-core, 33 translator; the differential tests.
+- [x] 2026-11-10 Part 167: DFU's rarer combinators, by what the pack calls. The pack's jars call
+  95 methods and constants of `Codec` and `MapCodec` and 53 of `StreamCodec` and `ByteBufCodecs`
+  (`packcalls.py` in the scratchpad lists every call the jars make on an API's classes, with how
+  many jars make it); calling each with made-up arguments found 19 and 6 the runtime had no
+  answer for.
+  - Answered now: `Codec.mapPair` and `mapEither` (map codecs of two that read one map), `xor`,
+    `simpleMap` and `MapCodec.assumeMapUnsafe` (a map as a map codec), `dispatchedMap` (each
+    value by the codec its key picks), `Codec.of` and `MapCodec.of` (an encoder and a decoder),
+    `recursive`, `Codec.EMPTY`, the one-way `comap`, `flatComap`, `map` and `flatMap`,
+    `new MapCodec.MapCodecCodec<>(...)`, and a group's fields by place (`t1()`).
+  - Stream codecs: `ByteBufCodecs.either`, `StreamCodec.recursive`. DFU's `Unit.INSTANCE`.
+  - Left unanswered of the two lists: `Codec.BYTE_BUFFER`, `ByteBufCodecs.GAME_PROFILE`,
+    `readCount` and `writeCount` (two jars each).
+  - Tests: 794 compat, 16 compat-core, 33 translator.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

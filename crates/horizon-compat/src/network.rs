@@ -94,8 +94,14 @@ const RESOURCE_KEY: &str = "compat:stream/resource_key";
 const PARTICLE: &str = "compat:stream/particle";
 /// NeoForge's `enumCodec(EnumClass)`: [the class]; a constant by its ordinal, a VarInt.
 const ENUM: &str = "compat:stream/enum";
-/// NeoForge's `lazy(supplier)`: [supplier]; the codec it gives, asked once, does the work.
+/// NeoForge's `lazy(supplier)`: [supplier]; the codec it gives, asked once, does the work. And
+/// `StreamCodec.recursive(wrapped)`: the codec a function makes of this one itself.
 const LAZY: &str = "compat:stream/lazy";
+/// What a [`LAZY`] codec holds first when it is `StreamCodec.recursive`'s: the function, of
+/// the codec itself, in this object.
+const RECURSIVE: &str = "compat:stream/recursive";
+/// `ByteBufCodecs.either(left, right)`: [left, right]; a boolean for the side, then its value.
+const EITHER: &str = "compat:stream/either";
 /// NeoForge's `registryKey()`: a registry's own key, by its location.
 const REGISTRY_KEY: &str = "compat:stream/registry_key";
 const NEO_CODECS: &str = "net/neoforged/neoforge/network/codec/NeoForgeStreamCodecs";
@@ -146,7 +152,12 @@ fn lazy_codec(rt: &mut Rt, lazy: V) -> V {
         return made;
     }
     let supplier = parts.first().copied().unwrap_or_default();
-    let made = rt.call_functional(SUPPLIER, supplier, &[]);
+    let made = if rt.class_of(supplier) == RECURSIVE {
+        let wrapped = rt.captured(supplier).first().copied().unwrap_or_default();
+        rt.call_functional(FUNCTION, wrapped, &[lazy])
+    } else {
+        rt.call_functional(SUPPLIER, supplier, &[])
+    };
     if rt.thrown.is_none()
         && let Some(o) = rt.heap.get_mut(lazy.r() as usize)
     {
@@ -665,6 +676,12 @@ pub fn encode(rt: &mut Rt, c: V, buf: V, value: V) {
                 encode(rt, p(0), buf, v);
             }
         }
+        EITHER => {
+            let left = rt.get_field(value, "$isLeft").i() != 0;
+            put(rt, buf, &[left as u8]);
+            let v = rt.get_field(value, if left { "$left" } else { "$right" });
+            encode(rt, if left { p(0) } else { p(1) }, buf, v);
+        }
         COLLECTION => {
             let items = crate::jutil::elements(rt, value);
             put_var(rt, buf, items.len() as u64);
@@ -852,6 +869,12 @@ fn decode_native(rt: &mut Rt, c: V, buf: V) -> Option<V> {
                 V::NULL
             };
             crate::api_common::optional(rt, v)
+        }
+        EITHER => {
+            let left = take_n::<1>(rt, buf)?[0] != 0;
+            let v = decode(rt, if left { p(0) } else { p(1) }, buf);
+            let v = ok(rt, v)?;
+            crate::codecs::either(rt, left, v)
         }
         COLLECTION => {
             let n = read_count(rt, buf)?;
@@ -1513,6 +1536,11 @@ fn codec_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             make(rt, COMPOSITE, parts)
         }
         "optional" if byte_buf_codecs => make(rt, OPTIONAL, vec![a(0)]),
+        "either" if byte_buf_codecs => make(rt, EITHER, vec![a(0), a(1)]),
+        "recursive" if owner == "net/minecraft/network/codec/StreamCodec" => {
+            let wrapped = make(rt, RECURSIVE, vec![a(0)]);
+            make(rt, LAZY, vec![wrapped])
+        }
         // `collection(factory)` alone is an operation on a codec; with the codec, the codec.
         "collection" if byte_buf_codecs && args.len() == 1 => make(rt, COLLECTION_OP, vec![a(0)]),
         "collection" if byte_buf_codecs => make(rt, COLLECTION, vec![a(0), a(1)]),
@@ -2089,6 +2117,12 @@ mod tests {
             }
             // `HashSet::new` as an `IntFunction`.
             4 => crate::jutil::new_set_of(rt, &[]),
+            // `StreamCodec.recursive`'s function: an optional of the codec itself.
+            5 => call(
+                rt,
+                "net/minecraft/network/codec/ByteBufCodecs.optional.(Lnet/minecraft/network/codec/StreamCodec;)Lnet/minecraft/network/codec/StreamCodec;",
+                &[args[1]],
+            )?,
             _ => return None,
         })
     }
@@ -2109,6 +2143,39 @@ mod tests {
         assert_eq!(bytes, [2, 5, 0xac, 0x02]);
         assert_eq!(rt.class_of(back), rt.class_of(set));
         assert_eq!(crate::jutil::elements(&rt, back), [V::I(5), V::I(300)]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ByteBufCodecs.either(left, right)` writes which side, then that side's value;
+    /// `StreamCodec.recursive(wrapped)` is the codec its function makes of it, here an optional of
+    /// itself: one byte for each level, the last empty.
+    #[test]
+    fn either_and_recursive_codecs_read_back_what_they_wrote() {
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(lambdas);
+        let int = sv(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.VAR_INT");
+        let string = sv(
+            &mut rt,
+            "net/minecraft/network/codec/ByteBufCodecs.STRING_UTF8",
+        );
+        let either = call(&mut rt, "net/minecraft/network/codec/ByteBufCodecs.either.(Lnet/minecraft/network/codec/StreamCodec;Lnet/minecraft/network/codec/StreamCodec;)Lnet/minecraft/network/codec/StreamCodec;", &[int, string]).unwrap();
+        let name = rt.string("ok");
+        let right = crate::codecs::either(&mut rt, false, name);
+        let (bytes, back) = round_trip(&mut rt, either, right);
+        assert_eq!(bytes, [0, 2, b'o', b'k']);
+        assert_eq!(rt.get_field(back, "$isLeft"), V::I(0));
+        assert_eq!(rt.str_of(rt.get_field(back, "$right")), Some("ok"));
+        let left = crate::codecs::either(&mut rt, true, V::I(300));
+        let (bytes, _) = round_trip(&mut rt, either, left);
+        assert_eq!(bytes, [1, 0xac, 0x02]);
+
+        let wrapped = rt.lambda_id("java/util/function/UnaryOperator", 5, Vec::new());
+        let nested = call(&mut rt, "net/minecraft/network/codec/StreamCodec.recursive.(Ljava/util/function/UnaryOperator;)Lnet/minecraft/network/codec/StreamCodec;", &[wrapped]).unwrap();
+        let none = crate::api_common::optional(&mut rt, V::NULL);
+        let one = crate::api_common::optional(&mut rt, none);
+        let two = crate::api_common::optional(&mut rt, one);
+        let (bytes, _) = round_trip(&mut rt, nested, two);
+        assert_eq!(bytes, [1, 1, 0]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

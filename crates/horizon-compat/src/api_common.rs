@@ -365,7 +365,7 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 32] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 33] = [
     // How Gson names a field in JSON (`GsonBuilder.setFieldNamingPolicy`), by the policy's name.
     (
         "com/google/gson/FieldNamingPolicy",
@@ -379,6 +379,8 @@ const PLAIN_ENUMS: [(&str, &[&str]); 32] = [
             "LOWER_CASE_WITH_DOTS",
         ],
     ),
+    // DFU's value of no content (`MapCodec.unit(Unit.INSTANCE)`, `Codec.EMPTY`).
+    ("com/mojang/datafixers/util/Unit", &["INSTANCE"]),
     // How Gson reads a number whose type says only `Number` or `Object`
     // (`GsonBuilder.setNumberToNumberStrategy`): named, not yet followed (a `double` is read).
     (
