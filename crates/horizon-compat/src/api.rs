@@ -327,6 +327,11 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, key);
         return call_exact(rt, "java/lang/Object.getClass.()Ljava/lang/Class;", args);
     }
+    // A call on a proxy: its handler's.
+    if let Some(v) = crate::jlang::proxy_call(rt, owner, rest, args) {
+        uncount(rt, key);
+        return v;
+    }
     // A mixin's accessor onto a field of the game's object (`$player` of `Minecraft`: the field
     // read through an `@Accessor` interface) that no module answers for itself: what the object
     // holds under the field's name, as a plain read of the field gets it. Unanswered where it

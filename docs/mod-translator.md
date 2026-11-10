@@ -10546,6 +10546,26 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     after each reload listener, so what one listener leaves as garbage is seen by kind before
     the collector is taught anything more.
   - Tests: 831 compat.
+- [x] 2026-11-10 Part 176: dynamic proxies, which Architectury's events are made of.
+  - Launch 17 (the build of Parts 173 and 174: 2,025 s, 439 crates, 2.001 GB; of the game's
+    own code 1,448 classes the runtime doesn't model and 6,536 methods of 3,187 it does)
+    loaded the mods and had the server in its world, ticking, while the client was still in
+    its first resource load; the watch killed it 330 s in, the swap at 10 GB and 8 GB of disk
+    left. The sample taken then has the client where launch 16's was, in Resourceful Lib's
+    one listener: 98 files of Handcrafted's with 13,464 variants, each filtering every state
+    of its block by a predicate that walks a map's entry set. The time is `malloc`, `free`
+    and `memcpy`: an entry set here is a table with an index, an object for each entry and a
+    note of each one's source, and none of it is collected until the hook ends.
+  - Every Architectury event's invoker was `null`: `EventFactory` makes it with
+    `Proxy.newProxyInstance` over Guava's `AbstractInvocationHandler`, and the runtime had
+    neither (27 of the pack's jars use these events: the FTB mods, DragonLib, PolyLib...; 17
+    make proxies themselves). A proxy is an object of its first interface whose calls, which
+    no code answers, go to its handler's `invoke` with the method and the arguments boxed;
+    `AbstractInvocationHandler.invoke` answers `hashCode`, `equals` and `toString` and hands
+    the rest to `handleInvocation`. A `Method` reaches a listener that is a lambda (no class
+    has a method of that name then) by the descriptor it was made with, so
+    `lookup().unreflect(method).bindTo(listener).invokeWithArguments(args)` calls it.
+  - Tests: 832 compat.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

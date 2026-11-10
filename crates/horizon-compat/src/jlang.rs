@@ -436,7 +436,25 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     if obj.r() == 0 {
         return None;
     }
-    let short = rt.vkeys.range(prefix.as_str()..).next().copied().filter(|k| k.starts_with(&prefix))?;
+    // The method by its name and parameters among those some class of the mods' has code for;
+    // one only lambdas implement (an event's listeners) has no such, and is the one the
+    // `Method` was made for, by its own descriptor.
+    let short = match rt
+        .vkeys
+        .range(prefix.as_str()..)
+        .next()
+        .copied()
+        .filter(|k| k.starts_with(&prefix))
+    {
+        Some(short) => short,
+        None => {
+            let desc = text(rt, rt.get_field(method, "$desc"));
+            if desc.is_empty() || rt.cid(obj) & crate::LAMBDA == 0 {
+                return None;
+            }
+            rt.static_key(&format!("{name}.{desc}"))
+        }
+    };
     let mut all = Vec::with_capacity(args.len());
     for (v, k) in args.iter().zip(kinds(&short[short.find('(').unwrap_or(0)..])) {
         all.push(crate::mixin::unbox(rt, *v, k));
@@ -447,6 +465,80 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
         'V' => V::NULL,
         'L' | '[' => r,
         kind => box_as(rt, r, kind),
+    })
+}
+
+const ABSTRACT_HANDLER: &str = "com/google/common/reflect/AbstractInvocationHandler";
+/// Where a proxy keeps its `InvocationHandler` ([`proxy_call`]).
+const PROXY_HANDLER: &str = "$proxyHandler";
+const HANDLER_INVOKE: &str = "java/lang/reflect/InvocationHandler.invoke.(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;";
+
+/// `AbstractInvocationHandler.invoke(proxy, method, args)` on handler `args[0]`.
+fn abstract_handler_invoke(rt: &mut Rt, args: &[V]) -> V {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let (this, proxy, method) = (a(0), a(1), a(2));
+    let given = if a(3).r() == 0 {
+        rt.alloc("[Ljava/lang/Object;", Data::Array(Vec::new()))
+    } else {
+        a(3)
+    };
+    let count = crate::jutil::elements(rt, given).len();
+    let called = text(rt, rt.get_field(method, "$name"));
+    match (called.as_str(), count) {
+        ("hashCode", 0) => box_raw(rt, V::I(this.r() as i32)),
+        ("equals", 1) => {
+            let other = rt.array_get(given, 0);
+            let same = other == proxy || (other.r() != 0 && rt.get_field(other, PROXY_HANDLER) == this);
+            crate::mixin::box_value(rt, V::I(same as i32), 'Z')
+        }
+        ("toString", 0) => {
+            let class = rt.class_of(this).replace('/', ".");
+            rt.string(&format!("{class}@{:x}", this.r()))
+        }
+        _ => rt.call_functional(
+            "com/google/common/reflect/AbstractInvocationHandler.handleInvocation.(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;",
+            this,
+            &[proxy, method, given],
+        ),
+    }
+}
+
+/// A call of `owner`'s method `rest` (`name.desc`) on a proxy (`Proxy.newProxyInstance`), which
+/// no code answers: its handler's `invoke(proxy, method, args)`, with the arguments boxed
+/// (`null` for none, as the JVM passes) and the result unboxed as the method returns it. None
+/// for a receiver that is no proxy.
+pub(crate) fn proxy_call(rt: &mut Rt, owner: &str, rest: &str, args: &[V]) -> Option<V> {
+    let proxy = args.first().copied().filter(|p| p.r() != 0)?;
+    let handler = match rt.get_field(proxy, PROXY_HANDLER) {
+        V::Void | V::R(0) => return None,
+        handler => handler,
+    };
+    let (name, desc) = rest.split_once('.')?;
+    let class = rt.class_literal(owner);
+    let method = method_object(rt, class, name, desc);
+    let given = if args.len() > 1 {
+        let boxed: Vec<V> = args[1..]
+            .iter()
+            .zip(kinds(desc))
+            .map(|(v, k)| {
+                if matches!(k, 'L' | '[') {
+                    *v
+                } else {
+                    box_as(rt, *v, k)
+                }
+            })
+            .collect();
+        rt.alloc("[Ljava/lang/Object;", Data::Array(boxed))
+    } else {
+        V::NULL
+    };
+    // The handler: a mod's own class or a lambda, else one whose `invoke` is a library's
+    // (Guava's `AbstractInvocationHandler`), which the call reaches by the handler's class.
+    let r = rt.call_functional(HANDLER_INVOKE, handler, &[proxy, method, given]);
+    Some(match return_kind(desc) {
+        'V' => V::Void,
+        'L' | '[' => r,
+        kind => crate::mixin::unbox(rt, r, kind),
     })
 }
 
@@ -943,6 +1035,7 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
         || matches!(
             owner,
             "java/util/ServiceLoader"
+                | ABSTRACT_HANDLER
                 | PROVIDER
                 | PRINT_STREAM
                 | "org/apache/logging/log4j/Logger"
@@ -972,7 +1065,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner == UNSAFE {
         return unsafe_call(rt, name, args);
     }
-    if !owner.starts_with("java/lang/") {
+    if !owner.starts_with("java/lang/") && owner != ABSTRACT_HANDLER {
         return None;
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -1562,6 +1655,50 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             _ => return None,
         }),
+        // `java.lang.reflect.Proxy`: an object of the interfaces given whose every call goes to
+        // its handler ([`proxy_call`]). It is made as an object of the first interface, so it
+        // is one wherever its class is asked; Architectury makes each event's invoker so.
+        "java/lang/reflect/Proxy" => Some(match name {
+            "newProxyInstance" => {
+                let interfaces = crate::jutil::elements(rt, a(1));
+                let first = interfaces
+                    .first()
+                    .and_then(|c| rt.str_of(*c))
+                    .unwrap_or("java/lang/Object")
+                    .replace('.', "/");
+                let class = rt.static_key(&first);
+                let proxy = rt.alloc(class, Data::Fields(Default::default()));
+                rt.put_field(proxy, PROXY_HANDLER, a(2));
+                rt.put_field(proxy, "$interfaces", a(1));
+                proxy
+            }
+            "getInvocationHandler" => match rt.get_field(a(0), PROXY_HANDLER) {
+                V::Void => throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    "not a proxy instance",
+                ),
+                handler => handler,
+            },
+            // A proxy's class is its first interface's here, which is no proxy class.
+            "isProxyClass" => V::I(0),
+            _ => return None,
+        }),
+        // Guava's `AbstractInvocationHandler`: `invoke` answers `hashCode`, `equals` and
+        // `toString` for the proxy itself and hands every other call to `handleInvocation`,
+        // with an empty array where the call has no arguments.
+        ABSTRACT_HANDLER => Some(match name {
+            "<init>" => V::Void,
+            "invoke" => abstract_handler_invoke(rt, args),
+            _ => return None,
+        }),
+        // The same `invoke`, called as the interface's on a handler of the mod's that extends
+        // Guava's class and has no `invoke` of its own.
+        "java/lang/reflect/InvocationHandler"
+            if name == "invoke" && rt.instance_of(a(0), ABSTRACT_HANDLER) =>
+        {
+            Some(abstract_handler_invoke(rt, args))
+        }
         // `java.lang.reflect.Array`: an array made, measured, read and written by reflection
         // (Fabric's events keep their listeners in `Array.newInstance(type, 0)`).
         "java/lang/reflect/Array" => Some(match name {
@@ -3419,6 +3556,135 @@ fn bool_value(rt: &Rt, v: V) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dynamic proxy hands every call to its handler, with the method and the arguments boxed
+    /// (an empty array for none, under Guava's `AbstractInvocationHandler`), and what the
+    /// handler answers comes back as the method returns it. Architectury makes each event's
+    /// invoker so, and its handler calls the listeners.
+    #[test]
+    fn a_proxy_hands_its_calls_to_its_handler() {
+        // The mod's handler class: `handleInvocation` notes the call and answers 7.
+        fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
+            if rt.class_of(args[0]) == "m/Handler" && key.starts_with("handleInvocation.") {
+                let name = text(rt, rt.get_field(args[2], "$name"));
+                let given = crate::jutil::elements(rt, args[3]);
+                let note = rt.string(&format!("{name}/{}", given.len()));
+                rt.interned.insert("test/called".into(), note);
+                rt.interned.insert(
+                    "test/first".into(),
+                    given.first().copied().unwrap_or(V::NULL),
+                );
+                return box_raw(rt, V::I(7));
+            }
+            // No code of the mod's for it: the runtime's, as a call that finds none goes.
+            crate::api::call(rt, owner_key, args)
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.vcall = Some(vcall);
+        rt.supers.insert(
+            "m/Handler",
+            "com/google/common/reflect/AbstractInvocationHandler",
+        );
+        rt.supers.insert("m/Listener", "java/lang/Object");
+        let handler = rt.new_object("m/Handler");
+        crate::api::call(
+            &mut rt,
+            "com/google/common/reflect/AbstractInvocationHandler.<init>.()V",
+            &[handler],
+        );
+        let listener = rt.class_literal("m/Listener");
+        let interfaces = rt.alloc("[Ljava/lang/Class;", Data::Array(vec![listener]));
+        let proxy = crate::api::call(
+            &mut rt,
+            "java/lang/reflect/Proxy.newProxyInstance.(Ljava/lang/ClassLoader;[Ljava/lang/Class;Ljava/lang/reflect/InvocationHandler;)Ljava/lang/Object;",
+            &[V::NULL, interfaces, handler],
+        );
+        assert!(rt.instance_of(proxy, "m/Listener"));
+        let called = |rt: &Rt| {
+            rt.interned
+                .get("test/called")
+                .and_then(|v| rt.str_of(*v))
+                .unwrap_or("")
+                .to_owned()
+        };
+
+        let word = rt.string("word");
+        let counted = crate::api::call(
+            &mut rt,
+            "m/Listener.count.(ILjava/lang/String;)I",
+            &[proxy, V::I(3), word],
+        );
+        assert_eq!(counted, V::I(7), "an int comes back out of its box");
+        assert_eq!(called(&rt), "count/2");
+        let first = rt.interned["test/first"];
+        assert_eq!(
+            (rt.class_of(first), rt.get_field(first, "value")),
+            ("java/lang/Integer", V::I(3))
+        );
+
+        assert_eq!(
+            crate::api::call(&mut rt, "m/Listener.tick.()V", &[proxy]),
+            V::Void
+        );
+        assert_eq!(called(&rt), "tick/0");
+
+        // What Architectury's handler does with the method it is handed: each listener, a
+        // lambda no class has a method for, is called through a handle of it.
+        fn lambda(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            (id == 9).then(|| {
+                let heard = rt.string(&format!(
+                    "heard {} and {:?}",
+                    rt.str_of(args[2]).unwrap_or("?"),
+                    args[1]
+                ));
+                rt.interned.insert("test/heard".into(), heard);
+                V::I(11)
+            })
+        }
+        rt.lambda_call = Some(lambda);
+        let listener = rt.lambda_id("m/Listener", 9, Vec::new());
+        let class = rt.class_literal("m/Listener");
+        let method = method_object(&mut rt, class, "count", "(ILjava/lang/String;)I");
+        let lookup = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandles.lookup.()Ljava/lang/invoke/MethodHandles$Lookup;",
+            &[],
+        );
+        let handle = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandles$Lookup.unreflect.(Ljava/lang/reflect/Method;)Ljava/lang/invoke/MethodHandle;",
+            &[lookup, method],
+        );
+        let bound = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandle.bindTo.(Ljava/lang/Object;)Ljava/lang/invoke/MethodHandle;",
+            &[handle, listener],
+        );
+        let three = box_raw(&mut rt, V::I(3));
+        let given = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![three, word]));
+        let answered = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandle.invokeWithArguments.([Ljava/lang/Object;)Ljava/lang/Object;",
+            &[bound, given],
+        );
+        assert_eq!(
+            rt.interned.get("test/heard").and_then(|v| rt.str_of(*v)),
+            Some("heard word and I(3)")
+        );
+        assert_eq!(
+            (rt.class_of(answered), rt.get_field(answered, "value")),
+            ("java/lang/Integer", V::I(11))
+        );
+        let of = crate::api::call(
+            &mut rt,
+            "java/lang/reflect/Proxy.getInvocationHandler.(Ljava/lang/Object;)Ljava/lang/reflect/InvocationHandler;",
+            &[proxy],
+        );
+        assert_eq!(of, handler);
+        assert!(rt.thrown.is_none());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// A `ServiceLoader` passes over a provider whose class is not in the translation (a
     /// library a jar carries for its native code) and makes those that are, in the file's
