@@ -10677,6 +10677,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     single text or array made meanwhile, not by all that was allocated, which garbage
     collected inside the hook makes meaningless; and when it stops a loop it names the calls
     asked most, since the trace names each only at its first.
+- [x] 2026-11-10 Part 182: a static method runs by reflection.
+  - Launch 18's trace of reflective calls that found no code (Part 175 prints them) has 82
+    lines, and they are two things. 19 are `method.invoke(null, ...)`: a static method of a
+    mod's own class, which reflection could find and not run. AE2 asks each part class for
+    its `@PartModels` method so (with Ars Energistique's and Applied Mekanistics' parts),
+    and its test plots; Iceberg registers its configs, Create's goggles take another mod's
+    predicate, spark sets its provider and Architectury reads its network adaptor the same
+    way. The other 63 are MineColonies naming each transition of its citizens' state machines
+    after the method its lambda runs, read from `writeReplace()`.
+  - A class's reflection now has its static methods (`s:name.desc`, the class initialised
+    first, as a call of one does), and `Method.invoke` and a handle from `findStatic` run
+    them, arguments unboxed and the result boxed as the descriptor says. `getMethod` and
+    `getDeclaredMethod` find a method as the class files declare it: the class that declares
+    it, its access and descriptor, up the mods' superclasses and through their interfaces
+    for a public one. Where every class in that chain is the mods', a method none declares
+    is a `NoSuchMethodException`, which is what a mod asking after a newer version of
+    another expects; under a class of the game's or of Java's the method is still taken to
+    be there. What a reflected method throws comes wrapped in an
+    `InvocationTargetException`, and an uncaught exception's report names its causes.
+  - Not every static method gets an entry. The pack declares 104,772 with code that the
+    compiler did not make; 28,051 of them no bytecode names, and the linker drops those
+    today (1.25 of 37.4 MB of bytecode, where the executable has 146 MB left of the 2 GB
+    an arm64 one may be). An entry keeps a method's code, so the translator writes one only
+    for a method reflection can find: one some bytecode names (resolved up the superclasses
+    as the JVM resolves it), one whose name some class holds as a string constant or as a
+    call site's name, or one with an annotation reflection sees. That leaves out 12,191 of
+    the 28,051 (0.45 MB of bytecode), all of them library code nothing in the pack can reach,
+    and gives the other 92,581 their entries.
+  - A lambda's `writeReplace()` gives a `SerializedLambda` of what it was made of: the
+    method it runs, what it captured, and the interface it was made for.
+  - `ServerStartedEvent` of launch 18 ended in the guard against loops (12.2 million calls
+    nothing maps in 10 s) and took DragonLib's network pool with it. The loop was Create
+    Railways Navigator's listener thread, which sleeps a second between its tasks with
+    `TimeUnit.sleep`: that was not a wait, so the thread's body never left the game's
+    thread. `TimeUnit`'s sleep and timed waits are waits now, as taking from an empty
+    blocking queue is (`take`, a `poll` with a timeout): nothing on the game's own thread,
+    the interrupt that ends a started thread's loop. A thread's body counts the calls
+    nothing maps for itself, so one stopped for them leaves the listener that started it
+    its own count. Blocking queues have their methods (`put`, `offer` and `poll` with a
+    timeout, `drainTo`, `remainingCapacity`), `ArrayBlockingQueue` and `SynchronousQueue`
+    are queues, and one made with a capacity takes no more than that.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

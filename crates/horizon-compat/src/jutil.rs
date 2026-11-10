@@ -1439,12 +1439,109 @@ fn int_box(rt: &mut Rt, i: i32) -> V {
     o
 }
 
+/// Where a blocking queue made with a capacity keeps it.
+const CAPACITY: &str = "$capacity";
+
+/// Whether `owner` is a blocking queue's class or interface: what answers [`blocking_call`]'s
+/// methods before a plain queue's.
+fn blocking(owner: &str) -> bool {
+    matches!(
+        owner.strip_prefix("java/util/concurrent/"),
+        Some(
+            "BlockingQueue"
+                | "BlockingDeque"
+                | "TransferQueue"
+                | "ArrayBlockingQueue"
+                | "LinkedBlockingQueue"
+                | "LinkedBlockingDeque"
+                | "SynchronousQueue"
+                | "LinkedTransferQueue"
+        )
+    )
+}
+
+/// What a blocking queue has past a queue's own methods, on the one thread there is. A queue
+/// with a capacity that is full takes no more: `offer` says so and `add` fails, as they do;
+/// `put`, which would wait for room nothing here makes, adds all the same. Taking from an empty
+/// one is a wait ([`crate::jsystem::wait`]): over at once with nothing on the game's own
+/// thread, and the interrupt that ends the loop of a thread a mod started (a worker that takes
+/// its tasks from the queue). None for every other method, a plain queue's.
+fn blocking_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let len = list(rt, this)?.len();
+    let capacity = match rt.side_fields.get(&this.r()).and_then(|f| f.get(CAPACITY)) {
+        Some(V::I(n)) => *n as usize,
+        // One made without holds `Integer.MAX_VALUE`.
+        _ => i32::MAX as usize,
+    };
+    let params = crate::jlang::kinds(desc).len();
+    Some(match name {
+        "remainingCapacity" => V::I(capacity.saturating_sub(len) as i32),
+        "offer" | "offerFirst" | "offerLast" | "tryTransfer" if len >= capacity => V::I(0),
+        "add" | "addFirst" | "addLast" if len >= capacity && params == 1 => {
+            crate::jlang::throw_with(rt, "java/lang/IllegalStateException", "Queue full")
+        }
+        // With a timeout, or waiting for room: added.
+        "offer" | "offerFirst" | "offerLast" | "tryTransfer" | "put" | "putFirst" | "putLast"
+        | "transfer"
+            if params == 3 || !name.starts_with("offer") =>
+        {
+            let l = list_mut(rt, this)?;
+            if name.ends_with("First") {
+                l.insert(0, a(1))
+            } else {
+                l.push(a(1))
+            }
+            if desc.ends_with(")Z") {
+                V::I(1)
+            } else {
+                V::Void
+            }
+        }
+        "take" | "takeFirst" | "takeLast" | "poll" | "pollFirst" | "pollLast"
+            if name.starts_with("take") || params == 2 =>
+        {
+            if len == 0 {
+                crate::jsystem::wait(rt);
+                return Some(V::NULL);
+            }
+            let l = list_mut(rt, this)?;
+            if name.ends_with("Last") {
+                l.pop().unwrap_or(V::NULL)
+            } else {
+                l.remove(0)
+            }
+        }
+        // `drainTo(collection)`, or at most so many of them.
+        "drainTo" => {
+            let most = if params == 2 {
+                a(2).i().max(0) as usize
+            } else {
+                usize::MAX
+            };
+            let l = list_mut(rt, this)?;
+            let taken: Vec<V> = l.drain(..len.min(most)).collect();
+            for &v in &taken {
+                crate::api::call(
+                    rt,
+                    "java/util/Collection.add.(Ljava/lang/Object;)Z",
+                    &[a(1), v],
+                );
+            }
+            V::I(taken.len() as i32)
+        }
+        _ => return None,
+    })
+}
+
 /// The kind a constructor of `class` makes, or None for classes this module doesn't model.
 fn kind_of(class: &str) -> Option<&'static str> {
     let simple = class.rsplit('/').next().unwrap_or(class);
     Some(match simple {
         "ArrayList" | "LinkedList" | "ArrayDeque" | "Vector" | "Stack" | "CopyOnWriteArrayList"
-        | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" | "LinkedBlockingDeque" => "list",
+        | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" | "LinkedBlockingDeque"
+        | "ArrayBlockingQueue" | "SynchronousQueue" | "LinkedTransferQueue" => "list",
         // fastutil's lists and queues of each element type (`ReferenceArrayList`, `LongArrayList`,
         // `IntArrayFIFOQueue`, `IntImmutableList`...).
         s if class.starts_with("it/unimi/dsi/fastutil/")
@@ -1876,6 +1973,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             o.class = class;
         }
+        // A blocking queue made with a capacity holds no more than that ([`blocking_call`]).
+        if blocking(owner) && desc.starts_with("(I") {
+            rt.put_field(this, CAPACITY, V::I(a(1).i().max(1)));
+        }
         // A custom-hash one's strategy, its last argument: set before what it copies goes in.
         if desc.ends_with("Lit/unimi/dsi/fastutil/Hash$Strategy;)V")
             && let Some(&s) = args.last()
@@ -1938,6 +2039,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return Some(V::Void);
     }
     let this = a(0);
+    if blocking(owner)
+        && let Some(v) = blocking_call(rt, name, desc, args)
+    {
+        return Some(v);
+    }
     let data_kind = rt.heap.get(this.r() as usize).map(|o| match &o.data {
         Data::List(_) => 'l',
         Data::Table(_) => 't',

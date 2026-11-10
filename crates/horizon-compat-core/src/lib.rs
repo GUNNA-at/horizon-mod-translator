@@ -1146,6 +1146,23 @@ impl Rt {
             for m in path.iter().take(24) {
                 eprintln!("    at {m}");
             }
+            // What it wraps (a reflective call's `InvocationTargetException`, a mod's
+            // `RuntimeException(e)`): the causes, down to the first.
+            let (mut at, mut depth) = (e, 0);
+            while let V::R(cause) = self.get_field(at, "cause")
+                && cause != 0
+                && cause != at.r()
+                && depth < 8
+            {
+                at = V::R(cause);
+                depth += 1;
+                let msg = self.get_field(at, "message");
+                eprintln!(
+                    "    caused by {}: {}",
+                    self.class_of(at),
+                    self.str_of(msg).unwrap_or("")
+                );
+            }
         }
     }
 

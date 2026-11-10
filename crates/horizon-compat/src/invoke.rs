@@ -183,14 +183,19 @@ pub(crate) fn invoke_handle(rt: &mut Rt, h: V, args: &[V], ret: char) -> Option<
             let t = rt.get_field(h, "$type");
             let desc = descriptor(rt, t);
             if rt.is_mod_class(&class) {
-                return None;
+                // One of the mods' own: its code, by the class that declares it.
+                let params = &desc[..desc.find(')').map_or(desc.len(), |i| i + 1)];
+                let (declaring, _, whole) =
+                    crate::jlang::declared_method(rt, &class, &name, params, true)?;
+                crate::jlang::run_static(rt, &declaring, &name, &whole, args)?
+            } else {
+                let key = rt.static_key(&format!("{class}.{name}.{desc}"));
+                let mut vals = args.to_vec();
+                for (v, k) in vals.iter_mut().zip(crate::jlang::kinds(&desc)) {
+                    *v = crate::mixin::unbox(rt, *v, k);
+                }
+                crate::api::call(rt, key, &vals)
             }
-            let key = rt.static_key(&format!("{class}.{name}.{desc}"));
-            let mut vals = args.to_vec();
-            for (v, k) in vals.iter_mut().zip(crate::jlang::kinds(&desc)) {
-                *v = crate::mixin::unbox(rt, *v, k);
-            }
-            crate::api::call(rt, key, &vals)
         }
         "new" => {
             let class = text(rt, rt.get_field(h, "$class"));

@@ -186,13 +186,25 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
             return;
         }
         let outer = STARTED.with(|s| s.replace((s.get().0 + 1, 0)));
+        // Its body is a piece of its own for the calls nothing maps: a loop of it that was
+        // stopped for them leaves what started the thread its own count.
+        let misses = (
+            std::mem::take(&mut rt.hook_misses),
+            rt.hook_first_miss.take(),
+        );
         rt.call_functional(RUN, body, &[]);
+        (rt.hook_misses, rt.hook_first_miss) = misses;
         STARTED.with(|s| s.set(outer));
         // What ended it stays in it, as on a JVM: an interrupt silently, anything else named.
         if let Some(t) = rt.thrown.take()
             && rt.class_of(t) != "java/lang/InterruptedException"
         {
-            eprintln!("horizon-compat: a thread a mod started ended with {}", rt.class_of(t));
+            let message = rt.get_field(t, "message");
+            eprintln!(
+                "horizon-compat: a thread a mod started ended with {}: {}",
+                rt.class_of(t),
+                rt.str_of(message).unwrap_or("")
+            );
         }
     };
     Some(match name {
@@ -1885,6 +1897,55 @@ mod tests {
         c(&mut rt, "java/lang/Thread.join.()V", &[worker]);
         assert_eq!(c(&mut rt, "java/lang/Thread.isAlive.()Z", &[worker]), V::I(0));
         assert!(rt.thrown.is_none() && rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        // A unit of time's sleep and a take from an empty queue are waits too: nothing on the
+        // game's own thread, an interrupt in a started thread's body.
+        let (seconds, queue) = (
+            crate::api::get_static(&mut rt, "java/util/concurrent/TimeUnit.SECONDS"),
+            rt.new_object("java/util/concurrent/LinkedBlockingQueue"),
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/LinkedBlockingQueue.<init>.()V",
+            &[queue],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/TimeUnit.sleep.(J)V",
+            &[seconds, V::J(1)],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/BlockingQueue.take.()Ljava/lang/Object;",
+                &[queue]
+            ),
+            V::NULL
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+        STARTED.with(|s| s.set((1, 0)));
+        for key in [
+            "java/util/concurrent/TimeUnit.sleep.(J)V",
+            "java/util/concurrent/BlockingQueue.take.()Ljava/lang/Object;",
+            "java/util/concurrent/BlockingQueue.poll.(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;",
+        ] {
+            STARTED.with(|s| s.set((1, 0)));
+            let args = if key.contains("TimeUnit.sleep") {
+                vec![seconds, V::J(1)]
+            } else {
+                vec![queue, V::J(1), seconds]
+            };
+            c(&mut rt, key, &args);
+            let thrown = rt.thrown.take().unwrap_or_else(|| panic!("{key} waited"));
+            assert_eq!(
+                rt.class_of(thrown),
+                "java/lang/InterruptedException",
+                "{key}"
+            );
+        }
         // In a started thread's body a wait interrupts it, and past a few of them stops it.
         STARTED.with(|s| s.set((1, 0)));
         assert_eq!(c(&mut rt, "java/lang/Thread.interrupted.()Z", &[]), V::I(1));

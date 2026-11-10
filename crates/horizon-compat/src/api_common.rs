@@ -553,6 +553,7 @@ const CHRONO_NANOS: [i128; 16] = [
 ];
 const THREAD_POOL: &str = "java/util/concurrent/ThreadPoolExecutor";
 const SCHEDULED_POOL: &str = "java/util/concurrent/ScheduledThreadPoolExecutor";
+const FORK_JOIN_POOL: &str = "java/util/concurrent/ForkJoinPool";
 const SCHEDULED_FUTURE: &str = "java/util/concurrent/ScheduledFuture";
 const THREAD_FACTORY_BUILDER: &str = "com/google/common/util/concurrent/ThreadFactoryBuilder";
 const TICKET_TYPE: &str = "net/minecraft/server/level/TicketType";
@@ -648,6 +649,7 @@ fn is_executor(class: &str) -> bool {
             | "java/util/concurrent/AbstractExecutorService"
             | THREAD_POOL
             | SCHEDULED_POOL
+            | FORK_JOIN_POOL
     )
 }
 
@@ -2129,6 +2131,12 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             plain_enum(rt, MONTH, names[i])?
         }
         (MONTH, "getValue") => V::I(rt.get_field(a(0), "$ordinal").i() + 1),
+        // `TimeUnit.sleep(d)` and its timed waits: a wait as `Thread.sleep` is one (Create
+        // Railways Navigator's listener thread sleeps a second between its tasks so).
+        ("java/util/concurrent/TimeUnit", "sleep" | "timedWait" | "timedJoin") => {
+            crate::jsystem::wait(rt);
+            V::Void
+        }
         // `TimeUnit`'s conversions (`MILLISECONDS.toSeconds(d)`, `convert(d, unit)`).
         ("java/util/concurrent/TimeUnit", n) if n.starts_with("to") || n == "convert" => {
             let this = rt.get_field(a(0), "$ordinal").i().max(0) as usize;
@@ -2281,7 +2289,17 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             "defaultThreadFactory" => rt.new_object("java/util/concurrent/ThreadFactory"),
             _ => return None,
         },
-        (THREAD_POOL | SCHEDULED_POOL, "<init>") => V::Void,
+        (THREAD_POOL | SCHEDULED_POOL | FORK_JOIN_POOL, "<init>") => V::Void,
+        (FORK_JOIN_POOL, "commonPool") => rt.intern("compat:common-pool".into(), |rt| {
+            executor(rt, FORK_JOIN_POOL)
+        }),
+        // What a pool does with a task it has no room for: it never has none here.
+        (o, "<init>")
+            if o.strip_prefix("java/util/concurrent/ThreadPoolExecutor$")
+                .is_some_and(|p| p.ends_with("Policy")) =>
+        {
+            V::Void
+        }
         (o, n) if is_executor(o) && is_executor(rt.class_of(a(0))) => match n {
             "execute" => {
                 rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);

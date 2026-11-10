@@ -1466,7 +1466,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             V::Void
         }
         k if exception_class(k) && (k.contains(".getMessage.") || k.contains(".getLocalizedMessage.")) => rt.get_field(a(0), "message"),
-        k if exception_class(k) && k.contains(".getCause.") => match rt.get_field(a(0), "cause") {
+        k if exception_class(k) && (k.contains(".getCause.") || k.contains(".getTargetException.")) => match rt.get_field(a(0), "cause") {
             V::Void => V::NULL,
             c => c,
         },

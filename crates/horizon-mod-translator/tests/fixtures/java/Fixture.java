@@ -454,4 +454,88 @@ public class Fixture {
         for (int p : parts) acc = acc * 31 + p;
         return acc;
     }
+
+    // Static methods by reflection, as AE2 runs each part class's `@PartModels` method and a mod
+    // another's by its name: a public one, a private one, one the class above declares, one that
+    // throws, one found by its annotation, one through a handle; and those that are not there.
+    @java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+    @interface Marked { int value(); }
+    static class Tools {
+        static int calls;
+        public static int twice(int n) { calls++; return n * 2; }
+        private static long hidden(int a, String b) { return a * 1000L + b.length(); }
+        public static void bump(int by) { calls += by; }
+        public static String fails(int n) { throw new IllegalStateException("no " + n); }
+        @Marked(7) static int marked(int n) { return n + 7; }
+        public static boolean flag(boolean b, char c, long l, double d) { return !b && c == 'x' && l == 5L && d == 0.5; }
+    }
+    static class MoreTools extends Tools { public static int own() { return 1; } }
+    interface Kept extends java.io.Serializable, java.util.function.IntUnaryOperator { }
+    public static int staticReflection(int k) {
+        int r = 0;
+        Tools.calls = 0;
+        try {
+            java.lang.reflect.Method twice = Tools.class.getMethod("twice", int.class);
+            r += (Integer) twice.invoke(null, k);
+            r += java.lang.reflect.Modifier.isStatic(twice.getModifiers()) ? 10 : 0;
+            java.lang.reflect.Method hidden = Tools.class.getDeclaredMethod("hidden", int.class, String.class);
+            hidden.setAccessible(true);
+            r += (int) (long) (Long) hidden.invoke(null, k, "abc") * 100;
+            java.lang.reflect.Method inherited = MoreTools.class.getMethod("twice", int.class);
+            r += (Integer) inherited.invoke(null, 3) * 1000 + (inherited.getDeclaringClass() == Tools.class ? 5 : 0);
+            Object none = Tools.class.getMethod("bump", int.class).invoke(null, 4);
+            r += (none == null ? 20 : 0) + Tools.calls * 10000;
+            try {
+                Tools.class.getMethod("fails", int.class).invoke(null, k);
+                r += 1;
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                r += e.getCause() instanceof IllegalStateException s && s.getMessage().equals("no " + k) ? 100000 : 0;
+            }
+            try { Tools.class.getMethod("absent"); r += 3; } catch (NoSuchMethodException e) { r += 200000; }
+            try { Tools.class.getMethod("hidden", int.class, String.class); r += 3; } catch (NoSuchMethodException e) { r += 400000; }
+            try { MoreTools.class.getDeclaredMethod("twice", int.class); r += 3; } catch (NoSuchMethodException e) { r += 800000; }
+            for (java.lang.reflect.Method m : Tools.class.getDeclaredMethods()) {
+                Marked marked = m.getAnnotation(Marked.class);
+                if (marked != null) r += ((Integer) m.invoke(null, marked.value())) * 1000000;
+            }
+            r += (Boolean) Tools.class.getMethod("flag", boolean.class, char.class, long.class, double.class).invoke(null, false, 'x', 5L, 0.5) ? 40 : 0;
+            java.lang.invoke.MethodHandle handle = java.lang.invoke.MethodHandles.lookup().findStatic(Tools.class, "twice", java.lang.invoke.MethodType.methodType(int.class, int.class));
+            r += (int) handle.invokeExact(k) * 3 + (Integer) handle.invokeWithArguments(5) * 7;
+            // What a serializable lambda was made of (MineColonies names its transitions so).
+            Kept named = Fixture::sumTo;
+            java.lang.reflect.Method replace = named.getClass().getDeclaredMethod("writeReplace");
+            replace.setAccessible(true);
+            java.lang.invoke.SerializedLambda made = (java.lang.invoke.SerializedLambda) replace.invoke(named);
+            r += made.getImplMethodName().equals("sumTo") && made.getImplClass().equals("Fixture") ? 80 : 0;
+        } catch (Throwable e) {
+            return -1 - r;
+        }
+        return r;
+    }
+
+    // Blocking queues, on one thread: a full one takes no more, a wait for what is there is none.
+    public static int blockingQueues(int k) {
+        java.util.concurrent.ArrayBlockingQueue<Integer> q = new java.util.concurrent.ArrayBlockingQueue<>(3);
+        int r = 0;
+        try {
+            r += (q.offer(1) ? 1 : 0) + (q.offer(2) ? 2 : 0) + q.remainingCapacity() * 10;
+            q.put(3);
+            r += (q.offer(4) ? 100 : 200) + q.remainingCapacity() * 1000;
+            try { q.add(5); r += 3; } catch (IllegalStateException e) { r += 4000; }
+            r += q.take() * 10000 + q.poll() * 100000;
+            java.util.List<Integer> out = new java.util.ArrayList<>();
+            q.offer(k);
+            r += q.drainTo(out) * 1000000 + out.get(1) * 3 + q.size();
+            java.util.concurrent.BlockingQueue<String> names = new java.util.concurrent.LinkedBlockingQueue<>();
+            names.put("a");
+            names.offer("b", 1, java.util.concurrent.TimeUnit.MILLISECONDS);
+            r += names.remainingCapacity() == Integer.MAX_VALUE ? 7 : 0;
+            r += names.poll(1, java.util.concurrent.TimeUnit.MILLISECONDS).charAt(0) + names.take().charAt(0);
+            r += names.poll(1, java.util.concurrent.TimeUnit.MILLISECONDS) == null ? 50 : 0;
+            java.util.concurrent.TimeUnit.MILLISECONDS.sleep(1);
+        } catch (InterruptedException e) {
+            return -1;
+        }
+        return r;
+    }
 }

@@ -262,6 +262,8 @@ mod tests {
                 "TYPE\t\tLnet/geforcemods/securitycraft/util/Marked;\t{}\n",
                 "METHOD\tsetup(I)V\tLnet/geforcemods/securitycraft/util/Marked;\t{}\n",
             ),
+            // Its methods, as the bundle lists every class's.
+            (crate::MEMBERS, CONTENT) => "9 setup (I)V\n9 setup ()V",
             (REINFORCED, "annotations") => concat!(
                 "TYPE\t\tLjava/lang/annotation/Retention;\t{\"value\":{\"e\":\"Ljava/lang/annotation/RetentionPolicy;\",\"v\":\"RUNTIME\"}}\n",
                 "DEFAULT\tregisterBlockItem\t\t{\"Z\":1}\n",

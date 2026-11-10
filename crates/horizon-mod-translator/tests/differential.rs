@@ -59,6 +59,8 @@ const CASES: &[(&str, &str, &[&str])] = &[
         "(I)I",
         &["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "0"],
     ),
+    ("staticReflection", "(I)I", &["0", "6", "-4"]),
+    ("blockingQueues", "(I)I", &["0", "9"]),
 ];
 
 fn has(tool: &str) -> bool {

@@ -395,6 +395,13 @@ pub(crate) fn return_kind(desc: &str) -> char {
 pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Option<V> {
     let class = text(rt, rt.get_field(method, "$class")).replace('.', "/");
     let name = text(rt, rt.get_field(method, "$name"));
+    // `writeReplace()` of a lambda, which the JVM gives every serializable one: what it was
+    // made of (MineColonies names each transition of its state machines by the method its
+    // lambda runs).
+    if name == "writeReplace" && args.is_empty() && obj.r() != 0 && rt.cid(obj) & crate::LAMBDA != 0
+    {
+        return Some(serialized_lambda(rt, obj));
+    }
     let params = rt.get_field(method, "$params");
     let mut prefix = format!("{name}.(");
     for p in crate::jutil::elements(rt, params) {
@@ -432,6 +439,20 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
             }
         }
         return None;
+    }
+    // A static method of the mods': its code by its class, name and descriptor, as the class's
+    // reflection lists it (AE2 asks each of its parts' classes for `getModels()` so, and
+    // Architectury its own network adaptor); the object it is given, if any, is not looked at.
+    let params = &prefix[name.len() + 1..];
+    if let Some((declaring, access, desc)) = declared_method(rt, &class, &name, params, true)
+        && access & 0x0008 != 0
+    {
+        let r = run_static(rt, &declaring, &name, &desc, args)?;
+        return Some(match return_kind(&desc) {
+            'V' => V::NULL,
+            'L' | '[' => r,
+            kind => box_as(rt, r, kind),
+        });
     }
     if obj.r() == 0 {
         return None;
@@ -568,6 +589,228 @@ fn told_of_missed_invoke(rt: &Rt, method: V, obj: V) {
     if first {
         eprintln!("horizon-compat: no code for the reflective call of {what} on {on}");
     }
+}
+
+/// The method `name` with the parameters `params` (`(I)`, its descriptor up to what it
+/// returns) that class `class` declares, or (`inherited`) the first class above it among the
+/// mods' own does: the class it is declared in, its access and its whole descriptor.
+pub(crate) fn declared_method(
+    rt: &mut Rt,
+    class: &str,
+    name: &str,
+    params: &str,
+    inherited: bool,
+) -> Option<(String, u16, String)> {
+    let mut at = Some(class.to_owned());
+    while let Some(c) = at {
+        if let Some((access, _, desc)) = members(rt, &c)
+            .into_iter()
+            .find(|m| m.1 == name && m.2.starts_with(params))
+        {
+            return Some((c, access, desc));
+        }
+        at = rt
+            .supers
+            .get(c.as_str())
+            .copied()
+            .filter(|s| inherited && rt.is_mod_class(s))
+            .map(str::to_owned);
+    }
+    None
+}
+
+/// Runs the static method `name.desc` of the mods' class `class` on `args` (primitives boxed
+/// or not, as reflection or a handle's call site hands them); what it returns is as the method
+/// returns it. None where the class's reflection has no code for it ([`Rt::reflect`]'s `s:`
+/// entries: a method no code of the mods could name).
+pub(crate) fn run_static(
+    rt: &mut Rt,
+    class: &str,
+    name: &str,
+    desc: &str,
+    args: &[V],
+) -> Option<V> {
+    let mut all = Vec::with_capacity(args.len());
+    for (v, k) in args.iter().zip(kinds(desc)) {
+        all.push(crate::mixin::unbox(rt, *v, k));
+    }
+    rt.reflect(class, &format!("s:{name}.{desc}"), &all)
+}
+
+/// What `Class.getMethod` (`public`: a public method of the class, of a class above it or of an
+/// interface of theirs) or `getDeclaredMethod` (any method of the class itself) finds for
+/// `name` and the parameters `params` (`(I)`), among the mods' classes: the class that declares
+/// it, its access and its descriptor, or none where there is none. `Err` where the answer is
+/// not the mods' classes' to give: the class is the game's or Java's, or it extends or
+/// implements one that could have the method.
+fn lookup_method(
+    rt: &mut Rt,
+    class: &str,
+    name: &str,
+    params: &str,
+    public: bool,
+) -> Result<Option<(String, u16, String)>, ()> {
+    if !rt.is_mod_class(class) {
+        return Err(());
+    }
+    let own = |rt: &mut Rt, c: &str| {
+        members(rt, c)
+            .into_iter()
+            // (A bridge has the same parameters as the method it stands before.)
+            .filter(|m| m.1 == name && m.2.starts_with(params) && (!public || m.0 & 0x0001 != 0))
+            .min_by_key(|m| m.0 & 0x0040)
+            .map(|(access, _, desc)| (c.to_owned(), access, desc))
+    };
+    if !public {
+        return Ok(own(rt, class));
+    }
+    // The classes, from this one up, then every interface they implement.
+    let (mut unknown, mut interfaces, mut at) = (false, Vec::new(), class.to_owned());
+    loop {
+        if let Some(found) = own(rt, &at) {
+            return Ok(Some(found));
+        }
+        interfaces.extend(
+            rt.interfaces
+                .get(at.as_str())
+                .copied()
+                .unwrap_or_default()
+                .iter()
+                .map(|i| (*i).to_owned()),
+        );
+        match rt.supers.get(at.as_str()).copied() {
+            Some(above) if rt.is_mod_class(above) => at = above.to_owned(),
+            // `Object`'s own are not the mods' to answer for.
+            Some("java/lang/Object") | None => {
+                unknown |= matches!(
+                    name,
+                    "getClass"
+                        | "hashCode"
+                        | "equals"
+                        | "toString"
+                        | "notify"
+                        | "notifyAll"
+                        | "wait"
+                );
+                break;
+            }
+            Some(_) => {
+                unknown = true;
+                break;
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    while let Some(i) = interfaces.pop() {
+        if !seen.insert(i.clone()) {
+            continue;
+        }
+        if !rt.is_mod_class(&i) {
+            unknown = true;
+            continue;
+        }
+        if let Some(found) = own(rt, &i) {
+            return Ok(Some(found));
+        }
+        interfaces.extend(
+            rt.interfaces
+                .get(i.as_str())
+                .copied()
+                .unwrap_or_default()
+                .iter()
+                .map(|i| (*i).to_owned()),
+        );
+    }
+    if unknown { Err(()) } else { Ok(None) }
+}
+
+const SERIALIZED_LAMBDA: &str = "java/lang/invoke/SerializedLambda";
+
+/// A lambda's `SerializedLambda`: the method it runs (its class is named after it:
+/// `owner.name.desc`), what it captured, and the interface it was made for.
+fn serialized_lambda(rt: &mut Rt, lambda: V) -> V {
+    let made_of = rt.class_of(lambda).to_owned();
+    let mut parts = made_of.splitn(3, '.');
+    let (owner, name, desc) = (
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+    );
+    let (interface, method) = rt.lambda_info.get(&lambda.r()).copied().unwrap_or(("", ""));
+    let captured = rt.captured(lambda).to_vec();
+    let s = rt.new_object(SERIALIZED_LAMBDA);
+    let captured = rt.alloc("[Ljava/lang/Object;", Data::Array(captured));
+    rt.put_field(s, "$captured", captured);
+    for (field, value) in [
+        ("$implClass", owner),
+        ("$implName", name),
+        ("$implDesc", desc),
+        ("$interface", interface),
+        ("$method", method),
+    ] {
+        let v = rt.string(value);
+        rt.put_field(s, field, v);
+    }
+    s
+}
+
+/// `SerializedLambda`'s answers.
+fn serialized_lambda_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let this = args.first().copied().unwrap_or_default();
+    Some(match name {
+        "getImplClass" => rt.get_field(this, "$implClass"),
+        // Where the lambda was written: the class of its body. (A method reference's own
+        // class is not kept: it is taken to be written where the method is.)
+        "getCapturingClass" => rt.get_field(this, "$implClass"),
+        "getImplMethodName" => rt.get_field(this, "$implName"),
+        "getImplMethodSignature" => rt.get_field(this, "$implDesc"),
+        "getFunctionalInterfaceClass" => rt.get_field(this, "$interface"),
+        "getFunctionalInterfaceMethodName" => rt.get_field(this, "$method"),
+        // `REF_invokeStatic`, `REF_newInvokeSpecial`, `REF_invokeSpecial` (a lambda's body on
+        // its object) or `REF_invokeVirtual`, by what the class file says of the method.
+        "getImplMethodKind" => {
+            let (class, method, desc) = (
+                text(rt, rt.get_field(this, "$implClass")),
+                text(rt, rt.get_field(this, "$implName")),
+                text(rt, rt.get_field(this, "$implDesc")),
+            );
+            let params = &desc[..desc.find(')').map_or(desc.len(), |i| i + 1)];
+            let is_static = declared_method(rt, &class, &method, params, true)
+                .is_some_and(|(_, access, _)| access & 0x0008 != 0);
+            V::I(match method.as_str() {
+                _ if is_static => 6,
+                "<init>" => 8,
+                m if m.starts_with("lambda$") => 7,
+                _ => 5,
+            })
+        }
+        "getCapturedArgCount" => {
+            let captured = rt.get_field(this, "$captured");
+            V::I(crate::jutil::elements(rt, captured).len() as i32)
+        }
+        "getCapturedArg" => {
+            let captured = rt.get_field(this, "$captured");
+            let i = args.get(1).copied().unwrap_or_default().i();
+            match crate::jutil::elements(rt, captured).get(i.max(0) as usize) {
+                Some(v) if i >= 0 => box_raw(rt, *v),
+                _ => throw_with(
+                    rt,
+                    "java/lang/ArrayIndexOutOfBoundsException",
+                    &format!("Index {i} out of bounds"),
+                ),
+            }
+        }
+        "toString" => {
+            let (class, method) = (
+                text(rt, rt.get_field(this, "$implClass")),
+                text(rt, rt.get_field(this, "$implName")),
+            );
+            rt.string(&format!(
+                "SerializedLambda[implementation={class}::{method}]"
+            ))
+        }
+        _ => return None,
+    })
 }
 
 /// A primitive boxed as what declares it says (`kind`: a field's or an array's type, a
@@ -1521,6 +1764,35 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::I(matches!(n, "int" | "long" | "boolean" | "byte" | "char" | "short" | "float" | "double" | "void") as i32)
             }
             "getDeclaredMethod" | "getMethod" => {
+                // One of the mods' own classes' methods as its class file has it: the class
+                // that declares it, its descriptor and its access (`getMethod` looks above
+                // too, for a public one).
+                let class = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                let wanted = text(rt, a(1));
+                let mut params = String::from("(");
+                for p in crate::jutil::elements(rt, a(2)) {
+                    params.push_str(&descriptor_of(rt.str_of(p).unwrap_or("java/lang/Object")));
+                }
+                params.push(')');
+                match lookup_method(rt, &class, &wanted, &params, name == "getMethod") {
+                    Ok(Some((declaring, _, desc))) => {
+                        let owner = rt.class_literal(&declaring);
+                        return Some(method_object(rt, owner, &wanted, &desc));
+                    }
+                    // None such, as the mod may be asking to learn (a method of a newer
+                    // version of another mod).
+                    Ok(None) => {
+                        let message = format!(
+                            "{}.{wanted}{}",
+                            class.replace('/', "."),
+                            params.replace('/', ".")
+                        );
+                        return Some(throw_with(rt, "java/lang/NoSuchMethodException", &message));
+                    }
+                    Err(()) => {}
+                }
+                // One no class file read here declares or rules out: taken to be there (a
+                // method of the game's or of Java's own, above the mods' classes).
                 let m = rt.new_object("java/lang/reflect/Method");
                 rt.put_field(m, "$class", a(0));
                 rt.put_field(m, "$name", a(1));
@@ -1969,9 +2241,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "invoke" => {
                 let vals = crate::jutil::elements(rt, a(2));
+                let before = rt.thrown;
                 let answered = invoke_method(rt, a(0), a(1), &vals);
                 if answered.is_none() {
                     told_of_missed_invoke(rt, a(0), a(1));
+                }
+                // What the method threw comes back as the cause of an
+                // `InvocationTargetException`, as reflection hands it on.
+                if let Some(thrown) = rt
+                    .thrown
+                    .filter(|t| Some(*t) != before && answered.is_some())
+                {
+                    let wrapped = rt.new_object("java/lang/reflect/InvocationTargetException");
+                    rt.put_field(wrapped, "cause", thrown);
+                    rt.thrown = Some(wrapped);
                 }
                 return answered;
             }
@@ -2010,6 +2293,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             _ => return None,
         }),
+        SERIALIZED_LAMBDA => serialized_lambda_call(rt, name, args),
         o if o.starts_with("java/lang/invoke/") => crate::invoke::call(rt, o, name, desc, args),
 
         // One runtime runs on one game thread, so it is the same `Thread` each time it asks: ESL's
@@ -4538,6 +4822,9 @@ mod tests {
                     rt.string("1 energy J\n1 active Z\n1 symbol C\n1 tier B\n25 COUNT I\n"),
                 );
             }
+            if (class, what) == (crate::MEMBERS, "t/Machine") {
+                return Some(rt.string("1 isActive ()Z\n1 getEnergy ()J"));
+            }
             Some(V::Void)
         }
         let mut rt = Rt::new();
@@ -4753,6 +5040,251 @@ mod tests {
         let thrown = rt.thrown.take().expect("no such constructor");
         assert_eq!(rt.class_of(thrown), "java/lang/NoSuchMethodException");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `getMethod` and `getDeclaredMethod` find what the classes' files declare, and say so
+    /// when there is none; a static method runs by its class's reflection, what it throws
+    /// wrapped as reflection hands it on.
+    #[test]
+    fn a_static_method_is_found_and_run_by_reflection() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {
+            match (class, what) {
+                (crate::MEMBERS, "t/Tools") => Some(rt.string(
+                    "9 twice (I)I\n10 hidden (ILjava/lang/String;)J\n9 fails ()V\n1 run ()V",
+                )),
+                (crate::MEMBERS, "t/More") => Some(rt.string("9 own ()I")),
+                (crate::MEMBERS, "t/Named") => Some(rt.string("1025 name ()Ljava/lang/String;")),
+                ("t/Tools", "s:twice.(I)I") => Some(V::I(args[0].i() * 2)),
+                ("t/Tools", "s:hidden.(ILjava/lang/String;)J") => Some(V::J(
+                    i64::from(args[0].i()) * 1000
+                        + rt.str_of(args[1]).map_or(0, |s| s.len() as i64),
+                )),
+                ("t/Tools", "s:fails.()V") => {
+                    throw_with(rt, "java/lang/IllegalStateException", "no");
+                    Some(V::Void)
+                }
+                _ => None,
+            }
+        }
+        let c = crate::api::call;
+        const GET: &str = "java/lang/Class.getMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;";
+        const DECLARED: &str = "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;";
+        const INVOKE: &str = "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;";
+        let mut rt = Rt::new();
+        rt.supers.insert("t/Tools", "java/lang/Object");
+        rt.supers.insert("t/More", "t/Tools");
+        rt.supers.insert("t/Named", "java/lang/Object");
+        rt.supers
+            .insert("t/Machine", "net/minecraft/world/level/block/Block");
+        rt.interfaces.insert("t/More", &["t/Named"]);
+        rt.reflect = Some(reflect);
+        let find = |rt: &mut Rt, how: &'static str, class: &str, name: &str, params: &[&str]| {
+            let (class, name) = (rt.class_literal(class), rt.string(name));
+            let params: Vec<V> = params.iter().map(|p| rt.class_literal(p)).collect();
+            let params = rt.alloc("[Ljava/lang/Class;", Data::Array(params));
+            c(rt, how, &[class, name, params])
+        };
+        let invoke = |rt: &mut Rt, method: V, args: Vec<V>| {
+            let args = rt.alloc("[Ljava/lang/Object;", Data::Array(args));
+            c(rt, INVOKE, &[method, V::NULL, args])
+        };
+        // Through the class below: the method is the one the class above declares.
+        let twice = find(&mut rt, GET, "t/More", "twice", &["int"]);
+        let declaring = c(
+            &mut rt,
+            "java/lang/reflect/Method.getDeclaringClass.()Ljava/lang/Class;",
+            &[twice],
+        );
+        assert_eq!(rt.str_of(declaring), Some("t/Tools"));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Method.getModifiers.()I",
+                &[twice]
+            ),
+            V::I(9)
+        );
+        let seven = crate::mixin::box_value(&mut rt, V::I(7), 'I');
+        let r = invoke(&mut rt, twice, vec![seven]);
+        assert_eq!(
+            (rt.class_of(r), rt.get_field(r, "value")),
+            ("java/lang/Integer", V::I(14))
+        );
+        // A private one, by the class itself only.
+        let hidden = find(
+            &mut rt,
+            DECLARED,
+            "t/Tools",
+            "hidden",
+            &["int", "java/lang/String"],
+        );
+        let text = rt.string("abc");
+        let r = invoke(&mut rt, hidden, vec![seven, text]);
+        assert_eq!(
+            (rt.class_of(r), rt.get_field(r, "value")),
+            ("java/lang/Long", V::J(7003))
+        );
+        // What the method threw is the cause of what the call throws.
+        let fails = find(&mut rt, GET, "t/Tools", "fails", &[]);
+        invoke(&mut rt, fails, Vec::new());
+        let thrown = rt.thrown.take().expect("thrown");
+        assert_eq!(
+            rt.class_of(thrown),
+            "java/lang/reflect/InvocationTargetException"
+        );
+        let cause = c(
+            &mut rt,
+            "java/lang/reflect/InvocationTargetException.getCause.()Ljava/lang/Throwable;",
+            &[thrown],
+        );
+        assert_eq!(rt.class_of(cause), "java/lang/IllegalStateException");
+        let target = c(
+            &mut rt,
+            "java/lang/reflect/InvocationTargetException.getTargetException.()Ljava/lang/Throwable;",
+            &[thrown],
+        );
+        assert_eq!(target, cause);
+        // None such: not public, not this class's own, not there at all.
+        for (how, class, name, params) in [
+            (GET, "t/Tools", "hidden", &["int", "java/lang/String"][..]),
+            (DECLARED, "t/More", "twice", &["int"]),
+            (GET, "t/More", "absent", &[]),
+            (GET, "t/Tools", "twice", &["long"]),
+        ] {
+            find(&mut rt, how, class, name, params);
+            let thrown = rt
+                .thrown
+                .take()
+                .unwrap_or_else(|| panic!("{class}.{name} was found"));
+            assert_eq!(rt.class_of(thrown), "java/lang/NoSuchMethodException");
+        }
+        // An interface's, through the class that implements it.
+        let name = find(&mut rt, GET, "t/More", "name", &[]);
+        let declaring = c(
+            &mut rt,
+            "java/lang/reflect/Method.getDeclaringClass.()Ljava/lang/Class;",
+            &[name],
+        );
+        assert_eq!(rt.str_of(declaring), Some("t/Named"));
+        // What the game's class above or `Object` may declare is not ruled out.
+        for (class, name) in [
+            ("t/Machine", "absent"),
+            ("t/Tools", "hashCode"),
+            ("net/minecraft/world/level/block/Block", "absent"),
+        ] {
+            let m = find(&mut rt, GET, class, name, &[]);
+            assert!(
+                rt.thrown.is_none() && rt.class_of(m) == "java/lang/reflect/Method",
+                "{class}.{name}"
+            );
+        }
+        // A handle to a static method runs the same code, its result as the call site takes it.
+        let lookup = c(
+            &mut rt,
+            "java/lang/invoke/MethodHandles.lookup.()Ljava/lang/invoke/MethodHandles$Lookup;",
+            &[],
+        );
+        let (tools, name, int) = (
+            rt.class_literal("t/More"),
+            rt.string("twice"),
+            rt.class_literal("int"),
+        );
+        let ty = c(
+            &mut rt,
+            "java/lang/invoke/MethodType.methodType.(Ljava/lang/Class;Ljava/lang/Class;)Ljava/lang/invoke/MethodType;",
+            &[int, int],
+        );
+        let handle = c(
+            &mut rt,
+            "java/lang/invoke/MethodHandles$Lookup.findStatic.(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;",
+            &[lookup, tools, name, ty],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/invoke/MethodHandle.invokeExact.(I)I",
+                &[handle, V::I(21)]
+            ),
+            V::I(42)
+        );
+        let boxed = c(
+            &mut rt,
+            "java/lang/invoke/MethodHandle.invoke.(I)Ljava/lang/Object;",
+            &[handle, V::I(4)],
+        );
+        assert_eq!(
+            (rt.class_of(boxed), rt.get_field(boxed, "value")),
+            ("java/lang/Integer", V::I(8))
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
+    /// A serializable lambda's `writeReplace()` gives what it was made of.
+    #[test]
+    fn a_lambda_tells_what_it_was_made_of() {
+        let c = crate::api::call;
+        let mut rt = Rt::new();
+        let lambda = rt.lambda_id("t/pkg/Guard.patrol.()Z", 3, vec![V::I(5)]);
+        rt.lambda_info.insert(
+            lambda.r(),
+            ("java/util/function/BooleanSupplier", "getAsBoolean"),
+        );
+        let class = c(
+            &mut rt,
+            "java/lang/Object.getClass.()Ljava/lang/Class;",
+            &[lambda],
+        );
+        let (name, none) = (rt.string("writeReplace"), rt.new_array(0, V::NULL));
+        let replace = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+            &[class, name, none],
+        );
+        let made = c(
+            &mut rt,
+            "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+            &[replace, lambda, none],
+        );
+        assert_eq!(rt.class_of(made), "java/lang/invoke/SerializedLambda");
+        for (asked, want) in [
+            ("getImplMethodName", "patrol"),
+            ("getImplClass", "t/pkg/Guard"),
+            ("getImplMethodSignature", "()Z"),
+            (
+                "getFunctionalInterfaceClass",
+                "java/util/function/BooleanSupplier",
+            ),
+            ("getFunctionalInterfaceMethodName", "getAsBoolean"),
+        ] {
+            let key = rt.static_key(&format!(
+                "java/lang/invoke/SerializedLambda.{asked}.()Ljava/lang/String;"
+            ));
+            let got = c(&mut rt, key, &[made]);
+            assert_eq!(rt.str_of(got), Some(want), "{asked}");
+        }
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/invoke/SerializedLambda.getCapturedArgCount.()I",
+                &[made]
+            ),
+            V::I(1)
+        );
+        let first = c(
+            &mut rt,
+            "java/lang/invoke/SerializedLambda.getCapturedArg.(I)Ljava/lang/Object;",
+            &[made, V::I(0)],
+        );
+        assert_eq!(rt.get_field(first, "value"), V::I(5));
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
     }
 
     #[test]

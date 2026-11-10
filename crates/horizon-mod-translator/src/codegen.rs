@@ -11,7 +11,7 @@ use crate::{
     weave::{self, At, Kind, Weave},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt::Write,
 };
 
@@ -489,6 +489,64 @@ pub struct Program<'a> {
     mixin_of: BTreeMap<String, String>,
     /// The method being written, for weaving.
     cur: Option<Cur>,
+    /// The static methods some bytecode names (`class.name.desc`, by the class that declares
+    /// each), and every text the classes hold as a string constant or as a call site's name:
+    /// what reflection can find a static method by ([`reflection_names`]).
+    named_statics: HashSet<String>,
+    texts: HashSet<&'a str>,
+}
+
+/// What reflection can find a static method by, among `classes`: the static methods some
+/// bytecode names (a call, a method reference), each by the class that declares it, up the
+/// superclasses from the one named (JVMS 5.4.3.3); and every text a class holds as a string
+/// constant (`getMethod("register")`) or as the name of a call site (a bootstrap method looks
+/// its target up by it). A static method outside both, and without an annotation a scan could
+/// find it by, is one no code of the mods can name: its code is left for the linker to drop,
+/// as it drops every method nothing calls.
+fn reflection_names<'a>(
+    classes: &BTreeMap<&'a str, &'a ClassFile>,
+) -> (HashSet<String>, HashSet<&'a str>) {
+    let (mut named, mut texts) = (HashSet::new(), HashSet::new());
+    for c in classes.values() {
+        let utf = |i: u16| match c.pool.get(i as usize) {
+            Some(Const::Utf8(s)) => Some(s.as_str()),
+            _ => None,
+        };
+        for k in &c.pool {
+            match k {
+                Const::String(i) => texts.extend(utf(*i)),
+                Const::InvokeDynamic(_, nt) | Const::Dynamic(_, nt) => {
+                    if let Some(Const::NameAndType(n, _)) = c.pool.get(*nt as usize) {
+                        texts.extend(utf(*n));
+                    }
+                }
+                Const::MethodRef(owner, nt) | Const::InterfaceMethodRef(owner, nt) => {
+                    let (Some(Const::Class(owner)), Some(Const::NameAndType(n, d))) =
+                        (c.pool.get(*owner as usize), c.pool.get(*nt as usize))
+                    else {
+                        continue;
+                    };
+                    let (Some(owner), Some(name), Some(desc)) = (utf(*owner), utf(*n), utf(*d))
+                    else {
+                        continue;
+                    };
+                    let mut at = classes.get(owner);
+                    while let Some(k) = at {
+                        if let Some(m) = k.methods.iter().find(|m| m.name == name && m.desc == desc)
+                        {
+                            if m.access & 0x0008 != 0 {
+                                named.insert(format!("{}.{name}.{desc}", k.name));
+                            }
+                            break;
+                        }
+                        at = k.superclass.as_deref().and_then(|s| classes.get(s));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (named, texts)
 }
 
 /// The method [`Program::method`] is writing, as weaving needs it.
@@ -737,8 +795,13 @@ impl<'a> Program<'a> {
     pub fn new(classes: &'a [ClassFile]) -> Program<'a> {
         let weave = weave::plan(classes);
         let mixin_of = mixin_targets_of(&weave);
+        let by_name: BTreeMap<&'a str, &'a ClassFile> =
+            classes.iter().map(|c| (c.name.as_str(), c)).collect();
+        let (named_statics, texts) = reflection_names(&by_name);
         Program {
-            classes: classes.iter().map(|c| (c.name.as_str(), c)).collect(),
+            classes: by_name,
+            named_statics,
+            texts,
             keys: BTreeSet::new(),
             unsupported: weave.unsupported.clone(),
             lambdas: BTreeMap::new(),
@@ -1593,6 +1656,42 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             && let Some(m) = c.methods.iter().find(|m| m.name == "values" && m.access & 0x0008 != 0 && m.desc.starts_with("()[") && m.code.is_some())
         {
             let _ = writeln!(arms, "        \"values\" => {{ {ensure}{}(rt, &[]) }}", fn_name(&c.name, "values", &m.desc));
+        }
+        // Its static methods, which reflection runs by name (`method.invoke(null, ...)`, a
+        // handle `findStatic` gave): each under `s:` and its name and descriptor, the class
+        // initialised first as a call of one does. Those reflection can find
+        // ([`reflection_names`]): one some bytecode names, one whose name some class holds as
+        // text, one with an annotation reflection sees (AE2 runs each part class's
+        // `@PartModels` method). Not those the compiler made for itself (a lambda's body, an
+        // accessor), which no code names.
+        if c.mixin_targets().is_empty() {
+            let mut statics = String::new();
+            for m in c.methods.iter().filter(|m| {
+                m.access & 0x0008 != 0
+                    && m.access & 0x1000 == 0
+                    && m.name != "<clinit>"
+                    && m.code.is_some()
+            }) {
+                if self
+                    .named_statics
+                    .contains(&format!("{}.{}.{}", c.name, m.name, m.desc))
+                    || self.texts.contains(m.name.as_str())
+                    || m.annotations.iter().any(|a| a.visible)
+                {
+                    let _ = writeln!(
+                        statics,
+                        "                {:?} => {},",
+                        format!("{}.{}", m.name, m.desc),
+                        fn_name(&c.name, &m.name, &m.desc)
+                    );
+                }
+            }
+            if !statics.is_empty() {
+                let _ = writeln!(
+                    arms,
+                    "        s if s.starts_with(\"s:\") => {{\n            let f: fn(&mut Rt, &[V]) -> V = match &s[2..] {{\n{statics}                _ => return None,\n            }};\n            {ensure}f(rt, args)\n        }}"
+                );
+            }
         }
         if arms.is_empty() {
             return None;
@@ -3515,6 +3614,85 @@ public class Content {
                 "DEFAULT\torder\t\t{\"I\":3}",
                 "DEFAULT\tkinds\t\t[{\"e\":\"Ljava/lang/annotation/ElementType;\",\"v\":\"FIELD\"}]",
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod reflect_tests {
+    use crate::class::ClassFile;
+    use std::process::Command;
+
+    /// Reflection's entries for a class's static methods: one some bytecode calls (through
+    /// the class below it too), one whose name a class holds as text, one with an annotation
+    /// reflection sees. Not one nothing of the mods can name, nor what the compiler made.
+    #[test]
+    fn reflection_runs_the_static_methods_code_can_name() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("mod-translator-statics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        let files = [
+            (
+                "m/Marked.java",
+                "package m; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface Marked {}",
+            ),
+            (
+                "m/Tools.java",
+                "package m; public class Tools { public static int called() { return 1; } public static int byName() { return 2; } @Marked static int marked() { return 3; } public static int unused() { return 4; } static Runnable made() { return () -> {}; } public int own() { return 5; } }",
+            ),
+            ("m/Sub.java", "package m; public class Sub extends Tools {}"),
+            (
+                "m/User.java",
+                "package m; public class User { int use() throws Exception { return Sub.called() + Tools.class.getMethod(\"byName\").getModifiers(); } }",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let classes: Vec<ClassFile> = [
+            "m/Marked.class",
+            "m/Tools.class",
+            "m/Sub.class",
+            "m/User.class",
+        ]
+        .iter()
+        .map(|c| ClassFile::parse(&std::fs::read(root.join(c)).unwrap()).unwrap())
+        .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        let p = super::Program::new(&classes);
+        let (_, code) = p.reflect_fn(&classes[1]).expect("its reflection");
+        let listed: Vec<&str> = code
+            .lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix('"')?
+                    .split_once("\" => ")
+                    .map(|(key, _)| key)
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            ["<init>.()V", "called.()I", "byName.()I", "marked.()I"],
+            "{code}"
+        );
+        // The class below has no static method of its own: nothing to list.
+        assert!(
+            p.reflect_fn(&classes[2])
+                .is_none_or(|(_, code)| !code.contains("\"s:\""))
         );
     }
 }
