@@ -10077,6 +10077,31 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - The set of initialised classes, asked at every use of a class's statics, hashes with the
     runtime's cheap hash. The collector follows a custom-hash table's strategy object.
   - Tests: 16 compat-core (a copy goes its own way), 781 compat, 31 translator; the differential tests.
+- [x] 2026-11-10 Part 162: Gson's streams. 18 of the pack's jars make a `JsonWriter`, 13 a
+  `JsonReader`, 7 extend `TypeAdapter`; none of the three was answered (Molten Vents stopped in its
+  constructor on the array it had just written and could not read back).
+  - The three are Gson's own code, taken from the player's install as JOML is: `JsonWriter`,
+    `JsonReader`, `JsonToken`, `MalformedJsonException`, the writer and the reader over a tree
+    (`JsonTreeWriter`, `JsonTreeReader`) and `TypeAdapter`. The tree (`JsonObject`) and `Gson` stay
+    the runtime's, which that code calls as a mod's does.
+  - What Gson does with a stream the runtime does through the stream's own methods, in Gson's
+    order: `Gson.toJson(element, writer)` and `toJson(object, type, writer)` (the writer lenient,
+    escaping and writing nulls as that `Gson` does for as long as it takes, then as it was),
+    `Gson.fromJson(reader, type)`, `JsonParser.parseReader(reader)`, `GsonHelper.writeValue`,
+    `newJsonWriter` and `newJsonReader`; a reader's `IOException` leaves as Gson's
+    `JsonSyntaxException` or `JsonIOException` of it.
+  - A library class the runtime calls by itself keeps every method that isn't private when an
+    object of it is made (no mod's code names `beginObject` when it hands its writer to `Gson`).
+  - A number keeps the spelling it was parsed with (`1.50`, `1e3`, `-0`, an integer longer than a
+    `long`), as Gson's `LazilyParsedNumber` does: `toString`, `Gson.toJson` and `getAsString` give
+    the file's own text.
+  - `tests/gson.rs`: a fixture run on `java` with the install's Gson and again translated; 53 texts
+    match (a writer with every setting and its errors, a reader strict and lenient over nine
+    documents with its paths and errors, typed reads, `Gson` and `JsonParser` with streams, an
+    adapter to text and to a tree and back, trees written back).
+  - Found by it, for the next change of the runtime's core: an object of the API's in a string
+    concatenation (`"" + jsonObject`) prints as `Class@hash`, not as its `toString`.
+  - Molten Vents alone: constructed, 12 blocks. Tests: 782 compat, 16 compat-core, 31 translator.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

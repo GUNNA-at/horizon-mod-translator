@@ -214,6 +214,11 @@ impl<'a> Walk<'a> {
         }
         self.init(class);
         let outside = self.is_library(class) && self.outside_supertype(class);
+        // One the runtime calls by itself: whatever of it isn't private runs.
+        let driven = self
+            .ancestors(class)
+            .iter()
+            .any(|a| crate::DRIVEN_CODE.contains(a));
         // The game's own code (and the Java runtime's) is too large to run whole behind each class
         // with a supertype the runtime has: only what can be called there, and what a call through a type above the
         // class reaches.
@@ -231,6 +236,7 @@ impl<'a> Walk<'a> {
                 .filter(|m| m.access & 0x0008 == 0 && m.code.is_some() && !m.name.starts_with('<'))
                 .map(|m| (m.access, (m.name.clone(), m.desc.clone())))
                 .filter(|(access, sig)| match &narrow {
+                    _ if driven && access & 0x0002 == 0 => true,
                     Some(out) => {
                         (outside && access & 0x0002 == 0 && (out.contains(sig) || JAVA_CALLS.contains(&sig.0.as_str())))
                             || self.called_through.get(sig).is_some_and(|owners| owners.iter().any(|o| self.receives(class, o)))
@@ -292,6 +298,34 @@ impl<'a> Walk<'a> {
         }
     }
 
+    /// A call to a class outside the program that returns one of the classes the runtime makes
+    /// and calls itself ([`crate::DRIVEN_CODE`]: `Gson.newJsonWriter(writer)`): the class is
+    /// created there, by any of its constructors.
+    fn made_outside(&mut self, owner: &str, desc: &str) {
+        if self.by_name.contains_key(owner) {
+            return;
+        }
+        let Some(made) = desc
+            .rsplit_once(")L")
+            .and_then(|(_, r)| r.strip_suffix(';'))
+        else {
+            return;
+        };
+        if !crate::DRIVEN_CODE.contains(&made) || !self.is_library(made) {
+            return;
+        }
+        self.create(made);
+        let inits: Vec<String> = self.by_name[made]
+            .methods
+            .iter()
+            .filter(|m| m.name == "<init>")
+            .map(|m| m.desc.clone())
+            .collect();
+        for d in inits {
+            self.run(made, "<init>", &d);
+        }
+    }
+
     /// A class named by a constant (an array's element class).
     fn keep_named(&mut self, name: &str) {
         let name = name.trim_start_matches('[');
@@ -316,6 +350,7 @@ impl<'a> Walk<'a> {
                 0xb6 | 0xb9 => {
                     if let Some(r) = c.member(idx) {
                         self.keep(&r.owner);
+                        self.made_outside(&r.owner, &r.desc);
                         self.call(&r.owner, (r.name, r.desc));
                     }
                 }

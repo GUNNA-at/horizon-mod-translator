@@ -79,6 +79,27 @@ pub fn number(rt: &mut Rt, n: V) -> V {
     primitive(rt, NUMBER, n)
 }
 
+/// A number read from JSON text: its value, and the text itself where Java's `toString` of the
+/// value would spell it otherwise (`1.50`, `1e3`, `-0`, an integer longer than a `long`). Gson
+/// keeps what it parsed as the text (`LazilyParsedNumber`), so writing the tree back and
+/// `getAsString` give the file's own spelling.
+fn parsed_number(rt: &mut Rt, n: V, text: &str) -> V {
+    let p = number(rt, n);
+    if number_text(n) != text {
+        let t = rt.alloc("java/lang/String", Data::Str(text.to_owned()));
+        rt.put_field(p, "$text", t);
+    }
+    p
+}
+
+/// A number primitive's text: as it was parsed, else Java's `toString` of the value.
+fn number_string(rt: &Rt, p: V) -> String {
+    match rt.str_of(rt.get_field(p, "$text")) {
+        Some(text) => text.to_owned(),
+        None => number_text(rt.get_field(p, "value")),
+    }
+}
+
 pub fn boolean(rt: &mut Rt, b: bool) -> V {
     primitive(rt, BOOLEAN, V::I(b as i32))
 }
@@ -359,7 +380,7 @@ impl Parser<'_> {
             _ => {}
         }
         if let Some(n) = json_number(&word) {
-            return Ok(number(rt, n));
+            return Ok(parsed_number(rt, n, &word));
         }
         if self.lenient {
             return Ok(string(rt, &word));
@@ -493,7 +514,7 @@ fn write_into(rt: &Rt, v: V, style: Style, depth: usize, out: &mut String) {
         }
         PRIMITIVE => match kind(rt, v) {
             STRING => quote(rt.str_of(rt.get_field(v, "value")).unwrap_or(""), style.html, out),
-            NUMBER => out.push_str(&number_text(rt.get_field(v, "value"))),
+            NUMBER => out.push_str(&number_string(rt, v)),
             _ => out.push_str(if rt.get_field(v, "value").i() != 0 { "true" } else { "false" }),
         },
         _ => out.push_str("null"),
@@ -745,7 +766,7 @@ fn primitive_as(rt: &mut Rt, p: V, name: &str) -> V {
     let (k, value) = (kind(rt, p), rt.get_field(p, "value"));
     let as_string = |rt: &Rt| match k {
         STRING => rt.str_of(value).unwrap_or("").to_owned(),
-        NUMBER => number_text(value),
+        NUMBER => number_string(rt, p),
         _ => (if value.i() != 0 { "true" } else { "false" }).to_owned(),
     };
     match name {
@@ -1091,6 +1112,305 @@ fn tree_class(class: &str) -> bool {
     class == ELEMENT || is_element_class(class)
 }
 
+// ---- Streams ----
+//
+// `JsonWriter` and `JsonReader` are Gson's own code: the translator takes them from the player's
+// install as it takes a library's (a mod's writer over a file, a reader of its own class). What
+// Gson itself does with one, walking a tree into a writer or building a tree from a reader, is
+// done here through the stream's own methods, in Gson's order.
+
+const READER: &str = "com/google/gson/stream/JsonReader";
+const IO_ERROR: &str = "com/google/gson/JsonIOException";
+const W_BEGIN_ARRAY: &str =
+    "com/google/gson/stream/JsonWriter.beginArray.()Lcom/google/gson/stream/JsonWriter;";
+const W_END_ARRAY: &str =
+    "com/google/gson/stream/JsonWriter.endArray.()Lcom/google/gson/stream/JsonWriter;";
+const W_BEGIN_OBJECT: &str =
+    "com/google/gson/stream/JsonWriter.beginObject.()Lcom/google/gson/stream/JsonWriter;";
+const W_END_OBJECT: &str =
+    "com/google/gson/stream/JsonWriter.endObject.()Lcom/google/gson/stream/JsonWriter;";
+const W_NAME: &str = "com/google/gson/stream/JsonWriter.name.(Ljava/lang/String;)Lcom/google/gson/stream/JsonWriter;";
+const W_STRING: &str = "com/google/gson/stream/JsonWriter.value.(Ljava/lang/String;)Lcom/google/gson/stream/JsonWriter;";
+const W_NUMBER: &str = "com/google/gson/stream/JsonWriter.value.(Ljava/lang/Number;)Lcom/google/gson/stream/JsonWriter;";
+const W_BOOLEAN: &str =
+    "com/google/gson/stream/JsonWriter.value.(Z)Lcom/google/gson/stream/JsonWriter;";
+const W_NULL: &str =
+    "com/google/gson/stream/JsonWriter.nullValue.()Lcom/google/gson/stream/JsonWriter;";
+/// A writer's three settings `Gson` sets for its own writing: each one's getter and setter.
+const W_SETTINGS: [(&str, &str); 3] = [
+    (
+        "com/google/gson/stream/JsonWriter.isLenient.()Z",
+        "com/google/gson/stream/JsonWriter.setLenient.(Z)V",
+    ),
+    (
+        "com/google/gson/stream/JsonWriter.isHtmlSafe.()Z",
+        "com/google/gson/stream/JsonWriter.setHtmlSafe.(Z)V",
+    ),
+    (
+        "com/google/gson/stream/JsonWriter.getSerializeNulls.()Z",
+        "com/google/gson/stream/JsonWriter.setSerializeNulls.(Z)V",
+    ),
+];
+const R_PEEK: &str = "com/google/gson/stream/JsonReader.peek.()Lcom/google/gson/stream/JsonToken;";
+const R_HAS_NEXT: &str = "com/google/gson/stream/JsonReader.hasNext.()Z";
+const R_IS_LENIENT: &str = "com/google/gson/stream/JsonReader.isLenient.()Z";
+const R_SET_LENIENT: &str = "com/google/gson/stream/JsonReader.setLenient.(Z)V";
+
+/// `TypeAdapters.JSON_ELEMENT.write`: the tree at `v` into writer `w`, which is told each value as
+/// Gson tells it. `GsonHelper.writeValue` is the same with an object's names in `sorter`'s order.
+/// Stops where the writer throws.
+fn write_to(rt: &mut Rt, w: V, v: V, sorter: Option<V>) {
+    let class = if v.r() == 0 { NULL } else { rt.class_of(v) };
+    match class {
+        PRIMITIVE => {
+            let value = rt.get_field(v, "value");
+            match kind(rt, v) {
+                NUMBER => {
+                    let n = crate::jlang::box_raw(rt, value);
+                    rt.call_functional(W_NUMBER, w, &[n]);
+                }
+                BOOLEAN => {
+                    rt.call_functional(W_BOOLEAN, w, &[V::I(value.i())]);
+                }
+                _ => {
+                    rt.call_functional(W_STRING, w, &[value]);
+                }
+            }
+        }
+        ARRAY => {
+            rt.call_functional(W_BEGIN_ARRAY, w, &[]);
+            for e in items(rt, v) {
+                if rt.thrown.is_some() {
+                    return;
+                }
+                write_to(rt, w, e, sorter);
+            }
+            if rt.thrown.is_none() {
+                rt.call_functional(W_END_ARRAY, w, &[]);
+            }
+        }
+        OBJECT => {
+            rt.call_functional(W_BEGIN_OBJECT, w, &[]);
+            let mut all = members(rt, v);
+            if let Some(order) = sorter {
+                all.sort_by(|x, y| crate::jutil::compare(rt, order, x.0, y.0).cmp(&0));
+            }
+            for (name, e) in all {
+                if rt.thrown.is_some() {
+                    return;
+                }
+                rt.call_functional(W_NAME, w, &[name]);
+                if rt.thrown.is_some() {
+                    return;
+                }
+                write_to(rt, w, e, sorter);
+            }
+            if rt.thrown.is_none() {
+                rt.call_functional(W_END_OBJECT, w, &[]);
+            }
+        }
+        _ => {
+            rt.call_functional(W_NULL, w, &[]);
+        }
+    }
+}
+
+/// `Gson.toJson(JsonElement, JsonWriter)`: the tree into the writer, which is lenient, escapes for
+/// HTML and writes nulls as this `Gson` does for as long as that takes, then is as it was. What
+/// the writer throws of `IOException` leaves as a `JsonIOException` of it.
+fn to_writer(rt: &mut Rt, gson: V, w: V, tree: V) {
+    let style = style_of(rt, gson);
+    let wanted = [true, style.html, style.nulls];
+    let mut before = [V::I(0); 3];
+    for (i, (get, set)) in W_SETTINGS.iter().enumerate() {
+        before[i] = rt.call_functional(get, w, &[]);
+        rt.call_functional(set, w, &[V::I(wanted[i] as i32)]);
+    }
+    if rt.thrown.is_none() {
+        write_to(rt, w, tree, None);
+    }
+    let thrown = rt.thrown.take();
+    for (i, (_, set)) in W_SETTINGS.iter().enumerate() {
+        rt.call_functional(set, w, &[before[i]]);
+    }
+    if let Some(e) = thrown {
+        rt.thrown = Some(e);
+        if rt.instance_of(e, "java/io/IOException") {
+            wrap_thrown(rt, IO_ERROR);
+        }
+    }
+}
+
+/// `new X(cause)` thrown in place of what is being thrown, which becomes its cause: the message
+/// is the cause's `toString()`, as `Throwable(Throwable)` makes it.
+fn wrap_thrown(rt: &mut Rt, class: &'static str) {
+    let Some(cause) = rt.thrown.take() else {
+        return;
+    };
+    let text = crate::api::call(
+        rt,
+        "java/lang/Throwable.toString.()Ljava/lang/String;",
+        &[cause],
+    );
+    let e = rt.new_object(class);
+    rt.put_field(e, "message", text);
+    rt.put_field(e, "cause", cause);
+    rt.thrown = Some(e);
+}
+
+/// The token a reader is at (`peek()`), by its constant's name; None when the reader threw.
+fn peek(rt: &mut Rt, r: V) -> Option<String> {
+    let token = rt.call_functional(R_PEEK, r, &[]);
+    if rt.thrown.is_some() {
+        return None;
+    }
+    Some(
+        rt.str_of(rt.get_field(token, "$name"))
+            .unwrap_or("")
+            .to_owned(),
+    )
+}
+
+/// A call of the reader's that returns nothing a tree is made of; whether it came back.
+fn step(rt: &mut Rt, r: V, key: &'static str) -> Option<V> {
+    let v = rt.call_functional(key, r, &[]);
+    rt.thrown.is_none().then_some(v)
+}
+
+/// `TypeAdapters.JSON_ELEMENT.read`: the tree of the value reader `r` is at, read through the
+/// reader's own methods. A number is what its text says, as the parser reads one. None when the
+/// reader threw.
+fn read_from(rt: &mut Rt, r: V) -> Option<V> {
+    match peek(rt, r)?.as_str() {
+        "BEGIN_ARRAY" => {
+            step(rt, r, "com/google/gson/stream/JsonReader.beginArray.()V")?;
+            let mut all = Vec::new();
+            while step(rt, r, R_HAS_NEXT)?.i() != 0 {
+                all.push(read_from(rt, r)?);
+            }
+            step(rt, r, "com/google/gson/stream/JsonReader.endArray.()V")?;
+            Some(new_array(rt, all))
+        }
+        "BEGIN_OBJECT" => {
+            step(rt, r, "com/google/gson/stream/JsonReader.beginObject.()V")?;
+            let o = new_object(rt);
+            while step(rt, r, R_HAS_NEXT)?.i() != 0 {
+                let name = step(
+                    rt,
+                    r,
+                    "com/google/gson/stream/JsonReader.nextName.()Ljava/lang/String;",
+                )?;
+                let v = read_from(rt, r)?;
+                put(rt, o, name, v);
+            }
+            step(rt, r, "com/google/gson/stream/JsonReader.endObject.()V")?;
+            Some(o)
+        }
+        "STRING" => {
+            let text = step(
+                rt,
+                r,
+                "com/google/gson/stream/JsonReader.nextString.()Ljava/lang/String;",
+            )?;
+            let text = rt.str_of(text).unwrap_or("").to_owned();
+            Some(string(rt, &text))
+        }
+        "NUMBER" => {
+            let text = step(
+                rt,
+                r,
+                "com/google/gson/stream/JsonReader.nextString.()Ljava/lang/String;",
+            )?;
+            let text = rt.str_of(text).unwrap_or("").to_owned();
+            let n = json_number(&text)
+                .or_else(|| text.parse().ok().map(V::D))
+                .unwrap_or(V::D(0.0));
+            Some(parsed_number(rt, n, &text))
+        }
+        "BOOLEAN" => {
+            let b = step(rt, r, "com/google/gson/stream/JsonReader.nextBoolean.()Z")?;
+            Some(boolean(rt, b.i() != 0))
+        }
+        "NULL" => {
+            step(rt, r, "com/google/gson/stream/JsonReader.nextNull.()V")?;
+            Some(null(rt))
+        }
+        other => {
+            let msg = format!("Unexpected token: {other}");
+            throw(rt, "java/lang/IllegalStateException", &msg);
+            None
+        }
+    }
+}
+
+/// What a reader holds, read with the reader lenient for as long as that takes (`Gson.fromJson`
+/// and `JsonParser.parseReader` both set it so, and put it back): the tree, nothing for a document
+/// with nothing in it, or the exception the reader threw (left in `rt.thrown`, with whether the
+/// document had begun).
+fn read_all(rt: &mut Rt, r: V) -> Result<Option<V>, bool> {
+    let lenient = rt.call_functional(R_IS_LENIENT, r, &[]);
+    rt.call_functional(R_SET_LENIENT, r, &[V::I(1)]);
+    let mut begun = false;
+    let tree = match peek(rt, r) {
+        Some(_) => {
+            begun = true;
+            read_from(rt, r)
+        }
+        None => None,
+    };
+    let thrown = rt.thrown.take();
+    rt.call_functional(R_SET_LENIENT, r, &[lenient]);
+    match thrown {
+        None => Ok(tree),
+        Some(e) if !begun && rt.instance_of(e, "java/io/EOFException") => Ok(None),
+        Some(e) => {
+            rt.thrown = Some(e);
+            Err(begun)
+        }
+    }
+}
+
+/// `Gson.fromJson(JsonReader, Type)`'s tree: none for an empty document; an `IOException` or an
+/// `IllegalStateException` of the reader's leaves as a `JsonSyntaxException` of it (the outer
+/// None).
+fn tree_from_reader(rt: &mut Rt, r: V) -> Option<Option<V>> {
+    match read_all(rt, r) {
+        Ok(tree) => Some(tree),
+        Err(_) => {
+            if rt.thrown.is_some_and(|e| {
+                rt.instance_of(e, "java/io/IOException")
+                    || rt.instance_of(e, "java/lang/IllegalStateException")
+            }) {
+                wrap_thrown(rt, SYNTAX);
+            }
+            None
+        }
+    }
+}
+
+/// `JsonParser.parseReader(JsonReader)` (`Streams.parse`): `JsonNull` for an empty document; a
+/// malformed one, one that ends early or a number that is none is a `JsonSyntaxException`, any
+/// other `IOException` a `JsonIOException`.
+fn parse_reader(rt: &mut Rt, r: V) -> V {
+    match read_all(rt, r) {
+        Ok(Some(tree)) => tree,
+        Ok(None) => null(rt),
+        Err(_) => {
+            let Some(e) = rt.thrown else { return V::NULL };
+            let is = |rt: &Rt, class: &str| rt.instance_of(e, class);
+            if is(rt, "java/io/EOFException")
+                || is(rt, "com/google/gson/stream/MalformedJsonException")
+                || is(rt, "java/lang/NumberFormatException")
+            {
+                wrap_thrown(rt, SYNTAX);
+            } else if is(rt, "java/io/IOException") {
+                wrap_thrown(rt, IO_ERROR);
+            }
+            V::NULL
+        }
+    }
+}
+
 fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -1147,6 +1467,52 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             crate::api::call(rt, "java/lang/StringBuilder.append.(Ljava/lang/String;)Ljava/lang/StringBuilder;", &[a(2), s]);
             V::Void
         }
+        // Into a `JsonWriter` of the mod's: through the writer's own methods.
+        ("toJson", "(Lcom/google/gson/JsonElement;Lcom/google/gson/stream/JsonWriter;)V") => {
+            let tree = if a(1).r() == 0 { null(rt) } else { a(1) };
+            to_writer(rt, this, a(2), tree);
+            V::Void
+        }
+        (
+            "toJson",
+            "(Ljava/lang/Object;Ljava/lang/reflect/Type;Lcom/google/gson/stream/JsonWriter;)V",
+        ) => {
+            let tree = if is_element_class(rt.class_of(a(1))) {
+                a(1)
+            } else {
+                to_tree(rt, a(1), ANY, true, 0)
+            };
+            to_writer(rt, this, a(3), tree);
+            V::Void
+        }
+        // A writer or a reader set as this `Gson` writes and reads: Gson's own class, made by its
+        // constructor.
+        ("newJsonWriter", _) => {
+            let w = rt.reflect(
+                "com/google/gson/stream/JsonWriter",
+                "<init>.(Ljava/io/Writer;)V",
+                &[a(1)],
+            )?;
+            if style.pretty {
+                let indent = rt.string("  ");
+                rt.call_functional(
+                    "com/google/gson/stream/JsonWriter.setIndent.(Ljava/lang/String;)V",
+                    w,
+                    &[indent],
+                );
+            }
+            let lenient = rt.get_field(this, "$lenient") == V::I(1);
+            for ((_, set), on) in W_SETTINGS.iter().zip([lenient, style.html, style.nulls]) {
+                rt.call_functional(set, w, &[V::I(on as i32)]);
+            }
+            w
+        }
+        ("newJsonReader", _) => {
+            let r = rt.reflect(READER, "<init>.(Ljava/io/Reader;)V", &[a(1)])?;
+            let lenient = rt.get_field(this, "$lenient") == V::I(1);
+            rt.call_functional(R_SET_LENIENT, r, &[V::I(lenient as i32)]);
+            r
+        }
         ("toJsonTree", _) if is_element_class(rt.class_of(a(1))) => deep_copy(rt, a(1)),
         // An object of the mod's own, or a collection of them: field by field ([`to_tree`]).
         ("toJsonTree", _) => to_tree(rt, a(1), ANY, style.nulls, 0),
@@ -1187,6 +1553,11 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
                     a(1)
                 } else if a(1).r() == 0 {
                     return Some(V::NULL);
+                } else if rt.instance_of(a(1), READER) {
+                    match tree_from_reader(rt, a(1)) {
+                        Some(Some(tree)) => tree,
+                        _ => return Some(V::NULL),
+                    }
                 } else {
                     let text = source_text(rt, a(1))?;
                     // `Gson.fromJson` reads leniently whatever the builder said (Gson 2.10's
@@ -1216,6 +1587,20 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             if a(1).r() == 0 {
                 return Some(V::NULL);
             }
+            if rt.instance_of(a(1), READER) {
+                return Some(match tree_from_reader(rt, a(1)) {
+                    Some(Some(v)) if class != ELEMENT && rt.class_of(v) != class => {
+                        let msg = format!(
+                            "Expected a {} but was {}; at path $",
+                            class.replace('/', "."),
+                            java_name(rt, v)
+                        );
+                        throw(rt, SYNTAX, &msg)
+                    }
+                    Some(Some(v)) => v,
+                    _ => V::NULL,
+                });
+            }
             let text = source_text(rt, a(1))?;
             read_as(rt, &text, &class, true).unwrap_or(V::NULL)
         }
@@ -1232,7 +1617,7 @@ fn parser_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "parseString" | "parseReader" | "parse" => {
             let source = if name == "parse" { a(1) } else { a(0) };
             if desc.starts_with("(Lcom/google/gson/stream/JsonReader;") {
-                return None;
+                return Some(parse_reader(rt, source));
             }
             let text = source_text(rt, source).unwrap_or_default();
             match parse(rt, &text, true) {
@@ -1347,6 +1732,11 @@ fn helper_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "toStableString" => {
             let s = write(rt, a(0), Style { pretty: false, html: false, nulls: true, sorted: true });
             rt.string(&s)
+        }
+        // `writeValue(writer, element, sorter)`: into a `JsonWriter` of the mod's.
+        "writeValue" => {
+            write_to(rt, a(0), a(1), Some(a(2)).filter(|c| c.r() != 0));
+            V::Void
         }
         _ => {
             // `convertToX(element, name)` and `getAsX(object, name[, fallback])`.
@@ -1954,7 +2344,9 @@ mod tests {
         let printed = call(&mut rt, "com/google/gson/JsonElement.toString.()Ljava/lang/String;", &[root]);
         assert_eq!(
             rt.str_of(printed),
-            Some(r#"{"entity":"minecraft:pig","offset":[0,1.5,-20.0],"scale":1.25,"big":5000000000,"on":true,"z":null,"a":{"x":"7","w":true}}"#)
+            Some(
+                r#"{"entity":"minecraft:pig","offset":[0,1.5,-2e1],"scale":1.25,"big":5000000000,"on":true,"z":null,"a":{"x":"7","w":true}}"#
+            )
         );
         let keys = call(&mut rt, "com/google/gson/JsonObject.keySet.()Ljava/util/Set;", &[o]);
         let keys: Vec<String> = crate::jutil::elements(&rt, keys).iter().map(|k| rt.str_of(*k).unwrap_or("").to_owned()).collect();
@@ -2044,6 +2436,26 @@ mod tests {
         call(&mut rt, "com/google/gson/JsonParser.parseString.(Ljava/lang/String;)Lcom/google/gson/JsonElement;", &[bad]);
         assert_eq!(message(&mut rt).0, SYNTAX);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A number keeps the spelling it was read with, as Gson's does: written back and asked for
+    /// as a string it is the file's own text, and its value is what the text says.
+    #[test]
+    fn a_parsed_number_keeps_its_spelling() {
+        let mut rt = Rt::new();
+        let text = r#"{"a":1.50,"b":1e3,"c":-0,"d":12345678901234567890,"e":0.1,"f":100,"g":1E-2}"#;
+        let (o, _) = parse(&mut rt, text, false).unwrap().unwrap();
+        assert_eq!(write(&rt, o, TO_STRING), text);
+        let a = get(&mut rt, o, "a").unwrap();
+        let s = primitive_as(&mut rt, a, "getAsString");
+        assert_eq!(rt.str_of(s), Some("1.50"));
+        assert_eq!(primitive_as(&mut rt, a, "getAsDouble"), V::D(1.5));
+        let b = get(&mut rt, o, "b").unwrap();
+        assert_eq!(primitive_as(&mut rt, b, "getAsInt"), V::I(1000));
+        // One made by code is Java's `toString` of its value.
+        let made = number(&mut rt, V::D(1.5));
+        assert_eq!(write(&rt, made, TO_STRING), "1.5");
+        assert!(same(&rt, a, made), "equal by value, whatever the spelling");
     }
 
     /// Gson's lenient reading (`JsonParser`): comments, single quotes, unquoted names.

@@ -129,6 +129,8 @@ pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
         ("commons-io/commons-io", "commons-io"),
         // The game's vector and matrix library, taken whole ([`library_code`]).
         ("org/joml/joml", "joml"),
+        // Gson, for its readers and writers of JSON as a stream ([`LIBRARY_CODE`]).
+        ("com/google/code/gson/gson", "gson"),
     ] {
         let found = dirs(libraries.join(folder), "")
             .into_iter()
@@ -224,7 +226,7 @@ pub fn jdk_code(class: &str) -> bool {
     })
 }
 
-/// Classes of the game's plain libraries (Guava, Apache Commons) that are code over what the
+/// Classes of the game's plain libraries (Guava, Apache Commons, Gson) that are code over what the
 /// runtime models, taken from the player's install as [`JDK_CODE`]'s are from their Java: by name
 /// with the classes nested in it, or every class whose name starts so (`*` at the end).
 pub const LIBRARY_CODE: &[&str] = &[
@@ -233,7 +235,29 @@ pub const LIBRARY_CODE: &[&str] = &[
     "com/google/common/base/CharMatcher",
     "com/google/common/base/Converter",
     "com/google/common/base/MoreObjects$ToStringHelper",
+    // Gson's JSON as a stream: a writer over any `Writer`, a reader over any `Reader`, the two
+    // that write into and read from a tree, and the adapter a mod builds on them. The tree
+    // itself (`JsonObject`) and `Gson` stay the runtime's, which these call as a mod does.
+    "com/google/gson/TypeAdapter",
+    "com/google/gson/internal/JsonReaderInternalAccess",
+    "com/google/gson/internal/bind/JsonTreeReader",
+    "com/google/gson/internal/bind/JsonTreeWriter",
+    "com/google/gson/stream/JsonReader",
+    "com/google/gson/stream/JsonScope",
+    "com/google/gson/stream/JsonToken",
+    "com/google/gson/stream/JsonWriter",
+    "com/google/gson/stream/MalformedJsonException",
     "org/apache/commons/lang3/math/Fraction",
+];
+
+/// The classes of [`LIBRARY_CODE`] whose objects the runtime itself calls, by methods no mod's
+/// code may ever name: `Gson.toJson(element, writer)` asks the mod's `JsonWriter` to
+/// `beginObject`, and a registered `TypeAdapter` is asked to `write`. An object of one (or of a
+/// class under one) runs every method it has that isn't private.
+pub const DRIVEN_CODE: &[&str] = &[
+    "com/google/gson/TypeAdapter",
+    "com/google/gson/stream/JsonReader",
+    "com/google/gson/stream/JsonWriter",
 ];
 
 /// Whether a class of the game's libraries is code to translate as a mod's library is: one of
