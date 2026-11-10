@@ -170,7 +170,7 @@ result comes from a scene set up by command, read back from the world's data and
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
   played both mods in one world.
 
-Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in about 40 minutes (a quarter of an hour after a change to the mapping alone), and it now shows a world: at its latest launch the game was ready 308 seconds after it started, with every mod constructed (4 with an error), 28,217 blocks and items declared, the server thread running and Create's `/create trains` answering in chat. Not everything in it works: 35 of the mods' listeners ended with an error at that launch, and what they would have set up is missing.
+Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in about 40 minutes (a quarter of an hour after a change to the mapping alone), and it shows a world: at its latest launch (the 19th) the game was ready 334 seconds after it started, with all but 2 of the mods constructed, 28,818 blocks and items declared, the server thread running, Create's `/create trains` answering in chat, and `/give` and `/setblock` handing out and placing Create's shafts. Not everything in it works: 26 of the mods' handlers ended with an error at that launch (the 17th had 1,306), what they would have set up is missing, and the server ticks about four times a second, not twenty.
 
 ## Try it
 
