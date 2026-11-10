@@ -1002,6 +1002,19 @@ fn derived_classes(
             deriver.blockers(&m.owner, &m.name, &m.desc, !is_static);
         }
     }
+    // The game's enums the program names (a constant read, a `values()`, a `switch` over one):
+    // carried with their constants, for the runtime to answer by where it lists none itself.
+    for c in program {
+        for i in 0..c.pool.len() as u16 {
+            if let Ok(name) = c.class_name(i)
+                && horizon_mod_translator::is_api(&name)
+                && !own.contains(name.as_str())
+                && game.class(&name).is_some_and(|g| g.access & 0x4000 != 0)
+            {
+                deriver.enums.insert(name);
+            }
+        }
+    }
     horizon_mod_translator::codegen::set_accessors(deriver.accessors.clone());
     Ok(deriver.classes())
 }

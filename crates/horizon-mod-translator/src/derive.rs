@@ -273,6 +273,10 @@ pub struct Deriver<'a> {
     /// method that does only that (`Entity.position` by `position()`): by the field's class and
     /// name and whether it is a write, the method's key.
     pub accessors: BTreeMap<(String, String, bool), String>,
+    /// The game's enums the program names: each is carried with its constants' names, in their
+    /// order, whether a method of it stands or not ([`Deriver::classes`]), so the runtime can
+    /// answer `values()`, `valueOf` and a `switch` over one it lists nowhere itself.
+    pub enums: BTreeSet<String>,
     looking: HashSet<Key>,
     asked: HashMap<(Member, bool), bool>,
 }
@@ -285,6 +289,7 @@ impl<'a> Deriver<'a> {
             calls: HashMap::new(),
             bodies: HashMap::new(),
             accessors: BTreeMap::new(),
+            enums: BTreeSet::new(),
             looking: HashSet::new(),
             asked: HashMap::new(),
         }
@@ -595,6 +600,11 @@ impl<'a> Deriver<'a> {
                 dispatched.insert((method.name.as_str(), method.desc.as_str()));
             }
         }
+        for e in &self.enums {
+            if let Some(c) = game.class(e).filter(|c| c.access & 0x4000 != 0) {
+                wanted.insert(c.name.as_str());
+            }
+        }
         for ((owner, _, _), _) in self
             .calls
             .iter()
@@ -634,6 +644,19 @@ impl<'a> Deriver<'a> {
                         annotations: Vec::new(),
                         signature: None,
                     })
+                    // An enum's constants, in their order (the fields the compiler marks so).
+                    .chain(
+                        c.fields
+                            .iter()
+                            .filter(|f| c.access & 0x4000 != 0 && f.access & 0x4000 != 0)
+                            .map(|f| Field {
+                                access: f.access,
+                                name: f.name.clone(),
+                                desc: f.desc.clone(),
+                                annotations: Vec::new(),
+                                signature: None,
+                            }),
+                    )
                     .collect(),
                 methods: methods
                     .get(c.name.as_str())

@@ -514,6 +514,80 @@ fn time_convert(d: i64, from: usize, to: usize) -> i64 {
     n.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
 }
 
+/// The constants of an enum of the game's that no table here lists (NeoForge's `Dist`, a
+/// library's), in ordinal order: from the class the translator carried for it out of the player's
+/// own install (`hz/derived/<class>`, its fields marked as enum constants), with the class name
+/// as the runtime keeps it. None for a class it carried no constants of.
+pub(crate) fn carried_enum(rt: &mut Rt, class: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    let fields = rt.reflect(&format!("{}{class}", crate::linked::DERIVED), "fields", &[])?;
+    let lines = rt.str_of(fields)?.to_owned();
+    let names: Vec<&'static str> = lines
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, ' ');
+            let access: u32 = parts.next()?.parse().ok()?;
+            parts.next().filter(|_| access & 0x4000 != 0)
+        })
+        .map(|n| rt.static_key(n))
+        .collect();
+    (!names.is_empty()).then(|| (rt.static_key(class), names))
+}
+
+/// What a carried enum ([`carried_enum`]) answers where nothing else did: a constant read
+/// (`key`: `owner.NAME`), one object per constant with its name and ordinal.
+pub(crate) fn carried_constant(rt: &mut Rt, key: &str) -> Option<V> {
+    let (owner, field) = key.rsplit_once('.')?;
+    let (class, names) = carried_enum(rt, owner)?;
+    let ordinal = names.iter().position(|n| *n == field)?;
+    Some(crate::api::api_enum(
+        rt,
+        class,
+        names[ordinal],
+        ordinal as i32,
+    ))
+}
+
+/// And its calls (`rest`: `name.descriptor`): `values()`, each constant as a read of it gives it
+/// (so one a module makes its own way is that same one); `valueOf(name)`; and on a constant,
+/// what every enum has (`ordinal`, `name`, `compareTo`), which `Enum` itself answers.
+pub(crate) fn carried_enum_call(rt: &mut Rt, owner: &str, rest: &str, args: &[V]) -> Option<V> {
+    let (name, desc) = rest.split_once('.')?;
+    let statics = matches!(name, "values" | "valueOf")
+        && (desc.starts_with("()[") || desc.starts_with("(Ljava/lang/String;)L"));
+    let methods = matches!(
+        name,
+        "ordinal" | "name" | "toString" | "compareTo" | "equals" | "hashCode" | "getDeclaringClass"
+    );
+    if !(statics || methods) {
+        return None;
+    }
+    let (class, names) = carried_enum(rt, owner)?;
+    if methods {
+        let on_enum = rt.static_key(&format!("java/lang/Enum.{rest}"));
+        return Some(crate::api::call(rt, on_enum, args));
+    }
+    let constant = |rt: &mut Rt, n: &str| {
+        let key = rt.static_key(&format!("{class}.{n}"));
+        crate::api::get_static(rt, key)
+    };
+    if name == "values" {
+        let all: Vec<V> = names.iter().map(|n| constant(rt, n)).collect();
+        return Some(rt.alloc("[", Data::Array(all)));
+    }
+    let wanted = rt
+        .str_of(args.first().copied().unwrap_or_default())
+        .unwrap_or("")
+        .to_owned();
+    Some(match names.iter().find(|n| **n == wanted) {
+        Some(n) => constant(rt, n),
+        None => crate::jlang::throw_with(
+            rt,
+            "java/lang/IllegalArgumentException",
+            &format!("No enum constant {}.{wanted}", class.replace('/', ".")),
+        ),
+    })
+}
+
 /// The constants of a vanilla enum the runtime makes (its own table's, else the records'), in
 /// ordinal order, with the class name as the runtime keeps it.
 pub(crate) fn enum_names(class: &str) -> Option<(&'static str, Vec<&'static str>)> {
@@ -7084,6 +7158,103 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
     use crate::{Rt, V, api};
+
+    /// An enum of the game's the runtime lists nowhere answers by the constants the translator
+    /// carried for it: its `values()` (the same objects its constants read as, and as a module
+    /// that makes some of them its own way has them), `valueOf`, what `Enum` gives each, and
+    /// `Class.isEnum`. A `switch` over one builds its table from those.
+    #[test]
+    fn a_carried_enum_answers_by_its_constants() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            let fields = match (class, what) {
+                ("hz/derived/net/neoforged/api/distmarker/Dist", "fields") => {
+                    "16409 CLIENT Lnet/neoforged/api/distmarker/Dist;\n16409 DEDICATED_SERVER Lnet/neoforged/api/distmarker/Dist;\n4122 $VALUES [Lnet/neoforged/api/distmarker/Dist;"
+                }
+                ("hz/derived/net/neoforged/test/Phase", "fields") => {
+                    "0 !run ()V\n16409 EARLY Lnet/neoforged/test/Phase;\n16409 LATE Lnet/neoforged/test/Phase;"
+                }
+                _ => return None,
+            };
+            Some(rt.string(fields))
+        }
+        let mut rt = Rt::new();
+        rt.reflect = Some(reflect);
+        let c = api::call;
+        let values = c(
+            &mut rt,
+            "net/neoforged/api/distmarker/Dist.values.()[Lnet/neoforged/api/distmarker/Dist;",
+            &[],
+        );
+        let client = api::get_static(&mut rt, "net/neoforged/api/distmarker/Dist.CLIENT");
+        let server = api::get_static(
+            &mut rt,
+            "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER",
+        );
+        assert_eq!(crate::jutil::elements(&rt, values), [client, server]);
+        let name = rt.string("DEDICATED_SERVER");
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/neoforged/api/distmarker/Dist.valueOf.(Ljava/lang/String;)Lnet/neoforged/api/distmarker/Dist;",
+                &[name]
+            ),
+            server
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/neoforged/api/distmarker/Dist.ordinal.()I",
+                &[server]
+            ),
+            V::I(1)
+        );
+        // One no module knows at all.
+        let late = api::get_static(&mut rt, "net/neoforged/test/Phase.LATE");
+        assert_eq!(
+            (rt.class_of(late), rt.get_field(late, "$ordinal")),
+            ("net/neoforged/test/Phase", V::I(1))
+        );
+        assert_eq!(
+            c(&mut rt, "net/neoforged/test/Phase.ordinal.()I", &[late]),
+            V::I(1)
+        );
+        let text = c(
+            &mut rt,
+            "net/neoforged/test/Phase.name.()Ljava/lang/String;",
+            &[late],
+        );
+        assert_eq!(rt.str_of(text), Some("LATE"));
+        let text = c(
+            &mut rt,
+            "net/neoforged/test/Phase.toString.()Ljava/lang/String;",
+            &[late],
+        );
+        assert_eq!(rt.str_of(text), Some("LATE"));
+        let all = c(
+            &mut rt,
+            "net/neoforged/test/Phase.values.()[Lnet/neoforged/test/Phase;",
+            &[],
+        );
+        assert_eq!(crate::jutil::elements(&rt, all).last(), Some(&late));
+        let class = rt.class_literal("net/neoforged/test/Phase");
+        assert_eq!(c(&mut rt, "java/lang/Class.isEnum.()Z", &[class]), V::I(1));
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+        let nope = rt.string("NOPE");
+        c(
+            &mut rt,
+            "net/neoforged/test/Phase.valueOf.(Ljava/lang/String;)Lnet/neoforged/test/Phase;",
+            &[nope],
+        );
+        let thrown = rt.thrown.take().expect("no such constant");
+        assert_eq!(rt.class_of(thrown), "java/lang/IllegalArgumentException");
+        // A class with no constants carried is no enum, and its `values` stays unanswered.
+        let other = rt.class_literal("net/neoforged/test/Plain");
+        assert_eq!(c(&mut rt, "java/lang/Class.isEnum.()Z", &[other]), V::I(0));
+    }
 
     const GET: &str = "net/minecraft/world/level/block/state/BlockState.getValue.(Lnet/minecraft/world/level/block/state/properties/Property;)Ljava/lang/Comparable;";
     const SET: &str = "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;";

@@ -9795,6 +9795,21 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Not launched again yet: the pack is building with this Part's translator and runtime, all but the
     registry of registries (a change to the mapping alone, to add after). Tests: 753 compat, 15
     compat-core, 27 translator, and the differential test with the new cases.
+- [x] 2026-11-10 Part 149: the game's enums answer by their constants, whichever they are. The runtime listed
+  362 of Minecraft's enums by hand-made tables and none of NeoForge's: `Dist.values()` had no answer, so the
+  table a `switch` over `Dist` builds was empty and four mods of the pack ended in `MatchException`.
+  - The translator carries every enum of the game's own jars that the program names, with its constants in
+    their order (`Deriver::enums`: a carried class `hz/derived/<enum>` whose fields are the constants, though
+    no method of it stands). The runtime answers by them where nothing else did (`carried_enum`):
+    a constant read, `values()` (each constant as a read of it gives it, so one a module makes its own way
+    is the same object), `valueOf`, what `Enum` gives each (`ordinal`, `name`, `compareTo`), and through
+    those `Class.isEnum` and `getEnumConstants`.
+  - It answers before a class above the call's owner is tried: an unanswered static call was retried on its
+    first argument's class, so `Dist.valueOf(name)` became `String.valueOf(name)` (the same retry that
+    made `Array.newInstance` construct its element type, Part 148).
+  - Tests: a runtime test (constants, `values`, `valueOf` and its exception, `toString`, `isEnum`) and a
+    translator test (an enum of a game jar carried with its constants and nothing else). 754 compat tests.
+    Not in a game yet: it joins the pack's next bundle.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

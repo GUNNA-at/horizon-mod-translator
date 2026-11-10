@@ -130,6 +130,12 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, key);
         return call_exact(rt, "java/lang/Object.getClass.()Ljava/lang/Class;", args);
     }
+    // An enum of the game's no table here lists, by the constants the translator carried for it:
+    // before a class above is tried, or its `valueOf(name)` would be asked of the name's own class.
+    if let Some(v) = crate::api_common::carried_enum_call(rt, owner, rest, args) {
+        uncount(rt, key);
+        return v;
+    }
     for class in retry_classes(rt, owner, args) {
         let up = rt.static_key(&format!("{class}.{rest}"));
         let seen = rt.unmapped.get(up).copied().unwrap_or(0);
@@ -3393,7 +3399,9 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         // Else the field of the game's superclass that declares it, as the JVM resolves a static
         // inherited by the class it is read through: the translator names the first of the game's
         // classes a mod's class extends, which may only inherit it.
-        _ => match crate::records::enum_constant(rt, key) {
+        _ => match crate::records::enum_constant(rt, key)
+            .or_else(|| crate::api_common::carried_constant(rt, key))
+        {
             Some(v) => v,
             None => match key.rsplit_once('.').and_then(|(o, f)| Some((api_super(o)?, f))) {
                 Some((declaring, field)) => {

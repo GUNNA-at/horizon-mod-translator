@@ -244,3 +244,48 @@ fn a_method_stands_where_its_code_asks_only_what_is_mapped() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An enum of the game's the program names is carried with its constants, in their order, though
+/// no method of it stands: the runtime answers its `values()` and a `switch` over it by them.
+#[test]
+fn a_game_enum_is_carried_with_its_constants() {
+    if !has("javac") {
+        eprintln!("skipped: no javac");
+        return;
+    }
+    let dir = scratch("enums");
+    let sources = [
+        (
+            "net/minecraft/core/Mode.java",
+            "package net.minecraft.core; public enum Mode { OFF, ON, AUTO; public static final int COUNT = 3; }",
+        ),
+        (
+            "net/minecraft/core/Plain.java",
+            "package net.minecraft.core; public class Plain { public static final Plain ONE = new Plain(); }",
+        ),
+    ];
+    let (game, _) = jar(&dir, "game", &sources, None);
+    let game = Game::open(&[&game]).unwrap();
+    let mapped = Mapped {
+        method: &|_, _| false,
+        field: &|_, _, _| false,
+        constant: &|_| false,
+        translated: &|_| false,
+    };
+    let mut deriver = Deriver::new(&game, mapped);
+    deriver.enums.insert("net/minecraft/core/Mode".to_owned());
+    deriver.enums.insert("net/minecraft/core/Plain".to_owned());
+    let classes = deriver.classes();
+    assert_eq!(
+        classes.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["hz/derived/net/minecraft/core/Mode"]
+    );
+    let constants: Vec<(&str, bool)> = classes[0]
+        .fields
+        .iter()
+        .map(|f| (f.name.as_str(), f.access & 0x4000 != 0))
+        .collect();
+    assert_eq!(constants, [("OFF", true), ("ON", true), ("AUTO", true)]);
+    assert!(classes[0].methods.is_empty());
+    let _ = std::fs::remove_dir_all(dir);
+}
