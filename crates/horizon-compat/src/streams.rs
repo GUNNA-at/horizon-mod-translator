@@ -758,7 +758,7 @@ fn init(rt: &mut Rt, owner: &str, desc: &str, args: &[V]) -> Option<V> {
         FILE_IN if !desc.contains("FileDescriptor") => {
             let p = path_text(rt, a(1))?;
             let disk = crate::files::on_disk(rt, &p);
-            match std::fs::read(&disk) {
+            match crate::files::read_file(&disk) {
                 Ok(b) => crate::resources::become_bytes(rt, this, b),
                 Err(e) => not_found(rt, &p, &e),
             }
@@ -868,7 +868,7 @@ fn read_at<T>(
 fn read_path(rt: &mut Rt, path: V) -> Option<Vec<u8>> {
     let p = path_text(rt, path)?;
     let disk = crate::files::on_disk(rt, &p);
-    match std::fs::read(&disk) {
+    match crate::files::read_file(&disk) {
         Ok(b) => Some(b),
         Err(e) => {
             crate::files::throw_io(rt, &e, &p);

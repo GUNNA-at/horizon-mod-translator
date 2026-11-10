@@ -384,14 +384,18 @@ pub fn interact_entity(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str
 /// goes to them first (`OnDatapackSyncEvent` for them alone), then `PlayerLoggedInEvent`.
 pub fn logged_in(rt: &mut Rt, player: u128, name: &str) {
     named(rt, player, name);
+    player_list_place(rt, player, true, true);
     datapack_sync(rt, Some(player));
     player_event(rt, LOGGED_IN, player, |_, _| {});
+    player_list_place(rt, player, true, false);
 }
 
 /// `player` left, by any path (`PlayerLoggedOutEvent`).
 pub fn logged_out(rt: &mut Rt, player: u128, name: &str) {
     named(rt, player, name);
+    player_list_place(rt, player, false, true);
     player_event(rt, LOGGED_OUT, player, |_, _| {});
+    player_list_place(rt, player, false, false);
 }
 
 /// `player` respawned after dying (`PlayerList.respawn`): `PlayerEvent.Clone` (`ServerPlayer.restoreFrom`),
@@ -399,11 +403,21 @@ pub fn logged_out(rt: &mut Rt, player: u128, name: &str) {
 /// kept stays; then `PlayerRespawnEvent`, not from the End's exit.
 pub fn respawned(rt: &mut Rt, player: u128, name: &str) {
     named(rt, player, name);
+    // `restoreFrom(old, keepEverything)`, with what mixins inject at its head and its end
+    // around the event it posts: the old player is the same object here.
+    let restore = &crate::places::RESTORE_FROM;
+    let p = if restore.heard(rt) {
+        known_player(rt, player)
+    } else {
+        V::NULL
+    };
+    restore.head(rt, p, &[p, V::I(0)]);
     player_event(rt, CLONE, player, |rt, ev| {
         let p = rt.get_field(ev, "$player");
         rt.put_field(ev, "$original", p);
         rt.put_field(ev, "$wasDeath", V::I(1));
     });
+    restore.end(rt, p, &[p, V::I(0)]);
     player_event(rt, RESPAWN, player, |rt, ev| rt.put_field(ev, "$endConquered", V::I(0)));
 }
 
@@ -438,7 +452,39 @@ fn player_lifecycle(class: &str) -> bool {
 
 /// The server's player list (`MinecraftServer.getPlayerList`): its players are the host's.
 pub(crate) fn player_list(rt: &mut Rt) -> V {
-    rt.intern("compat:player-list".into(), |rt| rt.new_object(PLAYER_LIST))
+    if let Some(&list) = rt.interned.get("compat:player-list") {
+        return list;
+    }
+    let list = rt.new_object(PLAYER_LIST);
+    rt.interned.insert("compat:player-list".into(), list);
+    crate::places::constructed(rt, list, PLAYER_LIST, &[]);
+    list
+}
+
+/// What mixins inject at the head (`head`) or the end of the player list's method about the
+/// server's player `player`: `placeNewPlayer(connection, player, cookie)` when they join
+/// (`joins`), `remove(player)` when they leave ([`crate::places`]).
+fn player_list_place(rt: &mut Rt, player: u128, joins: bool, head: bool) {
+    let method = if joins {
+        &crate::places::PLACE_NEW_PLAYER
+    } else {
+        &crate::places::REMOVE_PLAYER
+    };
+    if !method.heard(rt) {
+        return;
+    }
+    let list = player_list(rt);
+    let p = known_player(rt, player);
+    let arguments = if joins {
+        vec![V::Void, p, V::Void]
+    } else {
+        vec![p]
+    };
+    if head {
+        method.head(rt, list, &arguments);
+    } else {
+        method.end(rt, list, &arguments);
+    }
 }
 
 /// The server's players, as their objects (`PlayerList.getPlayers`; a level's host lists its own).

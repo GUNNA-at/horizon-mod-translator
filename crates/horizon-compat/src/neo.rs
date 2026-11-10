@@ -420,8 +420,9 @@ pub fn profile() -> Vec<(String, String, u32, std::time::Duration)> {
 
 /// What the name of a place in a method the runtime runs itself starts with: a mixin's static
 /// injector into the method listens for the place, as the translator lists it among its class's
-/// subscribers (`hz/inject:<owner>.<method>@<place>`).
-const PLACE: &str = "hz/inject:";
+/// subscribers (`hz/inject:<owner>.<method>@<place>`). An instance one runs on the game's
+/// object, where the runtime has it in hand ([`crate::places`]).
+const PLACE: &str = crate::places::PLACE;
 /// NeoForge's `GameData.postRegisterEvents`: the loop over the registries that posts a
 /// `RegisterEvent` for each.
 const POST_REGISTER_EVENTS: &str =
@@ -1174,7 +1175,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/LevelTickEvent") => V::I(1),
         // The server's tick: the one server, with time to spare (`hasTime`).
         (o, "getServer") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => {
-            rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+            server(rt)
         }
         (o, "hasTime") if o.starts_with("net/neoforged/neoforge/event/tick/ServerTickEvent") => V::I(1),
         // `ServerLifecycleHooks.getCurrentServer()`: the server from its `ServerAboutToStartEvent`
@@ -2268,10 +2269,19 @@ const SERVER_RUNNING: &str = "compat:server-running";
 const SERVER_EVENTS: &str = "net/neoforged/neoforge/event/server/";
 const LEVEL_UNLOAD: &str = "net/neoforged/neoforge/event/level/LevelEvent$Unload";
 
-/// The server: one object while it runs.
+/// The server: one object while it runs. What mixins inject at the end of its constructor runs
+/// as it is made ([`crate::places::constructed`]).
 pub(crate) fn server(rt: &mut Rt) -> V {
-    rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+    if let Some(&server) = rt.interned.get("compat:server") {
+        return server;
+    }
+    let server = rt.new_object(MINECRAFT_SERVER);
+    rt.interned.insert("compat:server".into(), server);
+    crate::places::constructed(rt, server, MINECRAFT_SERVER, &[]);
+    server
 }
+
+const MINECRAFT_SERVER: &str = "net/minecraft/server/MinecraftServer";
 
 /// Posts the server lifecycle event `name` (`ServerStartingEvent`) about the server.
 fn server_event(rt: &mut Rt, name: &str) {
@@ -2289,6 +2299,9 @@ fn server_event(rt: &mut Rt, name: &str) {
 /// load first ([`crate::mod_configs::server_starting`]).
 pub(crate) fn server_about_to_start(rt: &mut Rt) {
     rt.interned.insert(SERVER_RUNNING.into(), V::I(1));
+    // The server is made (its constructor's end) and runs (`runServer`'s head), as mixins see it.
+    let made = server(rt);
+    crate::places::RUN_SERVER.head(rt, made, &[]);
     crate::mod_configs::server_starting(rt);
     server_event(rt, "ServerAboutToStartEvent");
 }
@@ -2297,6 +2310,18 @@ pub(crate) fn server_about_to_start(rt: &mut Rt) {
 /// posts them before its first tick.
 pub(crate) fn server_started(rt: &mut Rt) {
     rt.interned.insert(SERVER_RUNNING.into(), V::I(1));
+    // `loadLevel` and, within it, `createLevels`, which makes the Overworld's level before the
+    // server starts: what mixins inject at their ends finds it (Immersive Portals and AE2 wait
+    // for "all worlds loaded" there).
+    use crate::places::{CREATE_LEVELS, LOAD_LEVEL};
+    let made = server(rt);
+    LOAD_LEVEL.head(rt, made, &[]);
+    CREATE_LEVELS.head(rt, made, &[]);
+    if CREATE_LEVELS.heard(rt) || LOAD_LEVEL.heard(rt) {
+        crate::glue::server_level(rt, "minecraft:overworld");
+    }
+    CREATE_LEVELS.end(rt, made, &[]);
+    LOAD_LEVEL.end(rt, made, &[]);
     server_event(rt, "ServerStartingEvent");
     server_event(rt, "ServerStartedEvent");
 }
@@ -2307,6 +2332,9 @@ pub(crate) fn server_started(rt: &mut Rt) {
 pub(crate) fn server_stopping(rt: &mut Rt) {
     crate::mod_configs::reset_world_values(rt);
     server_event(rt, "ServerStoppingEvent");
+    // Then `stopServer` begins.
+    let stopping = server(rt);
+    crate::places::STOP_SERVER.head(rt, stopping, &[]);
 }
 
 /// The server gone: its levels unload (`LevelEvent.Unload`, in the order they loaded), then
@@ -2328,8 +2356,17 @@ pub(crate) fn server_stopped(rt: &mut Rt) {
             eprintln!("horizon-compat: LevelEvent$Unload to {} listeners", hearing(rt, LEVEL_UNLOAD).len());
         }
         post(rt, LEVEL_UNLOAD, ev);
+        if rt.class_of(level) == "net/minecraft/server/level/ServerLevel" {
+            crate::places::LEVEL_CLOSE.head(rt, level, &[]);
+            crate::places::LEVEL_CLOSE.end(rt, level, &[]);
+        }
     }
+    // `stopServer` ends with its levels closed; then the server has stopped, and `runServer`
+    // returns.
+    let stopped = rt.interned.get("compat:server").copied().unwrap_or(V::NULL);
+    crate::places::STOP_SERVER.end(rt, stopped, &[]);
     server_event(rt, "ServerStoppedEvent");
+    crate::places::RUN_SERVER.end(rt, stopped, &[]);
     // Then its configs unload ([`crate::mod_configs::server_stopped`]).
     crate::mod_configs::server_stopped(rt);
     // The server's commands went with it (`crate::commands`), and its levels' entities, saved with
@@ -2445,6 +2482,17 @@ fn fire_client_init(rt: &mut Rt) {
     crate::keys::post_register(rt);
     let ev = rt.new_object(crate::gui::REGISTER_LAYERS);
     post(rt, crate::gui::REGISTER_LAYERS, ev);
+    // The constructor's end, where mixins inject what a mod sets up once the client is made
+    // (before its first resource load ends, so before the mods' setup events).
+    const MINECRAFT: &str = "net/minecraft/client/Minecraft";
+    if crate::places::constructors_heard(rt, MINECRAFT) {
+        let mc = crate::api::call(
+            rt,
+            "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;",
+            &[],
+        );
+        crate::places::constructed(rt, mc, MINECRAFT, &[]);
+    }
 }
 
 /// NeoForge's "Sided setup" on a client: `FMLClientSetupEvent` (Registrate registers block

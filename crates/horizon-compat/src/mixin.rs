@@ -18,7 +18,10 @@ const REFS: &str = "com/llamalad7/mixinextras/sugar/ref/Local";
 
 /// Whether this module answers `owner.name desc`.
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    owner == CALLBACK_INFO || owner == RETURNABLE || owner.starts_with(REFS)
+    owner == CALLBACK_INFO
+        || owner == RETURNABLE
+        || owner.starts_with(REFS)
+        || owner.starts_with(crate::places::MADE)
 }
 
 /// The box Java's autoboxing makes for a value of descriptor kind `kind` (`Z`, `I`, `F`...); an
@@ -70,6 +73,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
+    // What a mixin into the game's class adds to its constructors' end, asked for by the
+    // mixin's code before its first method runs on an object ([`crate::places`]).
+    if let Some(mixin) = owner.strip_prefix(crate::places::MADE) {
+        crate::places::constructed_late(rt, this, mixin);
+        return Some(V::Void);
+    }
     if owner.starts_with(REFS) {
         return Some(match name {
             "get" => rt.get_field(this, "$value"),

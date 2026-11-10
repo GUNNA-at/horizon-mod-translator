@@ -113,6 +113,11 @@ const CASES: &[(&str, &str, i32, &str)] = &[
     ("vecLabels", "(I)Ljava/lang/String;", 4, "a440/b40"),
     ("vecMeasured", "(I)I", 1, "1"),
     ("vecMeasured", "(I)I", 0, "0"),
+    // What it injects at the end of the game's constructor: run with the arguments where the
+    // mod's code called the constructor ((4 + 1 + 2) + the 10 reads the field initialiser set
+    // first), and on an object the game made, before the first of the mixin's methods (0 + 10).
+    ("vecSum", "(I)I", 4, "17"),
+    ("vecZero", "()I", 0, "10"),
 ];
 
 #[test]

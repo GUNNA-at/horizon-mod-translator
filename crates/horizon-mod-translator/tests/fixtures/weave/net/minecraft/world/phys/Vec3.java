@@ -2,6 +2,7 @@ package net.minecraft.world.phys;
 
 /** The game's class, as the mods compile against it (not translated: the runtime has it). */
 public class Vec3 {
+    public static final Vec3 ZERO = new Vec3(0.0, 0.0, 0.0);
     public final double x;
     public final double y;
     public final double z;

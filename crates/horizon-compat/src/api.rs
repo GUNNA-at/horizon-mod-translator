@@ -160,10 +160,23 @@ fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         );
         V::Void
     } else {
-        call_nested(rt, key, args)
+        let r = call_nested(rt, key, args);
+        // A constructor of the game's has ended: what mixins inject at its end runs on the
+        // object made, as in the constructor the mods' code called ([`crate::places`]).
+        if is_constructor(key) {
+            crate::places::constructor_ended(rt, key, args);
+        }
+        r
     };
     DEPTH.with(|d| d.set(d.get() - 1));
     r
+}
+
+/// Whether API key `key` is a constructor's (`<class>.<init>.<descriptor>`): asked of every
+/// call, so by the one character no other key has.
+fn is_constructor(key: &str) -> bool {
+    key.find('<')
+        .is_some_and(|at| key[at..].starts_with("<init>.("))
 }
 
 fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
@@ -2620,7 +2633,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // A client level has no server (`ClientLevel.getServer` is null).
         (_, "getServer") if level && rt.get_field(a(0), "isClientSide").i() != 0 => V::NULL,
-        (_, "getServer") if level => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
+        (_, "getServer") if level => crate::neo::server(rt),
         ("net/minecraft/server/MinecraftServer" | "net/minecraft/server/dedicated/DedicatedServer", n) => match n {
             "getTickCount" => V::I(rt.host().map_or(0, |h| h.game_time()) as i32),
             // A client's runtime has its one level (a client can't reach the server's).

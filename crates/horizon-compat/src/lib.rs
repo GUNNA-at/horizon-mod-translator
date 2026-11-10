@@ -117,6 +117,7 @@ pub mod recipes;
 pub mod palette;
 pub mod particle_engine;
 pub mod particles;
+pub mod places;
 pub mod records;
 pub mod render;
 pub mod resources;

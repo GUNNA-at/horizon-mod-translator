@@ -293,13 +293,26 @@ pub(crate) fn virt(rt: &mut Rt, key: &'static str, this: V, args: &[V]) -> V {
 /// The player object of the server's player `uuid`: one for as long as the runtime runs, so what a
 /// mod keeps on it (`containerMenu`) stays from one hook to the next.
 pub fn server_player(rt: &mut Rt, uuid: u128) -> V {
-    rt.intern(format!("compat:player/{uuid:x}"), move |rt| {
-        let p = rt.new_object(SERVER_PLAYER);
-        let u = crate::tags::uuid(rt, (uuid >> 64) as i64, uuid as i64);
-        rt.put_field(p, "$uuid", u);
-        init_player(rt, p);
-        p
-    })
+    let key = format!("compat:player/{uuid:x}");
+    if let Some(&p) = rt.interned.get(&key) {
+        return p;
+    }
+    let p = rt.new_object(SERVER_PLAYER);
+    let u = crate::tags::uuid(rt, (uuid >> 64) as i64, uuid as i64);
+    rt.put_field(p, "$uuid", u);
+    init_player(rt, p);
+    rt.interned.insert(key, p);
+    // Its constructors' end, as mixins inject there (what a mod keeps for each player).
+    if crate::places::constructors_heard(rt, SERVER_PLAYER) {
+        let server = crate::neo::server(rt);
+        crate::places::constructed(
+            rt,
+            p,
+            SERVER_PLAYER,
+            &[("Lnet/minecraft/server/MinecraftServer;", server)],
+        );
+    }
+    p
 }
 
 /// A player object's menus, once: its inventory's (`inventoryMenu`, id 0), open as `containerMenu`.

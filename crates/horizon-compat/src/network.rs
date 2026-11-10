@@ -1117,11 +1117,15 @@ pub fn receive(rt: &mut Rt, channel: &str, data: &[u8], player: Option<u128>) ->
 
 /// The client's own player (`Minecraft.player`, `IPayloadContext.player()` on the client).
 pub fn local_player(rt: &mut Rt) -> V {
-    rt.intern("compat:local-player".into(), |rt| {
-        let p = rt.new_object("net/minecraft/client/player/LocalPlayer");
-        crate::menus::init_player(rt, p);
-        p
-    })
+    if let Some(&p) = rt.interned.get("compat:local-player") {
+        return p;
+    }
+    let p = rt.new_object("net/minecraft/client/player/LocalPlayer");
+    crate::menus::init_player(rt, p);
+    rt.interned.insert("compat:local-player".into(), p);
+    // Its constructors' end, as mixins inject there.
+    crate::places::constructed(rt, p, "net/minecraft/client/player/LocalPlayer", &[]);
+    p
 }
 
 /// A payload handler's `IPayloadContext`: from `player` (a server's runtime), or from the server.
@@ -1207,7 +1211,35 @@ pub(crate) fn client_connection(rt: &mut Rt) -> V {
     if !connected {
         return V::NULL;
     }
-    rt.intern("compat:client-connection".into(), |rt| rt.new_object(CLIENT_LISTENER))
+    if let Some(&connection) = rt.interned.get("compat:client-connection") {
+        return connection;
+    }
+    let connection = rt.new_object(CLIENT_LISTENER);
+    rt.interned
+        .insert("compat:client-connection".into(), connection);
+    // Its recipe manager, a field its constructor sets.
+    let recipes = crate::api::call(
+        rt,
+        "net/minecraft/client/multiplayer/ClientPacketListener.getRecipeManager.()Lnet/minecraft/world/item/crafting/RecipeManager;",
+        &[connection],
+    );
+    rt.put_field(connection, "recipeManager", recipes);
+    // Its constructor's end, as mixins inject there (a mod takes the connection's recipes and
+    // registries as it is made).
+    if crate::places::constructors_heard(rt, CLIENT_LISTENER) {
+        let mc = crate::api::call(
+            rt,
+            "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;",
+            &[],
+        );
+        crate::places::constructed(
+            rt,
+            connection,
+            CLIENT_LISTENER,
+            &[("Lnet/minecraft/client/Minecraft;", mc)],
+        );
+    }
+    connection
 }
 
 /// The mod's payload a packet carries: the packet itself when it is one (NeoForge's

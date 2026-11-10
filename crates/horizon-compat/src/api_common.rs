@@ -2803,7 +2803,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             if crate::neo::is_client(rt) {
                 V::NULL
             } else {
-                rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer"))
+                crate::neo::server(rt)
             }
         }
         // `SectionPos`: a 16-block cube's coordinates (the block's shifted right 4), packed into a
@@ -7255,6 +7255,53 @@ mod tests {
         rt.supers.insert("com/example/RiceCrop", "net/minecraft/world/level/block/CropBlock");
         assert!(rt.is_a("com/example/RiceCrop", "net/minecraft/world/level/block/BonemealableBlock"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The game's and the loader's classes are what their class files say: a server's level is
+    /// a `Level` and each interface a level has, through the classes and interfaces between; a
+    /// menu, a player, a NeoForge class likewise. Never the other way round.
+    #[test]
+    fn the_games_classes_are_under_the_classes_and_interfaces_they_declare() {
+        let rt = Rt::new();
+        let is = |c: &str, class: &str| rt.is_a(c, class);
+        const SERVER_LEVEL: &str = "net/minecraft/server/level/ServerLevel";
+        const LEVEL: &str = "net/minecraft/world/level/Level";
+        for class in [
+            LEVEL,
+            "net/minecraft/world/level/LevelAccessor",
+            "net/minecraft/world/level/ServerLevelAccessor",
+            "net/minecraft/world/level/WorldGenLevel",
+            "net/minecraft/world/level/LevelReader",
+            "net/minecraft/world/level/BlockGetter",
+            "net/minecraft/world/level/LevelHeightAccessor",
+            "java/lang/AutoCloseable",
+            "net/neoforged/neoforge/common/extensions/ILevelExtension",
+        ] {
+            assert!(is(SERVER_LEVEL, class), "{class}");
+        }
+        assert!(is("net/minecraft/client/multiplayer/ClientLevel", LEVEL));
+        assert!(!is(LEVEL, SERVER_LEVEL));
+        assert!(!is(
+            "net/minecraft/client/multiplayer/ClientLevel",
+            SERVER_LEVEL
+        ));
+        assert!(!is(SERVER_LEVEL, "net/minecraft/world/level/block/Block"));
+        assert!(is(
+            "net/minecraft/world/inventory/ChestMenu",
+            "net/minecraft/world/inventory/AbstractContainerMenu"
+        ));
+        assert!(is(
+            "net/minecraft/world/entity/animal/Cow",
+            "net/minecraft/world/entity/AgeableMob"
+        ));
+        assert!(is(
+            "net/neoforged/neoforge/common/util/FakePlayer",
+            "net/minecraft/world/entity/player/Player"
+        ));
+        assert!(is(
+            "net/neoforged/neoforge/items/ItemStackHandler",
+            "net/neoforged/neoforge/items/IItemHandlerModifiable"
+        ));
     }
 
     #[test]

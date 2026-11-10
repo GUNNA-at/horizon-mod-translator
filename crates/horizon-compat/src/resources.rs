@@ -30,6 +30,34 @@ const MANAGER_LISTENER: &str = "net/minecraft/server/packs/resources/ResourceMan
 pub(crate) const CLIENT_LISTENERS_EVENT: &str = "net/neoforged/neoforge/client/event/RegisterClientReloadListenersEvent";
 pub(crate) const SERVER_LISTENERS_EVENT: &str = "net/neoforged/neoforge/event/AddReloadListenerEvent";
 const SERVER_RESOURCES: &str = "net/minecraft/server/ReloadableServerResources";
+
+/// The server's resources (`ReloadableServerResources`): one object, with what mixins inject
+/// at the end of its constructor run as it is made (a mod takes its recipe manager there).
+fn server_resources(rt: &mut Rt) -> V {
+    if let Some(&resources) = rt.interned.get("compat:server-resources") {
+        return resources;
+    }
+    let resources = rt.new_object(SERVER_RESOURCES);
+    rt.interned
+        .insert("compat:server-resources".into(), resources);
+    // Its recipe manager, a field its constructor sets (Cucumber's mixin reads the field there).
+    let recipes = crate::api::call(
+        rt,
+        "net/minecraft/server/ReloadableServerResources.getRecipeManager.()Lnet/minecraft/world/item/crafting/RecipeManager;",
+        &[resources],
+    );
+    rt.put_field(resources, "recipes", recipes);
+    if crate::places::constructors_heard(rt, SERVER_RESOURCES) {
+        let registries = registry_access(rt);
+        crate::places::constructed(
+            rt,
+            resources,
+            SERVER_RESOURCES,
+            &[("Lnet/minecraft/core/RegistryAccess$Frozen;", registries)],
+        );
+    }
+    resources
+}
 const TAGS_UPDATED_EVENT: &str = "net/neoforged/neoforge/event/TagsUpdatedEvent";
 const UPDATE_CAUSE: &str = "net/neoforged/neoforge/event/TagsUpdatedEvent$UpdateCause";
 const UPDATE_CAUSES: [&str; 2] = ["SERVER_DATA_LOAD", "CLIENT_PACKET_RECEIVED"];
@@ -498,7 +526,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let items = crate::jutil::elements(rt, all);
             crate::jutil::new_list(rt, items)
         }
-        (SERVER_LISTENERS_EVENT, "getServerResources") => rt.intern("compat:server-resources".into(), |rt| rt.new_object(SERVER_RESOURCES)),
+        (SERVER_LISTENERS_EVENT, "getServerResources") => server_resources(rt),
         (SERVER_LISTENERS_EVENT, "getRegistryAccess") | (TAGS_UPDATED_EVENT, "getRegistryAccess") | (SERVER_RESOURCES, "getRegistryLookup") => registry_access(rt),
         // The tags bound (`ReloadableServerResources.updateRegistryTags`): the server's own load,
         // after its listeners; one from a server's packet is a client's.
@@ -835,14 +863,26 @@ pub fn server_reload(rt: &mut Rt) {
     if let Some(Data::List(l)) = rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data) {
         l.clear();
     }
+    // Each load makes its `ReloadableServerResources` anew: what mixins inject at the end of
+    // its constructor runs before the listeners are asked for, and what they inject into
+    // `updateRegistryTags` around the tags' binding.
+    rt.interned.remove("compat:server-resources");
+    let tagged = &crate::places::UPDATE_REGISTRY_TAGS;
+    let resources = if crate::places::constructors_heard(rt, SERVER_RESOURCES) || tagged.heard(rt) {
+        server_resources(rt)
+    } else {
+        V::NULL
+    };
     let ev = rt.new_object(SERVER_LISTENERS_EVENT);
     crate::neo::post(rt, SERVER_LISTENERS_EVENT, ev);
     reload(rt, "data");
     // Then the loaded tags bind to the registries, and NeoForge says so: what a mod derives from
     // tags it derives again.
+    tagged.head(rt, resources, &[]);
     let tags = rt.new_object(TAGS_UPDATED_EVENT);
     rt.put_field(tags, "$cause", V::I(0));
     crate::neo::post(rt, TAGS_UPDATED_EVENT, tags);
+    tagged.end(rt, resources, &[]);
 }
 
 fn registry_access(rt: &mut Rt) -> V {
@@ -1035,7 +1075,7 @@ fn reader_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
         // there is `FileNotFoundException`, as the JDK's.
         ("<init>", _) if owner == FILE_READER => {
             let path = rt.str_of(a(1)).unwrap_or("").to_owned();
-            match std::fs::read(crate::files::on_disk(rt, &path)) {
+            match crate::files::read_file(&crate::files::on_disk(rt, &path)) {
                 Ok(bytes) => {
                     become_bytes(rt, this, bytes);
                     V::Void
@@ -1620,5 +1660,67 @@ mod tests {
         assert_eq!(rt.statics.get("test/Spouts.runs").map(|v| v.i()), Some(2));
         assert!(rt.thrown.is_none());
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Each load of the server's data makes its `ReloadableServerResources` anew: what a mixin
+    /// injects at the end of its constructor runs on each, handed the registries, and finds the
+    /// recipe manager in the object's field (Cucumber takes it from there); what it injects into
+    /// `updateRegistryTags` runs on the same object once the tags are bound.
+    #[test]
+    fn each_server_data_load_constructs_its_resources() {
+        const INFO: &str = "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;";
+        fn handler(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
+            // The lambda's slot, the object, the handler's arguments, the `CallbackInfo`.
+            let seen = rt.interned["test:seen"];
+            let recipes = crate::api::game_field(
+                rt,
+                args[1],
+                "recipes",
+                "$recipes",
+                "net/minecraft/server/ReloadableServerResources.$recipes.()Lnet/minecraft/world/item/crafting/RecipeManager;",
+            );
+            let registries = if lid == 1 { args[2] } else { V::NULL };
+            for v in [V::I(lid as i32), args[1], recipes, registries] {
+                crate::jutil::list_add(rt, seen, v);
+            }
+            Some(V::Void)
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(handler);
+        let seen = crate::jutil::new_list(&mut rt, Vec::new());
+        rt.interned.insert("test:seen".into(), seen);
+        let made: &'static str = Box::leak(
+            format!("t/ResourcesMixin.made.(Lnet/minecraft/core/RegistryAccess$Frozen;Lnet/minecraft/world/flag/FeatureFlagSet;Lnet/minecraft/commands/Commands$CommandSelection;I{INFO})V").into_boxed_str(),
+        );
+        let tagged: &'static str =
+            Box::leak(format!("t/ResourcesMixin.tagged.({INFO})V").into_boxed_str());
+        rt.subscribers.insert(
+            "t/ResourcesMixin",
+            vec![
+                ("hz/inject:net/minecraft/server/ReloadableServerResources.<init>@RETURN", made, false, 1),
+                ("hz/inject:net/minecraft/server/ReloadableServerResources.updateRegistryTags@TAIL", tagged, false, 2),
+            ],
+        );
+        let mut h = host();
+        rt.with_host(&mut h, server_reload);
+        rt.with_host(&mut h, server_reload);
+        assert!(rt.thrown.is_none());
+        let seen = crate::jutil::elements(&rt, seen);
+        let calls: Vec<&[V]> = seen.chunks(4).collect();
+        assert_eq!(
+            calls.iter().map(|c| c[0].i()).collect::<Vec<_>>(),
+            [1, 2, 1, 2]
+        );
+        // One object a load, with its recipe manager; the constructor's handler got registries.
+        assert!(
+            calls[0][1] == calls[1][1] && calls[2][1] == calls[3][1] && calls[0][1] != calls[2][1]
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|c| rt.class_of(c[2]) == "net/minecraft/world/item/crafting/RecipeManager")
+        );
+        assert!(calls[0][3].r() != 0 && calls[2][3].r() != 0);
     }
 }

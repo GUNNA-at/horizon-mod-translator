@@ -67,6 +67,7 @@ pub fn level(rt: &mut Rt) -> V {
     let l = rt.new_object("net/minecraft/client/multiplayer/ClientLevel");
     rt.put_field(l, "isClientSide", V::I(1));
     rt.interned.insert("compat:level".into(), l);
+    crate::places::constructed(rt, l, "net/minecraft/client/multiplayer/ClientLevel", &[]);
     level_loaded(rt, l);
     l
 }
@@ -101,6 +102,15 @@ pub(crate) fn server_level(rt: &mut Rt, dimension: &str) -> V {
         crate::jutil::new_list(rt, Vec::new())
     });
     crate::jutil::list_add(rt, made, l);
+    // Its constructor's end, as mixins inject there (Sable makes each level's container of
+    // sub-levels so), with the server it was made for; then mods hear it load.
+    let server = crate::neo::server(rt);
+    crate::places::constructed(
+        rt,
+        l,
+        "net/minecraft/server/level/ServerLevel",
+        &[("Lnet/minecraft/server/MinecraftServer;", server)],
+    );
     level_loaded(rt, l);
     l
 }
@@ -1845,11 +1855,36 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
         if !post {
             crate::damage::server_tick(rt);
             forget_broken(rt);
+            server_place(rt, &crate::places::TICK_SERVER, true);
+        } else {
+            server_place(rt, &crate::places::TICK_CHILDREN, false);
         }
         let class = if post { SERVER_TICK_POST } else { SERVER_TICK_PRE };
         let ev = rt.new_object(class);
         crate::neo::post(rt, class, ev);
+        if !post {
+            server_place(rt, &crate::places::TICK_CHILDREN, true);
+        } else {
+            server_place(rt, &crate::places::TICK_SERVER, false);
+        }
     });
+}
+
+/// What mixins inject at the head (`head`) or the end of `method`, one of the server's that
+/// takes whether the tick has time left (`tickServer`, `tickChildren`), run on the server: the
+/// head of `tickServer` before NeoForge posts the tick's start, its end after the tick's end
+/// is posted, and `tickChildren` between the two ([`crate::places`]).
+fn server_place(rt: &mut Rt, method: &crate::places::Method, head: bool) {
+    if !method.heard(rt) {
+        return;
+    }
+    let server = crate::neo::server(rt);
+    let time_left = crate::functions::constant(rt, V::I(1));
+    if head {
+        method.head(rt, server, &[time_left]);
+    } else {
+        method.end(rt, server, &[time_left]);
+    }
 }
 
 /// `native_server_about_to_start` (server): NeoForge's `ServerAboutToStartEvent`, before the
@@ -2128,10 +2163,24 @@ pub fn level_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
         let ev = rt.new_object(class);
         let l = level(rt);
         rt.put_field(ev, "$level", l);
+        // `ServerLevel.tick` itself runs between the two events: what mixins inject at its end
+        // runs before the tick's end is posted, what they inject at its head after its start is.
+        let places = crate::places::LEVEL_TICK.heard(rt);
+        let time_left = if places {
+            crate::functions::constant(rt, V::I(1))
+        } else {
+            V::NULL
+        };
+        if post && places {
+            crate::places::LEVEL_TICK.end(rt, l, &[time_left]);
+        }
         crate::neo::post(rt, class, ev);
         // The level's entities tick after the event before the level's own (`ServerLevel.tick`):
         // a mod's own among them.
         if !post {
+            if places {
+                crate::places::LEVEL_TICK.head(rt, l, &[time_left]);
+            }
             let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
             crate::mod_entities::tick_all(rt, &dimension);
         }
@@ -2419,19 +2468,45 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     client_setup(rt, host);
     rt.with_host(host, |rt| {
         crate::gui::frame(rt);
+        // What mixins inject into `Minecraft.tick` and, in a world, into the client level's
+        // ticks runs around what the runtime does of them ([`crate::places`]).
+        use crate::places::{CLIENT_LEVEL_ENTITIES, CLIENT_LEVEL_TICK, CLIENT_TICK};
+        let mc = if CLIENT_TICK.heard(rt) {
+            api::call(
+                rt,
+                "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;",
+                &[],
+            )
+        } else {
+            V::NULL
+        };
+        let in_world = (CLIENT_LEVEL_ENTITIES.heard(rt) || CLIENT_LEVEL_TICK.heard(rt))
+            && crate::world_events::client_in_world(rt);
+        let (l, time_left) = if in_world {
+            (level(rt), crate::functions::constant(rt, V::I(1)))
+        } else {
+            (V::NULL, V::NULL)
+        };
+        CLIENT_TICK.head(rt, mc, &[]);
         let ev = rt.new_object(CLIENT_TICK_PRE);
         crate::neo::post(rt, CLIENT_TICK_PRE, ev);
         crate::screens::tick(rt);
         // `ClientLevel.tickEntities`: the entities (the client's own player among them), then the
         // block entities.
+        CLIENT_LEVEL_ENTITIES.head(rt, l, &[]);
         crate::world_events::client_player_tick(rt);
         let dimension = rt.host().map(|h| h.dimension()).unwrap_or_default();
         crate::mod_entities::tick_all(rt, &dimension);
         tick_client_block_entities(rt);
+        CLIENT_LEVEL_ENTITIES.end(rt, l, &[]);
         // The particle engine's (`ParticleEngine.tick`): the mods' own particles.
         crate::particle_engine::tick(rt);
+        // Then the level's own tick (`ClientLevel.tick`: its time, its border).
+        CLIENT_LEVEL_TICK.head(rt, l, &[time_left]);
+        CLIENT_LEVEL_TICK.end(rt, l, &[time_left]);
         let ev = rt.new_object(CLIENT_TICK_POST);
         crate::neo::post(rt, CLIENT_TICK_POST, ev);
+        CLIENT_TICK.end(rt, mc, &[]);
         crate::keys::tick(rt);
         // The sound manager's: the mods' own instances that tick.
         crate::sounds::tick(rt);

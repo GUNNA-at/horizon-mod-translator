@@ -30,6 +30,7 @@
 //! (`new BreakEvent(...)`: an area tool asks for each block of its area whether it may break), and
 //! keep a block to put back as a `BlockSnapshot`.
 
+use crate::places::{DISCONNECT, HANDLE_LOGIN, SET_LEVEL, UPDATE_LEVEL_IN_ENGINES};
 use crate::{api, api_common, Rt, V};
 
 const EVENT: &str = "net/neoforged/bus/api/Event";
@@ -247,40 +248,55 @@ pub fn block_place(rt: &mut Rt, p: [i32; 3], state: &str) {
 
 // ---- a player's tick ----
 
-/// Whether any mod listens to a player's tick.
+/// Whether any mod hears a server's player's tick: listens for its events, or has a handler
+/// injected into it ([`crate::places::player_tick`]).
 pub fn player_ticks_heard(rt: &mut Rt) -> bool {
-    listened(rt, PLAYER_TICK_PRE) || listened(rt, PLAYER_TICK_POST)
+    ticks_heard(rt, false)
 }
 
-fn tick_events(rt: &mut Rt, player: V) {
-    for class in [PLAYER_TICK_PRE, PLAYER_TICK_POST] {
-        if !listened(rt, class) {
-            continue;
-        }
-        let ev = rt.new_object(class);
-        rt.put_field(ev, "$player", player);
-        crate::neo::post(rt, class, ev);
+fn ticks_heard(rt: &mut Rt, local: bool) -> bool {
+    listened(rt, PLAYER_TICK_PRE)
+        || listened(rt, PLAYER_TICK_POST)
+        || crate::places::player_ticks_heard(rt, local)
+}
+
+fn tick_event(rt: &mut Rt, class: &'static str, player: V) {
+    if !listened(rt, class) {
+        return;
     }
+    let ev = rt.new_object(class);
+    rt.put_field(ev, "$player", player);
+    crate::neo::post(rt, class, ev);
 }
 
-/// A server player's tick (`Player.tick`): `PlayerTickEvent.Pre`, then `.Post`, for the acting
-/// player.
+/// `player`'s tick: `PlayerTickEvent.Pre`, then `.Post`, as `Player.tick` posts them, and what
+/// mixins inject into the tick around them.
+fn tick_player(rt: &mut Rt, player: V, local: bool) {
+    crate::places::player_tick(
+        rt,
+        player,
+        local,
+        |rt| tick_event(rt, PLAYER_TICK_PRE, player),
+        |rt| tick_event(rt, PLAYER_TICK_POST, player),
+    );
+}
+
+/// A server player's tick (`Player.tick`), for the acting player.
 pub fn player_tick(rt: &mut Rt) {
-    if !player_ticks_heard(rt) {
+    if !ticks_heard(rt, false) {
         return;
     }
     let player = api_common::acting_player(rt);
-    tick_events(rt, player);
+    tick_player(rt, player, false);
 }
 
-/// The client's own player's tick, among the client level's entities: `PlayerTickEvent.Pre`, then
-/// `.Post`, while there is a player.
+/// The client's own player's tick, among the client level's entities, while there is a player.
 pub fn client_player_tick(rt: &mut Rt) {
-    if rt.host().is_none_or(|h| h.client_player().is_none()) || !player_ticks_heard(rt) {
+    if rt.host().is_none_or(|h| h.client_player().is_none()) || !ticks_heard(rt, true) {
         return;
     }
     let player = crate::network::local_player(rt);
-    tick_events(rt, player);
+    tick_player(rt, player, true);
 }
 
 // ---- the client on a server ----
@@ -306,12 +322,37 @@ pub fn client_level_load(rt: &mut Rt, dimension: &str) {
         eprintln!("horizon-compat: the client's level {dimension} loaded");
     }
     if held == 0 {
-        // The level first (its `LevelEvent.Load`), then the player logs in.
-        crate::glue::level(rt);
+        // `ClientPacketListener.handleLogin`: the level first (its `LevelEvent.Load`), which
+        // the client takes (`Minecraft.setLevel`), then the player logs in. What mixins inject
+        // into those runs around them ([`crate::places`]).
+        let (connection, mc) =
+            client_objects(rt, &[&HANDLE_LOGIN, &SET_LEVEL, &UPDATE_LEVEL_IN_ENGINES]);
+        HANDLE_LOGIN.head(rt, connection, &[]);
+        let level = crate::glue::level(rt);
+        SET_LEVEL.head(rt, mc, &[level]);
+        UPDATE_LEVEL_IN_ENGINES.head(rt, mc, &[level]);
+        UPDATE_LEVEL_IN_ENGINES.end(rt, mc, &[level]);
+        SET_LEVEL.end(rt, mc, &[level]);
         network_event(rt, LOGGING_IN);
+        HANDLE_LOGIN.end(rt, connection, &[]);
     } else {
         network_event(rt, CLONE);
     }
+}
+
+/// The client's connection and its `Minecraft`, for the handlers mixins inject into `methods`
+/// of theirs; neither when no handler is.
+fn client_objects(rt: &mut Rt, methods: &[&crate::places::Method]) -> (V, V) {
+    if !methods.iter().any(|m| m.heard(rt)) {
+        return (V::NULL, V::NULL);
+    }
+    let connection = crate::network::client_connection(rt);
+    let mc = api::call(
+        rt,
+        "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;",
+        &[],
+    );
+    (connection, mc)
 }
 
 /// The client dropped its level for `dimension`: replaced by another dimension's, or leaving the
@@ -336,6 +377,9 @@ pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
     // NeoForge's own listener on `LoggingOut` comes first (`ClientNeoForgeMod`): the config values
     // that wait for a world to restart read their config again.
     crate::mod_configs::reset_world_values(rt);
+    // `Minecraft.disconnect`, with what mixins inject at its head and its end.
+    let (_, mc) = client_objects(rt, &[&DISCONNECT, &UPDATE_LEVEL_IN_ENGINES]);
+    DISCONNECT.head(rt, mc, &[V::NULL, V::I(0)]);
     network_event(rt, LOGGING_OUT);
     if let Some(level) = rt.interned.remove("compat:level") {
         let ev = rt.new_object(LEVEL_UNLOAD);
@@ -351,6 +395,9 @@ pub fn client_level_unload(rt: &mut Rt, dimension: &str) {
         rt.put_field(mc, "player", V::NULL);
         rt.put_field(mc, "cameraEntity", V::NULL);
     }
+    UPDATE_LEVEL_IN_ENGINES.head(rt, mc, &[V::NULL]);
+    UPDATE_LEVEL_IN_ENGINES.end(rt, mc, &[V::NULL]);
+    DISCONNECT.end(rt, mc, &[V::NULL, V::I(0)]);
     crate::camera::forget_frame(rt);
 }
 

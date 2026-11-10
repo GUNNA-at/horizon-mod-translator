@@ -5,6 +5,9 @@ import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /** A mixin into a class of the game's, which is not translated: what it adds joins its objects. */
 @Mixin(Vec3.class)
@@ -24,6 +27,16 @@ public abstract class Vec3Mixin implements Measured {
 
     @Unique
     private String weave$label;
+
+    @Unique
+    private int weave$sum;
+
+    // At the end of the game's constructor, with its arguments: after the field initialisers
+    // above (10 reads by then).
+    @Inject(method = "<init>(DDD)V", at = @At("RETURN"))
+    private void weave$constructed(double x, double y, double z, CallbackInfo info) {
+        weave$sum = (int) (x + y + z) + weave$reads;
+    }
 
     @Shadow
     public abstract double lengthSqr();
@@ -51,5 +64,10 @@ public abstract class Vec3Mixin implements Measured {
     @Override
     public String weave$label() {
         return weave$label + weave$made;
+    }
+
+    @Override
+    public int weave$sum() {
+        return weave$sum;
     }
 }

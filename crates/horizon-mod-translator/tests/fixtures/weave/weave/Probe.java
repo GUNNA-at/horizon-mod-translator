@@ -243,4 +243,14 @@ public class Probe {
         Object v = n > 0 ? new net.minecraft.world.phys.Vec3(n, 0, 0) : (Object) "s";
         return v instanceof Measured ? 1 : 0;
     }
+
+    // What `Vec3Mixin` injects at the end of the game's constructor: on a `Vec3` made here, and
+    // on one the game made (`ZERO`).
+    public static int vecSum(int n) {
+        return ((Measured) (Object) new net.minecraft.world.phys.Vec3(n, 1, 2)).weave$sum();
+    }
+
+    public static int vecZero() {
+        return ((Measured) (Object) net.minecraft.world.phys.Vec3.ZERO).weave$sum();
+    }
 }

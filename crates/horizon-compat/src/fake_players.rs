@@ -388,7 +388,7 @@ fn player_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "displayClientMessage" | "sendSystemMessage" | "awardStat" | "resetStat" | "playNotifySound" | "swing" | "resetAttackStrengthTicker" | "causeFoodExhaustion" | "closeContainer" | "doCloseContainer" | "tick" | "doTick" | "die" | "updateOptions" | "openHorseInventory" => V::Void,
         "isFakePlayer" | "isInvulnerableTo" => V::I(1),
         // The server it acts in (`ServerLifecycleHooks.getCurrentServer()`).
-        "getServer" => rt.intern("compat:server".into(), |rt| rt.new_object("net/minecraft/server/MinecraftServer")),
+        "getServer" => crate::neo::server(rt),
         "canHarmPlayer" | "startRiding" => V::I(0),
         "openMenu" => {
             let none = rt.new_object("java/util/OptionalInt");

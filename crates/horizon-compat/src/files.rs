@@ -106,7 +106,7 @@ fn file_utils(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let p = text(rt, a(0))?;
     let disk = on_disk(rt, &p);
     Some(match name {
-        "readFileToString" | "readLines" => match std::fs::read(&disk) {
+        "readFileToString" | "readLines" => match read_file(&disk) {
             Ok(bytes) => {
                 let s = String::from_utf8_lossy(&bytes).into_owned();
                 if name == "readFileToString" {
@@ -189,6 +189,24 @@ pub(crate) fn new_file(rt: &mut Rt, text: &str) -> V {
 /// A path's, a file's or a string's text.
 fn text(rt: &Rt, v: V) -> Option<String> {
     rt.str_of(v).map(str::to_owned)
+}
+
+/// How much a read takes of a file that is no regular file ([`read_file`]).
+const DEVICE_BYTES: u64 = 1 << 16;
+
+/// A file's bytes, as a mod's read of it gets them: a stream here is its file's bytes, taken as
+/// it is opened. A regular file whole. Of anything else that can be read (a device, a pipe),
+/// which may have no end, the first [`DEVICE_BYTES`]: Lucene seeds its ids from sixteen bytes
+/// of `/dev/urandom`, and a read of all of it took the machine's memory in seconds.
+pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.is_file() {
+        return std::fs::read(path);
+    }
+    let mut bytes = Vec::new();
+    file.take(DEVICE_BYTES).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Where `text` is on disk.
@@ -621,7 +639,7 @@ fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             Ok(m) => file_time(rt, m.modified()),
             Err(e) => throw_io(rt, &e, &p),
         },
-        "readString" | "readAllLines" | "lines" | "readAllBytes" => match std::fs::read(&disk) {
+        "readString" | "readAllLines" | "lines" | "readAllBytes" => match read_file(&disk) {
             Ok(bytes) if name == "readAllBytes" => byte_array(rt, &bytes),
             Ok(bytes) => {
                 let s = String::from_utf8_lossy(&bytes).into_owned();
@@ -636,12 +654,12 @@ fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             Err(e) => throw_io(rt, &e, &p),
         },
         // `newInputStream(path, options...)`: the file's bytes now ([`crate::streams`]).
-        "newInputStream" => match std::fs::read(&disk) {
+        "newInputStream" => match read_file(&disk) {
             Ok(bytes) => crate::streams::file_input(rt, bytes),
             Err(e) => throw_io(rt, &e, &p),
         },
         // `newBufferedReader(path[, charset])`: a reader over the file's text as it is now.
-        "newBufferedReader" => match std::fs::read(&disk) {
+        "newBufferedReader" => match read_file(&disk) {
             Ok(bytes) => rt.alloc("java/io/BufferedReader", Data::Bytes(bytes, 0)),
             Err(e) => throw_io(rt, &e, &p),
         },
@@ -1129,6 +1147,40 @@ mod tests {
         assert!(!starts_with("ab/c", "a"));
         assert!(ends_with("a/b/c", "b/c"));
         assert!(!ends_with("a/bc", "c"));
+    }
+
+    /// A device has no end: a read of one takes what a stream holds of it, not all there is
+    /// (Lucene reads sixteen bytes of `/dev/urandom` through `Files.newInputStream`). A regular
+    /// file is read whole.
+    #[cfg(unix)]
+    #[test]
+    fn a_device_is_read_as_far_as_a_stream_holds() {
+        crate::install();
+        let mut rt = Rt::new();
+        let dir = game(&mut rt, "device");
+        let endless = rt.string("/dev/zero");
+        let none = rt.new_array(0, V::NULL);
+        let path = c(
+            &mut rt,
+            "java/nio/file/Paths.get.(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;",
+            &[endless, none],
+        );
+        let options = rt.new_array(0, V::NULL);
+        let stream = c(
+            &mut rt,
+            "java/nio/file/Files.newInputStream.(Ljava/nio/file/Path;[Ljava/nio/file/OpenOption;)Ljava/io/InputStream;",
+            &[path, options],
+        );
+        assert!(rt.thrown.is_none() && stream.r() != 0);
+        let first = c(&mut rt, "java/io/InputStream.read.()I", &[stream]);
+        assert_eq!(first, V::I(0));
+        assert_eq!(
+            read_file(Path::new("/dev/zero")).unwrap().len() as u64,
+            DEVICE_BYTES
+        );
+        let whole = vec![7u8; (DEVICE_BYTES as usize) + 9];
+        std::fs::write(dir.join("long.bin"), &whole).unwrap();
+        assert_eq!(read_file(&dir.join("long.bin")).unwrap(), whole);
     }
 
     #[test]

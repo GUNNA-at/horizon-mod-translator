@@ -621,7 +621,14 @@ mod tests {
         for dir in [concat!(env!("CARGO_MANIFEST_DIR"), "/src"), concat!(env!("CARGO_MANIFEST_DIR"), "/../horizon-compat-core/src")] {
             for e in std::fs::read_dir(dir).unwrap() {
                 let path = e.unwrap().path();
-                if path.extension().is_some_and(|x| x == "rs") && !path.ends_with("vanilla_records.rs") && !path.ends_with("records.rs") {
+                // (The generated tables name classes without modelling them: the data classes'
+                // own, and every class of the game's with what is above it.)
+                let generated =
+                    path.ends_with("vanilla_records.rs") || path.ends_with("vanilla_classes.rs");
+                if path.extension().is_some_and(|x| x == "rs")
+                    && !generated
+                    && !path.ends_with("records.rs")
+                {
                     // The module's code, not its tests.
                     let source = std::fs::read_to_string(&path).unwrap();
                     for line in source.split("#[cfg(test)]").next().unwrap_or("").lines().filter(|l| !l.contains("records::make_data(")) {

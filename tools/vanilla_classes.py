@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Writes horizon-compat's table of vanilla blocks' and items' classes (`vanilla_classes.rs`) from
-NeoForge's merged jar.
+"""Writes horizon-compat's table of vanilla blocks' and items' classes, and of the game's and the
+loader's class hierarchy (`vanilla_classes.rs`), from NeoForge's merged jar or an install's jars.
 
 A mod asks what kind of block or item it holds by its class: `state.getBlock() instanceof
 LeavesBlock`, `instanceof BonemealableBlock`, `stack.getItem() instanceof SwordItem`. The runtime
@@ -11,17 +11,25 @@ stands for a vanilla block or item by its id, so it needs the class Java has for
 - `Items`' registers each item by name (`registerItem("diamond_sword", new SwordItem(...))`) or by
   its block (`registerBlock(Blocks.TORCH)` is a `BlockItem`, `registerBlock(new
   StandingAndWallBlockItem(Blocks.TORCH, ...))` that class), the block's field naming the id;
-- the classes' own superclasses and interfaces, up to `Object`.
+- every named class of the game's and the loader's (`net/minecraft/`, `com/mojang/`,
+  `net/neoforged/`): its superclass and its interfaces, read from the class files. A mod asks
+  `level instanceof Level` of what the runtime made a `ServerLevel`, and a call it makes through
+  one class is another's above it; anonymous and local classes are left out (no mod names one).
 
 A mod is built against the jar's version, so the tables are that version's. Blocks of class `Block`,
 items of class `Item` and blocks' plain `BlockItem`s are left out: they are what the runtime makes
 anyway.
 
-Needs `javap` (a JDK). Usage: python3 tools/vanilla_classes.py path/to/neoforge-<version>-merged.jar
+Needs `javap` (a JDK). Usage: python3 tools/vanilla_classes.py <jars>, where <jars> is NeoForge's
+merged jar, or a class path of an install's jars joined by `:`, the patched game first
+(`neoforge-<version>-client.jar:client-<version>-srg.jar:neoforge-<version>-universal.jar:...`,
+as `horizon-mod-translator game-jars <libraries>` lists them).
 """
 import re
+import struct
 import subprocess
 import sys
+import zipfile
 
 OUT = "crates/horizon-compat/src/vanilla_classes.rs"
 BLOCK = "net/minecraft/world/level/block/Block"
@@ -210,11 +218,73 @@ def hierarchy(jar, start):
     return known
 
 
+PREFIXES = ("net/minecraft/", "com/mojang/", "net/neoforged/")
+
+
+def header(data):
+    """A class file's own name, access flags, superclass ("" for none) and interfaces."""
+    count = struct.unpack_from(">H", data, 8)[0]
+    at, k, utf, cls = 10, 1, {}, {}
+    while k < count:
+        tag = data[at]
+        if tag == 1:
+            size = struct.unpack_from(">H", data, at + 1)[0]
+            utf[k] = data[at + 3:at + 3 + size].decode("utf8", "replace")
+            at += 3 + size
+        elif tag in (3, 4):
+            at += 5
+        elif tag in (5, 6):
+            at += 9
+            k += 1
+        elif tag == 7:
+            cls[k] = struct.unpack_from(">H", data, at + 1)[0]
+            at += 3
+        elif tag in (8, 16, 19, 20):
+            at += 3
+        elif tag in (9, 10, 11, 12, 17, 18):
+            at += 5
+        elif tag == 15:
+            at += 4
+        else:
+            raise ValueError(f"constant tag {tag}")
+        k += 1
+    access, this, sup, n = struct.unpack_from(">HHHH", data, at)
+    name = lambda i: utf[cls[i]] if i else ""
+    ifs = [name(i) for i in struct.unpack_from(f">{n}H", data, at + 8)]
+    return name(this), access, name(sup), ifs
+
+
+def every_class(jars):
+    """Each named class under `PREFIXES` in `jars` (the first jar that has a class wins, as on a
+    class path): (superclass or "", interfaces), in the form `hierarchy` gives."""
+    known = {}
+    for jar in jars:
+        with zipfile.ZipFile(jar) as z:
+            for entry in z.namelist():
+                if not entry.endswith(".class") or not entry.startswith(PREFIXES):
+                    continue
+                name = entry[:-len(".class")]
+                # Anonymous and local classes: a `$` part that starts with a digit.
+                if name in known or any(part[:1].isdigit() for part in name.split("$")[1:]):
+                    continue
+                own, access, sup, ifs = header(z.read(entry))
+                if own != name:
+                    continue
+                if access & 0x0200 or access & 0x4000 or sup == "java/lang/Object":
+                    sup = ""
+                known[name] = (sup, ifs)
+    return known
+
+
 def main():
     jar = sys.argv[1]
     block_ids, block_classes = blocks(jar)
     item_classes = items(jar, block_ids)
     classes = hierarchy(jar, set(block_classes.values()) | set(item_classes.values()))
+    reached = len(classes)
+    # The blocks' and items' classes as `javap` gave them stay; every other class is added.
+    for name, entry in every_class(jar.split(":")).items():
+        classes.setdefault(name, entry)
     for c in [*block_classes.values(), *item_classes.values()]:
         k = c
         while k and k not in (BLOCK, ITEM):
@@ -226,10 +296,11 @@ def main():
     # item places a block.
     items_out = sorted((i, c) for i, c in item_classes.items() if c not in (ITEM, BLOCK_ITEM))
     lines = [
-        "//! Generated by `tools/vanilla_classes.py` from NeoForge's merged jar: the class Java has for",
+        "//! Generated by `tools/vanilla_classes.py` from NeoForge's jars: the class Java has for",
         "//! each vanilla block and item (`minecraft:ice` an `IceBlock`, `minecraft:diamond_sword` a",
-        "//! `SwordItem`), plain `Block`s, `Item`s and `BlockItem`s left out, and those classes'",
-        "//! superclasses and interfaces. Sorted by id and by class for binary search.",
+        "//! `SwordItem`), plain `Block`s, `Item`s and `BlockItem`s left out, and the superclass and",
+        "//! interfaces of every named class of the game's and the loader's. Sorted by id and by class",
+        "//! for binary search.",
         "",
         "/// 1.21.1's blocks whose class isn't `Block`, by id: the class each is made of.",
         f"pub(crate) const BLOCKS: [(&str, &str); {len(blocks_out)}] = [",
@@ -241,14 +312,15 @@ def main():
         *[f'    ("{i}", "{c}"),' for i, c in items_out],
         "];",
         "",
-        "/// Each class: its superclass (\"\" past `Object`, and for an interface) and its interfaces.",
-        f"pub(crate) const CLASSES: [(&str, &str, &[&str]); {len(classes)}] = [",
+        "/// Each class: its superclass (\"\" past `Object`, and for an interface or an enum) and its",
+        "/// interfaces.",
+        f"pub(crate) static CLASSES: [(&str, &str, &[&str]); {len(classes)}] = [",
         *[f'    ("{c}", "{s}", &[{", ".join(chr(34) + i + chr(34) for i in ifs)}]),' for c, (s, ifs) in sorted(classes.items())],
         "];",
     ]
     with open(OUT, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"{len(blocks_out)} of {len(block_classes)} blocks, {len(items_out)} of {len(item_classes)} items, {len(classes)} classes -> {OUT}")
+    print(f"{len(blocks_out)} of {len(block_classes)} blocks, {len(items_out)} of {len(item_classes)} items, {len(classes)} classes ({reached} reached from the blocks and items) -> {OUT}")
 
 
 main()

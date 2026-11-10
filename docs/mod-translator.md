@@ -10402,6 +10402,53 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     stopped GuideME's client in its constructor (Ars Nouveau carries the same code); Chisels
     & Bits reads its calling method's name there, and falls back to "unknown".
   - Tests: 813 compat, 16 compat-core, 36 translator; the differential and weave tests.
+- [x] 2026-11-10 Part 172: mixins' handlers in the game's own methods, and the game's classes
+  as its class files have them.
+  - A mixin into a mod's class is woven into the class's translated code. A method of the
+    game's has no code here to weave into, so what a mod injects there did not run (Part 170
+    counted 4,398 such injectors in the pack). Of those, 1,242 are plain instance `@Inject`
+    handlers at a method's `HEAD`, `RETURN` or `TAIL` (a `CallbackInfo`, the method's own
+    arguments or none; over 791 methods), 165 of them at the end of a constructor. The
+    translator now lists each among its mixin's subscribers by the place it names, with the
+    lambda that runs it, and the runtime runs the handlers of a place where it stands for the
+    method, on the game's object it has in hand (`places.rs`):
+    - The end of a constructor of the game's that the mods' code calls (`new Item(properties)`,
+      or `super(properties)` from a mod's own item): the handlers of the class and of the game's
+      classes above it, the topmost first, with the arguments the constructor was called with
+      (one written for a constructor of a class above gets the argument of its type).
+    - The objects the runtime makes itself: the server, its levels, a server's player, the
+      player list, each load's `ReloadableServerResources`, and on the client `Minecraft`, its
+      level, its player and its connection. A handler is handed what the runtime has of the
+      constructor's arguments (the server, the registries), and nothing for the rest.
+    - Any other game object: before the first of the mixin's methods runs on it, as the field
+      initialisers already did. Each handler runs once on an object, whichever way its turn
+      comes, after the mixin's field initialisers.
+    - Methods: the server's `runServer`, `loadLevel`, `createLevels`, `tickServer`,
+      `tickChildren` and `stopServer`; a level's `tick` and `close`; a player's `tick` through
+      its classes (`ServerPlayer`, `Player`, `LivingEntity`, `Entity`; `LocalPlayer` on the
+      client) and `restoreFrom`; the player list's `placeNewPlayer` and `remove`;
+      `updateRegistryTags`; the client's `tick`, `setLevel`, `updateLevelInEngines` and
+      `disconnect`, its connection's `handleLogin`, its level's `tick` and `tickEntities`.
+      Each around the event NeoForge posts there, in the method's own order.
+    The weave fixture has both ways to a constructor's end on the game's `Vec3`: one the mod's
+    code makes (the handler gets the three doubles) and `Vec3.ZERO`, which the game made.
+  - `instanceof`, casts and `isInstance` on the game's classes go by the game's own class files
+    now: `tools/vanilla_classes.py` writes the superclass and interfaces of every named class
+    of the game's and the loader's (9,735: 7,244 of the game, 808 of Mojang's `com.mojang`,
+    1,675 of NeoForge and its loader) where it wrote those of the blocks' and items' classes
+    (387). `level instanceof Level` was false for the runtime's own levels: 287 places in 61
+    of the pack's jars ask it, the sixth commonest question of the 12,238 the pack asks of
+    game classes; a menu was no `AbstractContainerMenu`.
+  - Launch 15 (the build of Part 171: 614 s, 10 crates) took 7.7 GB within 50 s and the
+    machine's last free memory by 60 s, and was killed. A sample has the main thread in
+    `read`: GuideME's Lucene, constructed now that its caller check passes, seeds its ids
+    from sixteen bytes of `/dev/urandom` (`Files.newInputStream`), and a stream here is its
+    file's bytes, read whole as it is opened. Of a file that is no regular file a read takes
+    the first 64 KiB now. The pack's memory watch looks every second and samples and kills
+    a game past 9 GB.
+  - The server's resources and the client's connection hold their recipe manager in the
+    field the game keeps it in (Cucumber's mixin reads the field at the constructor's end).
+  - Tests: 819 compat, 16 compat-core, 36 translator; the differential and weave tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

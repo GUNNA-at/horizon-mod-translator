@@ -9,4 +9,6 @@ public interface Measured {
     void weave$label(String label);
 
     String weave$label();
+
+    int weave$sum();
 }

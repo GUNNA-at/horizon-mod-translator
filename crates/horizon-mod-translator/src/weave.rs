@@ -812,6 +812,15 @@ pub fn native_place(target: &str, method: &str, at: &At) -> Option<String> {
 /// What the name of a place in a method the runtime runs itself starts with ([`native_place`]).
 pub const NATIVE_PLACE: &str = "hz/inject:";
 
+/// Whether an instance handler takes what the runtime can hand it at a place of the game's
+/// code: the method's own arguments, or none of them, then a `CallbackInfo` (no return value
+/// to answer for, no captured local).
+fn plain_handler(h: &crate::class::Method) -> bool {
+    h.desc
+        .ends_with("Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V")
+        && h.param_annotations.iter().all(Vec::is_empty)
+}
+
 /// An `@At`'s `args` (`["doubleValue=0.25d", "log=true"]`, joined by `,`) as pairs.
 fn at_args(v: &str) -> BTreeMap<String, String> {
     let mut out: Vec<(String, String)> = Vec::new();
@@ -1056,17 +1065,22 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                         places.push(place);
                     }
                 }
-                // Its static injectors, by the places they name: for the runtime to call where
-                // its own code for the method passes them.
-                for h in mixin
-                    .methods
-                    .iter()
-                    .filter(|h| h.access & 0x0008 != 0 && h.code.is_some())
-                {
+                // Its injectors, by the places they name: for the runtime to call where its
+                // own code for the method passes them. A static one anywhere the runtime knows
+                // of; an instance one, which runs on the game's object, at a method's head or
+                // its returns, where the runtime has the object in hand as the method begins
+                // or ends (a level's tick, the end of its constructor), and only a plain
+                // `@Inject` that takes the method's arguments, or none, and a `CallbackInfo`.
+                for h in mixin.methods.iter().filter(|h| h.code.is_some()) {
+                    let instance = h.access & 0x0008 == 0;
+                    if instance && !plain_handler(h) {
+                        continue;
+                    }
                     for a in &h.annotations {
                         let simple = a.ty.trim_end_matches(';').rsplit('/').next().unwrap_or("");
                         if !(a.ty.starts_with(MIXIN)
                             && matches!(simple, "Inject" | "ModifyVariable"))
+                            || (instance && simple != "Inject")
                         {
                             continue;
                         }
@@ -1075,6 +1089,11 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                             let name = method.split('(').next().unwrap_or("");
                             let name = name.rsplit([';', '.']).next().unwrap_or(name);
                             for at in a.nested("at").iter().filter_map(|at| parse_at(at).ok()) {
+                                if instance
+                                    && !matches!(at, At::Head | At::Return { .. } | At::Tail)
+                                {
+                                    continue;
+                                }
                                 if let Some(place) = native_place(&target_name, name, &at)
                                     .filter(|_| !name.is_empty())
                                 {
@@ -1428,8 +1447,11 @@ mod tests {
 
     /// A mixin into a class that is not translated (NeoForge's `GameData`, as supermartijn642's
     /// library has one): its static injectors are planned by the places they name, which the
-    /// runtime posts to where its own code for the method passes them; an instance handler and a
-    /// method that injects nothing are not.
+    /// runtime posts to where its own code for the method passes them. An instance handler is
+    /// planned at a method's head, its returns or its tail, where the runtime has the object,
+    /// when it is a plain `@Inject` (a `CallbackInfo`, no value to answer for): not in the
+    /// middle of the method, nor one that answers for the method's return value, nor a
+    /// `@ModifyVariable`. A method that injects nothing is not planned at all.
     #[test]
     fn static_injectors_into_the_loaders_code_are_planned_by_their_places() {
         const MIXIN: &str = "Lorg/spongepowered/asm/mixin/";
@@ -1505,6 +1527,36 @@ mod tests {
                         vec![posted],
                     )],
                 ),
+                method(
+                    "begins",
+                    INFO,
+                    0x0002,
+                    vec![note(
+                        "injection/Inject",
+                        &[("method", "postRegisterEvents()V")],
+                        vec![at(&[("value", "HEAD")]), at(&[("value", "RETURN")])],
+                    )],
+                ),
+                method(
+                    "answers",
+                    "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfoReturnable;)V",
+                    0x0002,
+                    vec![note(
+                        "injection/Inject",
+                        &[("method", "postRegisterEvents")],
+                        vec![at(&[("value", "RETURN")])],
+                    )],
+                ),
+                method(
+                    "changes",
+                    EVENT,
+                    0x0002,
+                    vec![note(
+                        "injection/ModifyVariable",
+                        &[("method", "postRegisterEvents()V")],
+                        vec![at(&[("value", "STORE")])],
+                    )],
+                ),
                 method("helper", "()V", 0x000a, Vec::new()),
             ],
             bootstrap: Vec::new(),
@@ -1529,6 +1581,10 @@ mod tests {
                     format!("{PLACE}INVOKE:postEventWrapContainerInModOrder:AFTER"),
                     format!("{PLACE}TAIL"),
                 ],
+            ),
+            (
+                format!("lib/mixin/GameDataMixin.begins.{INFO}"),
+                vec![format!("{PLACE}HEAD"), format!("{PLACE}RETURN")],
             ),
         ]
         .into();

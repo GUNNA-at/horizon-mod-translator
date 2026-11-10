@@ -851,7 +851,7 @@ impl<'a> Program<'a> {
     /// its superclass's is left out), as a function that runs them once on each game object the
     /// mixin's methods run on: Mixin runs them in the target's constructors, the game's own. None
     /// for a mixin without fields of its own.
-    fn mixin_init(&self, mixin: &str) -> Option<(String, String)> {
+    fn mixin_fields(&self, mixin: &str) -> Option<(String, String)> {
         let k = self.classes.get(mixin)?;
         if !k.fields.iter().any(|f| f.access & 0x0008 == 0 && !is_shadow_field(f)) {
             return None;
@@ -867,6 +867,58 @@ impl<'a> Program<'a> {
              \x20   {}(rt, &[this]);\n\
              }}\n\n",
             fn_name(mixin, "<init>", &ctor.desc)
+        );
+        Some((name, code))
+    }
+
+    /// Whether handler `key` (`mixin.name.desc`) is one a mixin injects at the end of the
+    /// constructors of the game's class, and nowhere else (`@Inject(method = "<init>", at =
+    /// @At("RETURN"))`, or `TAIL`): it runs once on each object, where the runtime tells of the
+    /// constructor's end ([`weave::Plan::native`]).
+    fn at_constructors_end(&self, key: &str) -> bool {
+        self.weave.native.get(key).is_some_and(|places| {
+            !places.is_empty()
+                && places
+                    .iter()
+                    .all(|p| p.ends_with(".<init>@RETURN") || p.ends_with(".<init>@TAIL"))
+        })
+    }
+
+    /// What Mixin puts into the constructors of a mixin's target, where the target is the
+    /// game's (its constructors are not run here), as a function that runs it once on each game
+    /// object before the first of the mixin's methods does: the mixin's field initialisers
+    /// ([`Self::mixin_fields`]), then its handlers at the constructors' end, should the runtime
+    /// not have run those where the object was made: asked of the runtime as an API call
+    /// (`hz/mixin-made:<mixin>.late`: the code's crates link the runtime's core alone). The
+    /// name of the function and its code, the field initialisers' with it. None for a mixin
+    /// with neither.
+    fn mixin_init(&self, mixin: &str) -> Option<(String, String)> {
+        let k = self.classes.get(mixin)?;
+        let fields = self.mixin_fields(mixin);
+        let ends = k.methods.iter().any(|m| {
+            m.access & 0x0008 == 0
+                && self.at_constructors_end(&format!("{mixin}.{}.{}", m.name, m.desc))
+        });
+        if !ends {
+            return fields;
+        }
+        let name = fn_name(mixin, "<mixin-made>", "");
+        let flag = format!("$mixed {mixin}");
+        let late = format!("hz/mixin-made:{mixin}.late.(Ljava/lang/Object;)V");
+        let (run_fields, fields) = match fields {
+            Some((f, code)) => (format!("    {f}(rt, this);\n"), code),
+            None => (String::new(), String::new()),
+        };
+        let code = format!(
+            "{fields}/// What `{mixin}` adds to its target's constructors, run once on each game object before\n\
+             /// the first of its methods: its handlers at the constructors' end, where nothing ran them.\n\
+             #[allow(dead_code)]\n\
+             fn {name}(rt: &mut Rt, this: V) {{\n\
+             \x20   if matches!(rt.get_field(this, {flag:?}), V::I(1)) {{ return; }}\n\
+             \x20   rt.put_field(this, {flag:?}, V::I(1));\n\
+             {run_fields}\
+             \x20   api::call(rt, {late:?}, &[this]);\n\
+             }}\n\n"
         );
         Some((name, code))
     }
@@ -1616,16 +1668,25 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             }
         }
         let list = self.vanilla_added(&c.name, targets);
-        if list.is_empty() {
-            return;
-        }
+        // What it adds to the constructors: for the methods it adds, and for its handlers the
+        // runtime calls at places of the game's code ([`Self::lambda_call`]).
+        let heard = c.methods.iter().any(|m| {
+            m.access & 0x0008 == 0
+                && self
+                    .weave
+                    .native
+                    .contains_key(&format!("{}.{}.{}", c.name, m.name, m.desc))
+        });
         let init = match self.mixin_init(&c.name) {
-            Some((name, f)) => {
+            Some((name, f)) if heard || !list.is_empty() => {
                 code.push_str(&f);
                 format!("{name}(rt, args[0]); if rt.thrown.is_some() {{ return V::Void; }} ")
             }
-            None => String::new(),
+            _ => String::new(),
         };
+        if list.is_empty() {
+            return;
+        }
         let ensure = self.ensure(&c.name);
         let id = self.cid(&c.name);
         for (i, (nd, a)) in list.iter().enumerate() {
@@ -1642,6 +1703,35 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
     /// A lambda's call (`l_<lid>`'s body): its implementation `m` (handle kind `kind`) run on
     /// `full`, the values it runs with, as `LambdaMetafactory` adapts them.
     fn lambda_call(&self, key: &str, kind: u8, m: &Member) -> String {
+        // A handler a mixin injects into a method of the game's, which the runtime calls on the
+        // game's object where its own code for the method passes the place
+        // (horizon-compat's `places`): the mixin's own code for it, on the object, the method's
+        // arguments and the `CallbackInfo`. Its class is initialised first, and what the mixin
+        // adds to the object's constructors has run, as for a method it adds. One at the end
+        // of the constructors is itself part of that: after the field initialisers, once on
+        // each object, whoever calls it.
+        if kind == 5 && self.weave.native.contains_key(key) {
+            let ensure = self.ensure(&m.owner);
+            let handler = format!("{}(rt, &full)", fn_name(&m.owner, &m.name, &m.desc));
+            let this = "full.first().copied().unwrap_or_default()";
+            if self.at_constructors_end(key) {
+                let fields = match self.mixin_fields(&m.owner) {
+                    Some((name, _)) => format!("{name}(rt, this); "),
+                    None => String::new(),
+                };
+                let ran = format!("$mixin {key}");
+                return format!(
+                    "{{ {ensure}let this = {this}; {fields}if rt.thrown.is_some() || matches!(rt.get_field(this, {ran:?}), V::I(1)) {{ V::Void }} else {{ rt.put_field(this, {ran:?}, V::I(1)); {handler} }} }}"
+                );
+            }
+            let init = match self.mixin_init(&m.owner) {
+                Some((name, _)) => {
+                    format!("{name}(rt, {this}); if rt.thrown.is_some() {{ return V::Void; }} ")
+                }
+                None => String::new(),
+            };
+            return format!("{{ {ensure}{init}{handler} }}");
+        }
         let nd = format!("{}.{}", m.name, m.desc);
         let call = match (kind, self.resolve(&m.owner, &m.name, &m.desc)) {
             (8, imp) => {
