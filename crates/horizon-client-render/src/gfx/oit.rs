@@ -189,10 +189,15 @@ impl Oit {
             }),
         ];
         let buffers = &buffers[..];
+        let terrain_text = super::sprite_arrays::source(
+            include_str!("../terrain.wgsl"),
+            sprites[0] as u32,
+            super::sprite_arrays::TERRAIN_FIRST,
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon improved transparency"),
             source: wgpu::ShaderSource::Wgsl(
-                (include_str!("../terrain.wgsl").to_owned()
+                (terrain_text.into_owned()
                     + include_str!("../oit.wgsl")
                     + include_str!("../oit_world.wgsl"))
                 .into(),

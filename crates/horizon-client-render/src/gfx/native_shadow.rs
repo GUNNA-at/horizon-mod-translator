@@ -458,6 +458,12 @@ impl NativeShadow {
             vertex.map(|s| s.source.as_str()),
             shape.sprite_materials,
         );
+        // Sixteen sprite arrays for a game whose sprites fill more than eight (sprite_arrays.rs).
+        let text = super::sprite_arrays::source(
+            &text,
+            shape.sprites[0] as u32,
+            super::sprite_arrays::TERRAIN_FIRST,
+        );
         let module = naga::front::wgsl::parse_str(&text)
             .map_err(|e| format!("shadow pass: {}", e.emit_to_string(&text)))?;
         let mut constants = super::native_post::present_constants(&module, constants);

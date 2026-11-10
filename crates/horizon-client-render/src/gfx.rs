@@ -143,6 +143,7 @@ mod page_runs;
 pub mod panorama;
 mod readback;
 mod resident;
+mod sprite_arrays;
 mod stars;
 pub mod submit;
 mod sunrise_fan;
@@ -982,27 +983,27 @@ fn sprite_split() -> u32 {
 /// `max_layers` layers per array: [`SPRITE_SPLIT`], `requested`
 /// (`HORIZON_SPRITE_SPLIT`) or `max_layers`, whichever is smallest, with a full
 /// array still fitting once [`array_layers`] pads it for OpenGL. Errors when
-/// `layers` sprites need more than the [`SPRITE_ARRAYS`] arrays terrain.wgsl binds.
+/// `layers` sprites need more than the `arrays` arrays terrain.wgsl can bind
+/// on the adapter ([`sprite_arrays::most`]).
 fn layer_split(
     max_layers: u32,
     gl: bool,
     requested: Option<u32>,
     layers: u32,
+    arrays: u32,
 ) -> std::result::Result<u32, String> {
     let mut split = requested.unwrap_or(SPRITE_SPLIT).min(max_layers).max(1);
     if split > 1 && array_layers(split, gl) > max_layers {
         split -= 1;
     }
-    if layers > split * SPRITE_ARRAYS {
+    if layers > split * arrays {
         return Err(format!(
             "GPU supports {max_layers} texture layers per array; {layers} block textures need \
-             more than the {SPRITE_ARRAYS} arrays of {split} Horizon draws from"
+             more than the {arrays} arrays of {split} Horizon draws from"
         ));
     }
     Ok(split)
 }
-/// Sprite arrays terrain.wgsl binds (`sprites`, `sprites_1`...).
-const SPRITE_ARRAYS: u32 = 8;
 /// The layers to give a square texture of `count` layers viewed as a 2D
 /// array. wgpu's OpenGL backend picks a texture's target from its layer
 /// count when it is created: one layer makes a 2D texture and a multiple of
@@ -1015,14 +1016,15 @@ fn array_layers(count: u32, gl: bool) -> u32 {
         n => n,
     }
 }
-/// The views of terrain.wgsl's sprite arrays, the unused ones a 1-layer
-/// stand-in.
+/// The views of terrain.wgsl's sprite arrays (the eight it names, or the
+/// sixteen of a game with more sprites than those hold), the unused ones a
+/// 1-layer stand-in.
 fn sprite_views(
     textures: &[wgpu::Texture],
     unused: &wgpu::TextureView,
     mips: Option<u32>,
 ) -> Vec<wgpu::TextureView> {
-    (0..SPRITE_ARRAYS as usize)
+    (0..sprite_arrays::bound(textures.len() as u32) as usize)
         .map(|i| match textures.get(i) {
             Some(t) => t.create_view(&wgpu::TextureViewDescriptor {
                 dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -1069,33 +1071,33 @@ fn terrain_group(
         binding,
         resource: wgpu::BindingResource::TextureView(view),
     };
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: globals.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 2,
+            resource: wgpu::BindingResource::Sampler(sprite_sampler),
+        },
+        view(3, lightmap),
+        wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::Sampler(lightmap_sampler),
+        },
+        view(12, emission_thresholds),
+    ];
+    // Every sprite array there is a view of: eight, or sixteen ([`sprite_views`]).
+    entries.extend(
+        sprites
+            .iter()
+            .enumerate()
+            .map(|(i, sprites)| view(sprite_arrays::terrain_binding(i as u32), sprites)),
+    );
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(label),
         layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: globals.as_entire_binding(),
-            },
-            view(1, &sprites[0]),
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(sprite_sampler),
-            },
-            view(3, lightmap),
-            wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::Sampler(lightmap_sampler),
-            },
-            view(5, &sprites[1]),
-            view(6, &sprites[2]),
-            view(7, &sprites[3]),
-            view(8, &sprites[4]),
-            view(9, &sprites[5]),
-            view(10, &sprites[6]),
-            view(11, &sprites[7]),
-            view(12, emission_thresholds),
-        ],
+        entries: &entries,
     })
 }
 /// CPU texture uploads prepared by the resource worker. Consumed by renderer
@@ -1378,11 +1380,13 @@ fn describe_adapter(adapter: &wgpu::Adapter) {
 /// Whether an adapter's texture arrays hold the block textures Horizon puts
 /// in one array.
 fn check_layers(adapter: &wgpu::Adapter, layers: u32) -> Result<u32> {
+    let limits = adapter.limits();
     Ok(layer_split(
-        adapter.limits().max_texture_array_layers,
+        limits.max_texture_array_layers,
         adapter.get_info().backend == wgpu::Backend::Gl,
         requested_split(),
         layers,
+        sprite_arrays::most(limits.max_sampled_textures_per_shader_stage),
     )?)
 }
 /// Whether the swapchain can take a window of `width` x `height`: each side from 1 to the
@@ -1838,9 +1842,17 @@ impl Renderer {
             startup_step(format_args!("creating the pipelines"));
         }
         let gpu_timer = timing::GpuTimer::new(&device, &queue);
+        let sprite_arrays = layers.div_ceil(split).max(1);
+        if sprite_arrays > 1 {
+            log::info!("Horizon: {layers} block textures in {sprite_arrays} arrays");
+        }
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon terrain"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("terrain.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(sprite_arrays::source(
+                include_str!("terrain.wgsl"),
+                sprite_arrays,
+                sprite_arrays::TERRAIN_FIRST,
+            )),
         });
         let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -1854,17 +1866,11 @@ impl Renderer {
             view_dimension: wgpu::TextureViewDimension::D2Array,
             multisampled: false,
         };
-        let sprite_arrays = layers.div_ceil(split).max(1);
-        if sprite_arrays > 1 {
-            log::info!("Horizon: {layers} block textures in {sprite_arrays} arrays");
-        }
         let sprite_constants = [
             ("SPRITE_ARRAYS", f64::from(sprite_arrays)),
             ("SPRITE_SPLIT", f64::from(split)),
         ];
-        let bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Horizon terrain bindings"),
-            entries: &[
+        let mut terrain_entries = vec![
                 entry(
                     0,
                     vf,
@@ -1918,7 +1924,15 @@ impl Renderer {
                         multisampled: false,
                     },
                 ),
-            ],
+        ];
+        // The arrays past the eighth, for a game with more sprites than eight hold.
+        terrain_entries.extend(
+            (sprite_arrays::BASE..sprite_arrays::bound(sprite_arrays))
+                .map(|i| entry(sprite_arrays::terrain_binding(i), vf, sprite_array)),
+        );
+        let bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Horizon terrain bindings"),
+            entries: &terrain_entries,
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Horizon terrain layout"),
@@ -9255,22 +9269,26 @@ mod sprite_upload_tests {
     #[test]
     fn sprite_split_follows_the_adapters_layer_limit() {
         // The Discord report: 512 layers per array, 1291 block textures (3 arrays).
-        assert_eq!(layer_split(512, false, None, 1291), Ok(512));
-        assert_eq!(layer_split(512, true, None, 1291), Ok(512));
-        assert_eq!(layer_split(2048, false, None, 1291), Ok(SPRITE_SPLIT));
-        assert_eq!(layer_split(8192, false, None, 1291), Ok(SPRITE_SPLIT));
+        assert_eq!(layer_split(512, false, None, 1291, 8), Ok(512));
+        assert_eq!(layer_split(512, true, None, 1291, 8), Ok(512));
+        assert_eq!(layer_split(2048, false, None, 1291, 8), Ok(SPRITE_SPLIT));
+        assert_eq!(layer_split(8192, false, None, 1291, 8), Ok(SPRITE_SPLIT));
         // HORIZON_SPRITE_SPLIT only lowers it.
-        assert_eq!(layer_split(2048, false, Some(512), 1291), Ok(512));
-        assert_eq!(layer_split(256, false, Some(512), 1291), Ok(256));
+        assert_eq!(layer_split(2048, false, Some(512), 1291, 8), Ok(512));
+        assert_eq!(layer_split(256, false, Some(512), 1291, 8), Ok(256));
         // OpenGL pads a multiple of 6 by a layer: a full array must still fit.
-        assert_eq!(layer_split(600, true, None, 1291), Ok(599));
-        assert_eq!(layer_split(600, false, None, 1291), Ok(600));
+        assert_eq!(layer_split(600, true, None, 1291, 8), Ok(599));
+        assert_eq!(layer_split(600, false, None, 1291, 8), Ok(600));
         assert_eq!(array_layers(599, true), 599);
-        // Past the arrays terrain.wgsl binds.
-        assert_eq!(layer_split(256, false, None, 256 * SPRITE_ARRAYS), Ok(256));
-        let err = layer_split(128, false, None, 1291).unwrap_err();
+        // Past the arrays terrain.wgsl binds: the eight it names, or sixteen where a shader
+        // stage may sample that many textures.
+        assert_eq!(layer_split(256, false, None, 256 * 8, 8), Ok(256));
+        assert!(layer_split(2048, false, None, 23177, 8).is_err());
+        assert_eq!(layer_split(2048, false, None, 23177, 16), Ok(SPRITE_SPLIT));
+        assert!(layer_split(2048, false, None, 2048 * 16 + 1, 16).is_err());
+        let err = layer_split(128, false, None, 1291, 8).unwrap_err();
         assert!(err.contains("128 texture layers per array"), "{err}");
-        assert!(layer_split(512, false, None, 512 * SPRITE_ARRAYS + 1).is_err());
+        assert!(layer_split(512, false, None, 512 * 8 + 1, 8).is_err());
     }
 
     #[test]

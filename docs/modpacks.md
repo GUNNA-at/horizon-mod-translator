@@ -296,7 +296,9 @@ How the game loads them, without touching vanilla's path:
   network the width is the registry's: unchanged for vanilla clients as long as no content mod
   is on, wider only between Horizons that share the same mods; a Horizon with content mods still
   reads a vanilla server's 16-bit chunks. Block sprites fill texture arrays of 2048 layers, eight
-  at most (16,384; vanilla takes 1,250, identical textures share a layer; ATM10's 42 take 9,790).
+  of them (16,384; vanilla takes 1,250, identical textures share a layer; ATM10's 42 take 9,790).
+  A game with more sprites than those hold binds sixteen (32,768, every layer a vertex can name),
+  where a shader stage may sample that many textures; a pack of 365 mods has 23,177.
 - **Broken mod files load as vanilla loads them.** A blockstate definition that does not bind
   (a multipart value the block does not have), a block model that is missing or does not parse,
   and a recipe that does not parse are logged and skipped: the block gets no model or the

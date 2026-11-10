@@ -10156,6 +10156,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Alone (`modcheck.sh`): Sophisticated Backpacks is constructed (6 blocks, 65 items, 1 key left
     unmapped of 14), Molten Vents and Sparse Structures too.
   - Tests: 786 compat, 16 compat-core, 31 translator; the differential tests.
+- [x] 2026-11-10 Part 165: sixteen arrays of block sprites. Launch 10 stopped where the window's
+  renderer is made: the pack has 23,177 block textures, and the terrain's shaders bind 8 arrays of
+  2048 layers (16,384). A change to Horizon's own renderer (`horizon-client-render`), not to the
+  translator.
+  - A game whose sprites fill more than eight arrays binds sixteen: 32,768 layers, which is every
+    layer a vertex can name (15 bits). The shaders' text gets the eight more declarations and the
+    longer `switch` written into it (`gfx/sprite_arrays.rs`), for the terrain, the improved
+    transparency passes, the HDR emission thresholds and a shader pack's terrain; a game with
+    fewer sprites compiles the files' own text and binds what it did, so vanilla and the packs
+    that ran are untouched.
+  - Sixteen only where a shader stage may sample 24 textures or more (Metal, Vulkan and DirectX
+    do; OpenGL at its minimum does not, and keeps the limit of eight with the same message).
+  - Tests: the widened terrain and emission shaders validate and name each array where it is
+    bound and sampled; 927 of the renderer's unit tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

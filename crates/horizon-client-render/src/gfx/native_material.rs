@@ -281,14 +281,17 @@ fn shader_source(
     )
 }
 
-/// The material's naga module, its errors in the stage's file.
+/// The material's naga module, its errors in the stage's file. `arrays` is how many arrays the
+/// game's block sprites fill: past eight, the terrain's text binds sixteen (sprite_arrays.rs).
 fn module(
     stage: &CheckedStage,
     tags: &[(u32, u32)],
     materials: &[(u32, u32)],
     vertex: bool,
+    arrays: u32,
 ) -> Result<naga::Module, String> {
     let text = shader_source(&stage.source, tags, materials, vertex);
+    let text = super::sprite_arrays::source(&text, arrays, super::sprite_arrays::TERRAIN_FIRST);
     naga::front::wgsl::parse_str(&text)
         .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
 }
@@ -305,7 +308,13 @@ impl NativeMaterial {
         vertex: bool,
     ) -> Result<Self, String> {
         let writes_surface = horizon_shader_api::stages::calls_set_surface(&stage.source);
-        let module = module(stage, shape.sprite_tags, shape.sprite_materials, vertex)?;
+        let module = module(
+            stage,
+            shape.sprite_tags,
+            shape.sprite_materials,
+            vertex,
+            shape.sprites[0] as u32,
+        )?;
         let mut constants = present_constants(&module, constants);
         let sprite_names = [
             "horizon_terrain_SPRITE_ARRAYS",
@@ -492,7 +501,7 @@ mod tests {
         let tags = [(7, 1), (3, 1), (9, 2)];
         let materials = [(5, 1000)];
         assert!(layer_table("t", &tags).contains("case 3u, 7u: { return 1u; }"));
-        let module = module(&stage, &tags, &materials, false).unwrap();
+        let module = module(&stage, &tags, &materials, false, 1).unwrap();
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
