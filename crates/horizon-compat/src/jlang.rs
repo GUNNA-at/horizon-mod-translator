@@ -671,10 +671,51 @@ pub(crate) fn kinds(desc: &str) -> Vec<char> {
 }
 
 /// `String.compareTo`: the difference of the first UTF-16 units that differ, else of the lengths.
+/// `String.compareTo`: the difference of the first two UTF-16 units that differ, else of the
+/// lengths. Nothing is copied for it: a sorted map compares its keys at every step.
 pub(crate) fn java_compare(x: &str, y: &str) -> i32 {
-    let (u, o) = (utf16(x), utf16(y));
-    let n = u.len().min(o.len());
-    (0..n).find(|&i| u[i] != o[i]).map_or(u.len() as i32 - o.len() as i32, |i| i32::from(u[i]) - i32::from(o[i]))
+    // What the two start with alike, as far as it is ASCII, is alike in UTF-16 too.
+    let same = x
+        .bytes()
+        .zip(y.bytes())
+        .take_while(|(a, b)| a == b && a.is_ascii())
+        .count();
+    let (mut a, mut b) = (x[same..].encode_utf16(), y[same..].encode_utf16());
+    loop {
+        match (a.next(), b.next()) {
+            (Some(p), Some(q)) if p == q => {}
+            (Some(p), Some(q)) => return i32::from(p) - i32::from(q),
+            (Some(_), None) => return 1 + a.count() as i32,
+            (None, Some(_)) => return -1 - b.count() as i32,
+            (None, None) => return 0,
+        }
+    }
+}
+
+/// `String.compareToIgnoreCase`, which `String.CASE_INSENSITIVE_ORDER` compares by: character
+/// by character, the first two that differ upper-cased and then lower-cased too, their difference;
+/// else that of the lengths.
+pub(crate) fn compare_ignore_case(x: &str, y: &str) -> i32 {
+    // Java's mapping of one character to one: a character whose other case is several is itself.
+    fn one(mut mapped: impl Iterator<Item = char>, c: char) -> char {
+        match (mapped.next(), mapped.next()) {
+            (Some(m), None) => m,
+            _ => c,
+        }
+    }
+    for (a, b) in x.chars().zip(y.chars()) {
+        if a == b {
+            continue;
+        }
+        let (a, b) = (one(a.to_uppercase(), a), one(b.to_uppercase(), b));
+        if a != b {
+            let (a, b) = (one(a.to_lowercase(), a), one(b.to_lowercase(), b));
+            if a != b {
+                return a as i32 - b as i32;
+            }
+        }
+    }
+    x.encode_utf16().count() as i32 - y.encode_utf16().count() as i32
 }
 
 pub(crate) fn string_hash(s: &str) -> i32 {
@@ -1641,10 +1682,7 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         "equals" | "contentEquals" => V::I((Some(s.as_str()) == rt.str_of(a(1))) as i32),
         "equalsIgnoreCase" => V::I(rt.str_of(a(1)).is_some_and(|o| o.to_lowercase() == s.to_lowercase()) as i32),
         "compareTo" => V::I(java_compare(&s, &arg_s(rt, 1))),
-        "compareToIgnoreCase" => {
-            let (x, y) = (s.to_lowercase(), arg_s(rt, 1).to_lowercase());
-            V::I(x.cmp(&y) as i32)
-        }
+        "compareToIgnoreCase" => V::I(compare_ignore_case(&s, &arg_s(rt, 1))),
         "charAt" | "codePointAt" => V::I(u.get(a(1).i().max(0) as usize).copied().unwrap_or(0) as i32),
         "startsWith" => {
             let p = utf16(&arg_s(rt, 1));
@@ -2933,6 +2971,25 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    /// `String.compareTo`'s own numbers: the difference of the first UTF-16 units that differ,
+    /// else of the lengths (a character outside the basic plane is two units).
+    #[test]
+    fn strings_compare_as_javas() {
+        assert_eq!(java_compare("apple", "apple"), 0);
+        assert_eq!(java_compare("apple", "apricot"), 'p' as i32 - 'r' as i32);
+        assert_eq!(java_compare("gear", "gearbox"), -3);
+        assert_eq!(java_compare("gearbox", "gear"), 3);
+        assert_eq!(java_compare("\u{e9}", "e"), 0xe9 - 0x65);
+        assert_eq!(java_compare("a\u{1f600}", "a"), 2);
+        assert_eq!(java_compare("z", "\u{1f600}"), 'z' as i32 - 0xd83d);
+        assert_eq!(compare_ignore_case("Gear", "gEAR"), 0);
+        assert_eq!(compare_ignore_case("gear", "GEARBOX"), -3);
+        assert_eq!(
+            compare_ignore_case("Apple", "apricot"),
+            'p' as i32 - 'r' as i32
+        );
     }
 
     /// `new MutablePair<>()` holds null and null, as its fields start (Create's contraption code

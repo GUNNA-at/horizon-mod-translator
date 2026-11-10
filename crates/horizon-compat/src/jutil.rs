@@ -9,12 +9,58 @@ use crate::{Data, Object, Rt, V};
 
 pub use crate::Table;
 
-/// Rebuilds a table's hash index after its entries moved.
-fn reindex(t: &mut Table, rt: &mut Rt) {
-    t.index.clear();
-    for i in 0..t.entries.len() {
-        let h = key_hash(rt, t.strategy, t.entries[i].0);
-        t.index.entry(h).or_default().push(i);
+/// Whether a table finds its keys by its comparator alone, as a `TreeMap` made with one does
+/// (`new TreeMap<>(String.CASE_INSENSITIVE_ORDER)` holds one of `"a"` and `"A"`): such a table
+/// keeps no hash index, and its keys are never asked for a hash. A sorted table without a
+/// comparator keeps finding its keys by hash and `equals`: the natural order of a key the runtime
+/// can't compare is no order to tell two keys apart by.
+fn by_comparator(t: &Table) -> bool {
+    t.sorted && t.comparator.r() != 0
+}
+
+/// Where `k` is in a table sorted by its comparator, or where it goes (`Err`).
+fn search(rt: &mut Rt, t: &Table, k: V) -> Result<usize, usize> {
+    let (mut low, mut high) = (0, t.entries.len());
+    while low < high {
+        let mid = (low + high) / 2;
+        match compare(rt, t.comparator, k, t.entries[mid].0) {
+            0 => return Ok(mid),
+            c if c < 0 => high = mid,
+            _ => low = mid + 1,
+        }
+    }
+    Err(low)
+}
+
+/// The hash index after an entry with hash `h` was put in at `at`: the entries behind it moved
+/// up by one. No key is hashed again for it (a table of ten thousand keys with a `hashCode` of
+/// their mod's own was hashed whole at every insertion into a sorted map and at every removal).
+fn index_inserted(t: &mut Table, at: usize, h: i32) {
+    if at + 1 < t.entries.len() {
+        for slots in t.index.values_mut() {
+            for s in slots.iter_mut().filter(|s| **s >= at) {
+                *s += 1;
+            }
+        }
+    }
+    t.index.entry(h).or_default().push(at);
+}
+
+/// The hash index after the entry at `at`, with hash `h`, was taken out: the entries behind it
+/// moved down by one.
+fn index_removed(t: &mut Table, at: usize, h: i32) {
+    if let Some(slots) = t.index.get_mut(&h) {
+        slots.retain(|s| *s != at);
+        if slots.is_empty() {
+            t.index.remove(&h);
+        }
+    }
+    if at < t.entries.len() {
+        for slots in t.index.values_mut() {
+            for s in slots.iter_mut().filter(|s| **s > at) {
+                *s -= 1;
+            }
+        }
     }
 }
 
@@ -184,12 +230,8 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
         }
         return rt.call_functional("java/util/Comparator.compare.(Ljava/lang/Object;Ljava/lang/Object;)I", comparator, &[a, b]).i();
     }
-    match (rt.str_of(a), rt.str_of(b)) {
-        (Some(x), Some(y)) => {
-            let (x, y): (Vec<u16>, Vec<u16>) = (x.encode_utf16().collect(), y.encode_utf16().collect());
-            return x.cmp(&y) as i32;
-        }
-        _ => {}
+    if let (Some(x), Some(y)) = (rt.str_of(a), rt.str_of(b)) {
+        return crate::jlang::java_compare(x, y);
     }
     let unbox = |rt: &Rt, v: V| match v {
         V::R(_) if rt.class_of(v).starts_with("java/lang/") => rt.get_field(v, "value"),
@@ -205,7 +247,28 @@ pub fn compare(rt: &mut Rt, comparator: V, a: V, b: V) -> i32 {
             None => 0,
         },
         // Enums: by ordinal (a direction's or an axis's too).
-        _ => crate::api_common::enum_ordinal(rt, a).cmp(&crate::api_common::enum_ordinal(rt, b)) as i32,
+        _ if !matches!(rt.get_field(a, "$ordinal"), V::Void)
+            || matches!(
+                rt.class_of(a),
+                "net/minecraft/core/Direction" | "net/minecraft/core/Direction$Axis"
+            ) =>
+        {
+            crate::api_common::enum_ordinal(rt, a).cmp(&crate::api_common::enum_ordinal(rt, b))
+                as i32
+        }
+        // One of the runtime's own values that Java compares (an id, a UUID, a path, an instant):
+        // by its class's `compareTo`.
+        _ if matches!(a, V::R(r) if r != 0) && !rt.is_mod_class(rt.class_of(a)) => {
+            let key = rt.static_key(&format!(
+                "{}.compareTo.(Ljava/lang/Object;)I",
+                rt.class_of(a)
+            ));
+            match crate::api::call(rt, key, &[a, b]) {
+                V::I(c) => c,
+                _ => 0,
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -443,11 +506,28 @@ fn comparator_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
     })
 }
 
+/// `String.CASE_INSENSITIVE_ORDER`: one comparator, as the JDK's constant is.
+pub(crate) fn case_insensitive_order(rt: &mut Rt) -> V {
+    rt.intern("compat:case-insensitive-order".into(), |rt| {
+        let c = rt.new_object("java/util/Comparator");
+        let how = rt.string("ignore-case");
+        rt.put_field(c, "$how", how);
+        c
+    })
+}
+
 /// What a comparator made by [`comparator_call`] answers for `(x, y)`.
 fn compare_built(rt: &mut Rt, c: V, x: V, y: V) -> i32 {
     let how = rt.str_of(rt.get_field(c, "$how")).unwrap_or("").to_owned();
     let (f, g) = (rt.get_field(c, "$x"), rt.get_field(c, "$y"));
     match how.as_str() {
+        "ignore-case" => {
+            let (x, y) = (
+                rt.str_of(x).unwrap_or("").to_owned(),
+                rt.str_of(y).unwrap_or(""),
+            );
+            crate::jlang::compare_ignore_case(&x, y)
+        }
         "key" => {
             let (kx, ky) = (rt.call_functional(APPLY, f, &[x]), rt.call_functional(APPLY, f, &[y]));
             compare(rt, g, kx, ky)
@@ -526,31 +606,50 @@ fn put_table(rt: &mut Rt, v: V, t: Table) {
 }
 
 fn find(rt: &mut Rt, t: &Table, k: V) -> Option<usize> {
+    if by_comparator(t) {
+        return search(rt, t, k).ok();
+    }
     let h = key_hash(rt, t.strategy, k);
-    let slots = t.index.get(&h)?.clone();
-    slots.into_iter().find(|&i| key_equals(rt, t.strategy, t.entries[i].0, k))
+    let slots = t.index.get(&h)?;
+    slots
+        .iter()
+        .copied()
+        .find(|&i| key_equals(rt, t.strategy, t.entries[i].0, k))
 }
 
 /// Puts `k → v` in the table at `m`; the previous value, or null.
 pub fn table_put(rt: &mut Rt, m: V, k: V, v: V) -> V {
     let Some(mut t) = take_table(rt, m) else { return V::NULL };
+    if by_comparator(&t) {
+        let old = match search(rt, &t, k) {
+            Ok(i) => std::mem::replace(&mut t.entries[i].1, v),
+            Err(at) => {
+                t.entries.insert(at, (k, v));
+                V::NULL
+            }
+        };
+        put_table(rt, m, t);
+        return old;
+    }
     let old = match find(rt, &t, k) {
         Some(i) => std::mem::replace(&mut t.entries[i].1, v),
         None => {
+            let h = key_hash(rt, t.strategy, k);
             if t.sorted {
-                let cmp = t.comparator;
-                let mut at = t.entries.len();
-                for (i, (e, _)) in t.entries.iter().enumerate() {
-                    let e = *e;
-                    if compare(rt, cmp, k, e) < 0 {
-                        at = i;
-                        break;
+                // Before the first key it is less than: found by halving, the keys being in
+                // order (after the last, for a key that compares to none).
+                let (mut at, mut high) = (0, t.entries.len());
+                while at < high {
+                    let mid = (at + high) / 2;
+                    if compare(rt, V::NULL, k, t.entries[mid].0) < 0 {
+                        high = mid;
+                    } else {
+                        at = mid + 1;
                     }
                 }
                 t.entries.insert(at, (k, v));
-                reindex(&mut t, rt);
+                index_inserted(&mut t, at, h);
             } else {
-                let h = key_hash(rt, t.strategy, k);
                 t.entries.push((k, v));
                 t.index.entry(h).or_default().push(t.entries.len() - 1);
             }
@@ -570,10 +669,22 @@ pub fn table_get(rt: &mut Rt, m: V, k: V) -> Option<V> {
 
 pub fn table_remove(rt: &mut Rt, m: V, k: V) -> Option<V> {
     let mut t = take_table(rt, m)?;
-    let r = find(rt, &t, k).map(|i| t.entries.remove(i).1);
-    if r.is_some() {
-        reindex(&mut t, rt);
-    }
+    let r = if by_comparator(&t) {
+        search(rt, &t, k).ok().map(|i| t.entries.remove(i).1)
+    } else {
+        let h = key_hash(rt, t.strategy, k);
+        let at = t.index.get(&h).and_then(|slots| {
+            slots
+                .iter()
+                .copied()
+                .find(|&i| key_equals(rt, t.strategy, t.entries[i].0, k))
+        });
+        at.map(|i| {
+            let value = t.entries.remove(i).1;
+            index_removed(&mut t, i, h);
+            value
+        })
+    };
     put_table(rt, m, t);
     r
 }
@@ -5138,6 +5249,196 @@ mod tests {
         }
         let names: Vec<String> = elements(&rt, t).iter().map(|&k| rt.str_of(k).unwrap().to_owned()).collect();
         assert_eq!(names, ["z", "y", "x"], "the comparator outlives clear()");
+    }
+
+    /// Maps and sets through many insertions and removals, against the same steps on Rust's own:
+    /// every key is found (or not) after each batch, in the order Java keeps. A hash map keeps
+    /// insertion order, a tree map its keys' order; neither hashes its keys again when one leaves.
+    #[test]
+    fn tables_find_their_keys_through_insertions_and_removals() {
+        let mut rt = Rt::new();
+        let put = "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        let get = "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        let remove = "java/util/Map.remove.(Ljava/lang/Object;)Ljava/lang/Object;";
+        for class in ["java/util/HashMap", "java/util/TreeMap"] {
+            let m = rt.new_object(class);
+            let init = rt.static_key(&format!("{class}.<init>.()V"));
+            c(&mut rt, init, &[m]);
+            // (key, value) in the order the map is expected to hold them.
+            let mut model: Vec<(i32, i32)> = Vec::new();
+            let mut seed = 0x2545_f491u32;
+            for step in 0..4000 {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                let key = (seed % 300) as i32;
+                let k = crate::api_common::integer(&mut rt, key);
+                if seed & 0x300 == 0 {
+                    let had = model
+                        .iter()
+                        .position(|e| e.0 == key)
+                        .map(|i| model.remove(i).1);
+                    let got = c(&mut rt, remove, &[m, k]);
+                    assert_eq!(
+                        had.map(V::I).unwrap_or(V::NULL),
+                        got,
+                        "{class}: remove({key}) at step {step}"
+                    );
+                } else {
+                    match model.iter_mut().find(|e| e.0 == key) {
+                        Some(e) => e.1 = step,
+                        None if class.ends_with("TreeMap") => {
+                            let at = model.partition_point(|e| e.0 < key);
+                            model.insert(at, (key, step));
+                        }
+                        None => model.push((key, step)),
+                    }
+                    c(&mut rt, put, &[m, k, V::I(step)]);
+                }
+                if step % 500 == 499 {
+                    let keys: Vec<i32> = table_keys(&rt, m)
+                        .iter()
+                        .map(|k| rt.get_field(*k, "value").i())
+                        .collect();
+                    assert_eq!(
+                        keys,
+                        model.iter().map(|e| e.0).collect::<Vec<_>>(),
+                        "{class}: the keys' order at step {step}"
+                    );
+                    for key in 0..300 {
+                        let k = crate::api_common::integer(&mut rt, key);
+                        let want = model
+                            .iter()
+                            .find(|e| e.0 == key)
+                            .map_or(V::NULL, |e| V::I(e.1));
+                        assert_eq!(
+                            c(&mut rt, get, &[m, k]),
+                            want,
+                            "{class}: get({key}) at step {step}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
+    /// A tree map made with a comparator tells its keys apart by it alone, as Java's does: one
+    /// entry for `"Speed"` and `"SPEED"` under `String.CASE_INSENSITIVE_ORDER`, found by either.
+    #[test]
+    fn a_tree_map_with_a_comparator_finds_keys_by_it() {
+        crate::install();
+        let mut rt = Rt::new();
+        let order = crate::api::get_static(&mut rt, "java/lang/String.CASE_INSENSITIVE_ORDER");
+        let m = rt.new_object("java/util/TreeMap");
+        c(
+            &mut rt,
+            "java/util/TreeMap.<init>.(Ljava/util/Comparator;)V",
+            &[m, order],
+        );
+        let put = "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        for (i, k) in ["speed", "Torque", "angle", "SPEED", "torque"]
+            .iter()
+            .enumerate()
+        {
+            let k = rt.string(k);
+            c(&mut rt, put, &[m, k, V::I(i as i32)]);
+        }
+        let keys: Vec<String> = table_keys(&rt, m)
+            .iter()
+            .map(|k| rt.str_of(*k).unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            keys,
+            ["angle", "speed", "Torque"],
+            "the first spelling of a key stays"
+        );
+        let k = rt.string("TORQUE");
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[m, k]
+            ),
+            V::I(4)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Map.containsKey.(Ljava/lang/Object;)Z",
+                &[m, k]
+            ),
+            V::I(1)
+        );
+        let k = rt.string("Speed");
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Map.remove.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[m, k]
+            ),
+            V::I(3)
+        );
+        assert_eq!(c(&mut rt, "java/util/Map.size.()I", &[m]), V::I(2));
+        // The comparator's own numbers, as `String.compareToIgnoreCase` gives them.
+        let (a, b) = (rt.string("Apple"), rt.string("apricot"));
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/lang/String.compareToIgnoreCase.(Ljava/lang/String;)I",
+                &[a, b]
+            ),
+            V::I('p' as i32 - 'r' as i32)
+        );
+        let (a, b) = (rt.string("gear"), rt.string("GEARBOX"));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Comparator.compare.(Ljava/lang/Object;Ljava/lang/Object;)I",
+                &[order, a, b]
+            ),
+            V::I(-3)
+        );
+        // Ids in a sorted map of their own order: by path, then namespace, as `ResourceLocation` compares.
+        let ids = rt.new_object("java/util/TreeMap");
+        c(&mut rt, "java/util/TreeMap.<init>.()V", &[ids]);
+        for id in [
+            "create:shaft",
+            "minecraft:stone",
+            "create:andesite_alloy",
+            "farmersdelight:shaft",
+        ] {
+            let (ns, path) = id.split_once(':').unwrap();
+            let (ns, path) = (rt.string(ns), rt.string(path));
+            let k = crate::api::call(
+                &mut rt,
+                "net/minecraft/resources/ResourceLocation.fromNamespaceAndPath.(Ljava/lang/String;Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;",
+                &[ns, path],
+            );
+            c(&mut rt, put, &[ids, k, V::I(1)]);
+        }
+        let keys: Vec<String> = table_keys(&rt, ids)
+            .iter()
+            .map(|k| crate::jlang::text(&rt, *k))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "create:andesite_alloy",
+                "create:shaft",
+                "farmersdelight:shaft",
+                "minecraft:stone"
+            ]
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
     }
 
     #[test]

@@ -1129,7 +1129,14 @@ fn value_of(rt: &mut Rt, kind: &str, text: &str) -> V {
             if let Some(v) = crate::blocks::vanilla_enum_constant(rt, class, text) {
                 return v;
             }
-            // A mod enum: the constant whose name, lower-cased, is the text.
+            // A mod enum: the constant whose name, lower-cased, is the text. Found once for each
+            // value: every static of every mod is looked through for it, and a mod asks for a
+            // state's values a million times over (FramedBlocks' caches of its states: 90 s of
+            // nothing else with a pack's statics).
+            let key = format!("compat:state-value/{class}/{text}");
+            if let Some(v) = rt.interned.get(&key) {
+                return *v;
+            }
             let prefix = format!("{class}.");
             let found = rt
                 .statics
@@ -1138,7 +1145,11 @@ fn value_of(rt: &mut Rt, kind: &str, text: &str) -> V {
                 .map(|(_, v)| *v)
                 .find(|v| rt.str_of(rt.get_field(*v, "$name")).is_some_and(|n| n.eq_ignore_ascii_case(text)));
             match found {
-                Some(v) => v,
+                Some(v) => {
+                    rt.interned.insert(key, v);
+                    v
+                }
+                // Not kept: the enum's class may not have been initialised yet.
                 None => rt.string(text),
             }
         }
@@ -6268,6 +6279,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             })
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
+        "java/lang/String" if field == "CASE_INSENSITIVE_ORDER" => crate::jutil::case_insensitive_order(rt),
         "java/lang/System" if field == "out" || field == "err" => crate::jlang::std_stream(rt, field == "err"),
         // The primitives' classes (`int.class` is `Integer.TYPE`), one object each.
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Boolean" | "java/lang/Byte" | "java/lang/Character" | "java/lang/Short" | "java/lang/Float" | "java/lang/Double" | "java/lang/Void"
