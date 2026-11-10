@@ -9810,6 +9810,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Tests: a runtime test (constants, `values`, `valueOf` and its exception, `toString`, `isEnum`) and a
     translator test (an enum of a game jar carried with its constants and nothing else). 754 compat tests.
     Not in a game yet: it joins the pack's next bundle.
+- [x] 2026-11-10 Part 150: what many mods write and read their own files with, from the second launch's
+  unmapped calls ranked by class.
+  - Writers of text (`writers.rs`): `Writer`, `PrintWriter`, `FileWriter`, `BufferedWriter`,
+    `OutputStreamWriter`, `StringWriter`, and `Files.newBufferedWriter`. None was modelled (39 jars make a
+    `FileWriter`). What is written goes straight to where the writer leads, a file, a stream, the writer it
+    wraps or a string kept, so a file a mod forgot to close is whole.
+  - `java.util.Properties`: a map as the others, with `getProperty`, `setProperty`, and `load` and `store`
+    in the `.properties` format (comments, `=`/`:`/blank separators, escapes, lines continued).
+  - Locks, latches and semaphores on the one thread (`ReentrantLock`, read-write locks, `CountDownLatch`,
+    `Semaphore`): always free, never waited for.
+  - A mixin accessor onto a field of the game's object (`Minecraft.$player`) that no module answers reads
+    what the object holds under the field's name, as a plain read of the field does. `Minecraft` holds its
+    `gameDirectory` (a mod's cache folder came out as `/fancymenu_temp`).
+  - `Class.getInterfaces`, `getPackage`, `getEnclosingClass`, `isAnnotation`; an unmapped static field is
+    traced like an unmapped call (a null codec's source was invisible in the log).
+  - Tests: one per piece; 757 compat tests pass. Not in a game yet: the pack's build finishes first.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

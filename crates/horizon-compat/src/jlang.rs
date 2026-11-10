@@ -902,6 +902,34 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "desiredAssertionStatus" => V::I(0),
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),
+            // The interfaces a mod's class names, its package, and the class it is nested in.
+            "getInterfaces" => {
+                let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                let names: Vec<&'static str> = rt
+                    .interfaces
+                    .get(n.as_str())
+                    .map(|i| i.to_vec())
+                    .unwrap_or_default();
+                let classes: Vec<V> = names.into_iter().map(|i| class_object(rt, i)).collect();
+                rt.alloc("[Ljava/lang/Class;", Data::Array(classes))
+            }
+            "getPackage" => {
+                let n = rt.str_of(a(0)).unwrap_or("").replace('/', ".");
+                let package = n.rsplit_once('.').map_or("", |p| p.0).to_owned();
+                let p = rt.new_object("java/lang/Package");
+                let name = rt.string(&package);
+                rt.put_field(p, "$name", name);
+                p
+            }
+            "getEnclosingClass" | "getDeclaringClass" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                match n.rsplit_once('$') {
+                    Some((outer, _)) if !outer.is_empty() => class_object(rt, outer),
+                    _ => V::NULL,
+                }
+            }
+            "isAnnotation" | "isAnonymousClass" | "isSynthetic" | "isLocalClass" => V::I(0),
+            "isMemberClass" => V::I(rt.str_of(a(0)).is_some_and(|n| n.contains('$')) as i32),
             "isInterface" | "isRecord" => V::I(0),
             // Every class a mod can name is one it may use: public.
             "getModifiers" => V::I(1),
@@ -1072,6 +1100,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // transactions (Create: New Age's energy) check `this.thread != Thread.currentThread()`.
         // A thread a mod starts runs its body there at once.
         "java/lang/Thread" => crate::jsystem::thread(rt, name, desc, args),
+        // A class's package: its name; a mod reads no version out of a manifest here.
+        "java/lang/Package" => Some(match name {
+            "getName" | "toString" => rt.get_field(a(0), "$name"),
+            "getImplementationVersion"
+            | "getSpecificationVersion"
+            | "getImplementationTitle"
+            | "getImplementationVendor"
+            | "getSpecificationTitle" => V::NULL,
+            _ => return None,
+        }),
         "java/lang/Runtime" => Some(match name {
             "getRuntime" => rt.new_object("java/lang/Runtime"),
             "availableProcessors" => V::I(std::thread::available_parallelism().map_or(4, |n| n.get() as i32)),
@@ -1334,7 +1372,7 @@ fn unescape_regex(p: &str) -> Option<String> {
 
 /// `String.format` for the conversions mods use: `%s %d %f %.Nf %x %c %b %%` and `%n`, an argument
 /// by its index (`%2$s`, from 1) or the one before again (`%<s`), and `,` grouping thousands.
-fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
+pub(crate) fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
     let mut out = String::new();
     let mut it = f.chars().peekable();
     let mut next = 0;

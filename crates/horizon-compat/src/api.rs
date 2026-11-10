@@ -130,6 +130,23 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, key);
         return call_exact(rt, "java/lang/Object.getClass.()Ljava/lang/Class;", args);
     }
+    // A mixin's accessor onto a field of the game's object (`$player` of `Minecraft`: the field
+    // read through an `@Accessor` interface) that no module answers for itself: what the object
+    // holds under the field's name, as a plain read of the field gets it. Unanswered where it
+    // holds nothing: the miss is told as before.
+    if let Some(field) = rest
+        .strip_prefix('$')
+        .and_then(|r| r.split_once(".()"))
+        .map(|(f, _)| f)
+        && let Some(&this) = args.first()
+    {
+        let field = rt.static_key(field);
+        let held = rt.get_field(this, field);
+        if held != V::Void && this.r() != 0 {
+            uncount(rt, key);
+            return held;
+        }
+    }
     // An enum of the game's no table here lists, by the constants the translator carried for it:
     // before a class above is tried, or its `valueOf(name)` would be asked of the name's own class.
     if let Some(v) = crate::api_common::carried_enum_call(rt, owner, rest, args) {
@@ -1123,7 +1140,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 92] = [
+const CHAIN: [Module; 93] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -1203,6 +1220,7 @@ const CHAIN: [Module; 92] = [
     crate::gson::call,
     crate::jregex::call,
     crate::jsystem::call,
+    crate::writers::call,
     crate::jdk::call,
     crate::jlang::call,
     crate::jutil::call,
@@ -1221,7 +1239,7 @@ const CHAIN: [Module; 92] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 92] = [
+const CLAIMS: [Claims; 93] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -1301,6 +1319,7 @@ const CLAIMS: [Claims; 92] = [
     crate::gson::claims,
     crate::jregex::claims,
     crate::jsystem::claims,
+    crate::writers::claims,
     crate::jdk::claims,
     crate::jlang::claims,
     crate::jutil::claims,
@@ -1317,7 +1336,7 @@ const CLAIMS: [Claims; 92] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 92] = [
+const MODULE_NAMES: [&str; 93] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1397,6 +1416,7 @@ const MODULE_NAMES: [&str; 92] = [
     "gson",
     "jregex",
     "jsystem",
+    "writers",
     "jdk",
     "jlang",
     "jutil",
@@ -3410,6 +3430,7 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
                 }
                 None => {
                     crate::miss(rt, key);
+                    trace_unmapped(rt, key, &[]);
                     V::NULL
                 }
             },

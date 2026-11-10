@@ -207,7 +207,7 @@ fn bytes_of(rt: &Rt, array: V) -> Vec<u8> {
     crate::jutil::elements(rt, array).into_iter().map(|b| b.i() as u8).collect()
 }
 
-fn byte_array(rt: &mut Rt, bytes: &[u8]) -> V {
+pub(crate) fn byte_array(rt: &mut Rt, bytes: &[u8]) -> V {
     let a = rt.new_array(bytes.len() as i32, V::I(0));
     if let Some(crate::Object { data: Data::Array(items), .. }) = rt.heap.get_mut(a.r() as usize) {
         for (slot, b) in items.iter_mut().zip(bytes) {
@@ -492,6 +492,16 @@ fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             Err(e) => throw_io(rt, &e, &p),
         },
         "newOutputStream" => crate::streams::open_output(rt, &p, a(1)),
+        // `newBufferedWriter(path[, charset], options...)`: a writer onto the file ([`crate::writers`]).
+        "newBufferedWriter" => {
+            let options = if desc.contains("Charset;") {
+                a(2)
+            } else {
+                a(1)
+            };
+            let append = has_option(rt, options, "APPEND");
+            crate::writers::to_file(rt, "java/io/BufferedWriter", &p, append)
+        }
         // `writeString(path, text[, charset], options...)`.
         "writeString" => {
             let s = text(rt, a(1)).unwrap_or_default();

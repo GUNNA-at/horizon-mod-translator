@@ -25,7 +25,68 @@ const WAITS: u32 = 3;
 /// only to the modules that claim it ([`crate::api`]'s chain). `Thread`'s and the calendar's come
 /// through the modules of their packages ([`thread`], [`calendar`]).
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    owner.starts_with("java/net/http/") || matches!(owner, URL | "java/net/URLConnection" | "java/net/HttpURLConnection" | "javax/net/ssl/HttpsURLConnection")
+    owner.starts_with("java/net/http/")
+        || owner.starts_with(LOCKS)
+        || matches!(
+            owner,
+            URL | "java/net/URLConnection"
+                | "java/net/HttpURLConnection"
+                | "javax/net/ssl/HttpsURLConnection"
+                | LATCH
+                | "java/util/concurrent/Semaphore"
+        )
+}
+
+const LOCKS: &str = "java/util/concurrent/locks/";
+const LATCH: &str = "java/util/concurrent/CountDownLatch";
+
+/// `java.util.concurrent`'s locks, latches and semaphores, on the one thread there is: a lock
+/// is always free and held by whoever asks, a read or write lock is the lock itself, and nothing
+/// is ever waited for (a latch not counted down yet is passed, as after a timeout; in a thread a
+/// mod started, a wait interrupts it: [`wait`]).
+fn locks(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    Some(match name {
+        "<init>" => {
+            if owner == LATCH || owner.ends_with("Semaphore") {
+                rt.put_field(this, "$count", V::J(i64::from(a(1).i())));
+            }
+            V::Void
+        }
+        "countDown" => {
+            let left = (rt.get_field(this, "$count").j() - 1).max(0);
+            rt.put_field(this, "$count", V::J(left));
+            V::Void
+        }
+        "getCount" => V::J(rt.get_field(this, "$count").j()),
+        "availablePermits" => V::I(rt.get_field(this, "$count").j() as i32),
+        "await" | "awaitNanos" | "awaitUninterruptibly" | "park" | "parkNanos" => {
+            let waited = wait(rt);
+            match desc.rsplit(')').next() {
+                Some("Z") => V::I((rt.get_field(this, "$count").j() == 0) as i32),
+                Some("J") => V::J(0),
+                _ => waited,
+            }
+        }
+        "lock"
+        | "unlock"
+        | "lockInterruptibly"
+        | "acquire"
+        | "acquireUninterruptibly"
+        | "release"
+        | "signal"
+        | "signalAll"
+        | "unpark" => V::Void,
+        "tryLock" | "tryAcquire" | "isHeldByCurrentThread" | "isWriteLockedByCurrentThread" => {
+            V::I(1)
+        }
+        "isLocked" | "hasQueuedThreads" | "isWriteLocked" | "isFair" => V::I(0),
+        "getHoldCount" | "getQueueLength" | "getReadLockCount" => V::I(0),
+        "readLock" | "writeLock" | "asReadLock" | "asWriteLock" if desc.starts_with("()L") => this,
+        "newCondition" => rt.new_object("java/util/concurrent/locks/Condition"),
+        _ => return None,
+    })
 }
 
 /// Whether the runtime is inside the body of a thread a mod started.
@@ -324,6 +385,9 @@ pub(crate) fn calendar(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &
 /// check or a statistics ping ends in the mod's own handling of that.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    if owner.starts_with(LOCKS) || matches!(owner, LATCH | "java/util/concurrent/Semaphore") {
+        return locks(rt, owner, name, desc, args);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let offline = |rt: &mut Rt| crate::jlang::throw_with(rt, IO_EXCEPTION, OFFLINE);
     if owner == URL {
@@ -505,6 +569,84 @@ mod tests {
         c(&mut rt, "java/net/URL.openStream.()Ljava/io/InputStream;", &[url]);
         let thrown = rt.thrown.take().expect("offline");
         assert_eq!(rt.class_of(thrown), IO_EXCEPTION);
+    }
+
+    #[test]
+    fn locks_are_free_and_latches_are_passed_on_the_one_thread() {
+        let mut rt = Rt::new();
+        let lock = rt.new_object("java/util/concurrent/locks/ReentrantLock");
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/ReentrantLock.<init>.()V",
+            &[lock],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/ReentrantLock.lock.()V",
+            &[lock],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/ReentrantLock.tryLock.()Z",
+                &[lock]
+            ),
+            V::I(1)
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/Lock.unlock.()V",
+            &[lock],
+        );
+        let both = rt.new_object("java/util/concurrent/locks/ReentrantReadWriteLock");
+        let read = c(
+            &mut rt,
+            "java/util/concurrent/locks/ReentrantReadWriteLock.readLock.()Ljava/util/concurrent/locks/ReentrantReadWriteLock$ReadLock;",
+            &[both],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/ReentrantReadWriteLock$ReadLock.lock.()V",
+            &[read],
+        );
+        let latch = rt.new_object(LATCH);
+        c(
+            &mut rt,
+            "java/util/concurrent/CountDownLatch.<init>.(I)V",
+            &[latch, V::I(2)],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/CountDownLatch.countDown.()V",
+            &[latch],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/CountDownLatch.getCount.()J",
+                &[latch]
+            ),
+            V::J(1)
+        );
+        // Not counted down yet: passed all the same, as a timed wait that ran out.
+        c(
+            &mut rt,
+            "java/util/concurrent/CountDownLatch.await.()V",
+            &[latch],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/CountDownLatch.await.(JLjava/util/concurrent/TimeUnit;)Z",
+                &[latch, V::J(5), V::NULL]
+            ),
+            V::I(0)
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
     }
 
     #[test]

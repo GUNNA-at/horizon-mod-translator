@@ -995,6 +995,8 @@ fn kind_of(class: &str) -> Option<&'static str> {
         s if class.starts_with("it/unimi/dsi/fastutil/") && (s.ends_with("ArrayList") || s.ends_with("FIFOQueue") || s.ends_with("BigArrayBigList")) => "list",
         "TreeMap" | "TreeSet" | "ConcurrentSkipListMap" | "ConcurrentSkipListSet" => "sorted",
         s if s.ends_with("Map") || s.ends_with("Set") => "table",
+        // `Hashtable` and its `Properties`: a map as any other here (one thread).
+        "Hashtable" | "Properties" => "table",
         _ => return None,
     })
 }
@@ -1005,6 +1007,162 @@ fn util_owner(owner: &str) -> bool {
         || owner == "java/lang/Iterable"
         || owner.starts_with("it/unimi/dsi/fastutil/")
         || owner.starts_with("com/google/common/collect/")
+}
+
+/// What `Properties` has past a map's own methods: its texts by key, and its file format (a
+/// `key=value` a line, `#` and `!` comments, `\` escapes and line continuations), read and
+/// written as `load` and `store` do.
+fn properties(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    Some(match name {
+        "getProperty" => match table_get(rt, this, a(1)) {
+            Some(v) if rt.str_of(v).is_some() => v,
+            _ if args.len() > 2 => a(2),
+            _ => V::NULL,
+        },
+        "setProperty" => table_put(rt, this, a(1), a(2)),
+        "stringPropertyNames" => {
+            let keys: Vec<V> = table_pairs(rt, this)
+                .into_iter()
+                .filter(|(k, v)| rt.str_of(*k).is_some() && rt.str_of(*v).is_some())
+                .map(|(k, _)| k)
+                .collect();
+            new_set_of(rt, &keys)
+        }
+        "propertyNames" => {
+            let keys = table_keys(rt, this);
+            new_iter(rt, keys)
+        }
+        "load" => {
+            let text = crate::resources::take_text(rt, a(1)).unwrap_or_default();
+            for (k, v) in parse_properties(&text) {
+                let (k, v) = (rt.string(&k), rt.string(&v));
+                table_put(rt, this, k, v);
+            }
+            V::Void
+        }
+        "store" => {
+            let mut out = String::new();
+            if let Some(comments) = rt.str_of(a(2)) {
+                for line in comments.lines() {
+                    out.push_str(&format!("#{line}\n"));
+                }
+            }
+            for (k, v) in table_pairs(rt, this) {
+                let (k, v) = (rt.to_java_string(k, 'L'), rt.to_java_string(v, 'L'));
+                out.push_str(&format!(
+                    "{}={}\n",
+                    escape_property(&k, true),
+                    escape_property(&v, false)
+                ));
+            }
+            if desc.starts_with("(Ljava/io/Writer;") {
+                let s = rt.string(&out);
+                crate::api::call(rt, "java/io/Writer.write.(Ljava/lang/String;)V", &[a(1), s]);
+                crate::api::call(rt, "java/io/Writer.flush.()V", &[a(1)]);
+            } else {
+                let bytes = crate::files::byte_array(rt, out.as_bytes());
+                crate::api::call(rt, "java/io/OutputStream.write.([B)V", &[a(1), bytes]);
+                crate::api::call(rt, "java/io/OutputStream.flush.()V", &[a(1)]);
+            }
+            V::Void
+        }
+        _ => return None,
+    })
+}
+
+/// A key or a value as `Properties.store` writes it: the characters that would end it or start a
+/// comment escaped, a key's spaces too and a value's leading one, anything past ASCII as `\uXXXX`.
+fn escape_property(text: &str, key: bool) -> String {
+    let mut out = String::new();
+    for (i, c) in text.chars().enumerate() {
+        match c {
+            ' ' if key || i == 0 => out.push_str("\\ "),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{c}' => out.push_str("\\f"),
+            '=' | ':' | '#' | '!' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if (' '..='~').contains(&c) => out.push(c),
+            c => {
+                let mut units = [0u16; 2];
+                for u in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{u:04X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The keys and values of a `.properties` text, as `Properties.load` reads it.
+fn parse_properties(text: &str) -> Vec<(String, String)> {
+    // Logical lines: a line ending in an odd number of backslashes goes on in the next, less its
+    // leading blanks.
+    let mut lines: Vec<String> = Vec::new();
+    let mut pending: Option<String> = None;
+    for raw in text.split(['\n', '\r']) {
+        let line = raw.trim_start_matches([' ', '\t', '\u{c}']);
+        let mut whole = match pending.take() {
+            Some(p) => p + line,
+            None if line.is_empty() || line.starts_with(['#', '!']) => continue,
+            None => line.to_owned(),
+        };
+        let slashes = whole.len() - whole.trim_end_matches('\\').len();
+        if slashes % 2 == 1 {
+            whole.pop();
+            pending = Some(whole);
+        } else {
+            lines.push(whole);
+        }
+    }
+    lines.extend(pending);
+    let unescape = |s: &str| {
+        let (mut out, mut chars) = (String::new(), s.chars());
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('t') => out.push('\t'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('f') => out.push('\u{c}'),
+                Some('u') => {
+                    let hex: String = chars.by_ref().take(4).collect();
+                    out.extend(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32));
+                }
+                Some(other) => out.push(other),
+                None => {}
+            }
+        }
+        out
+    };
+    lines
+        .iter()
+        .map(|line| {
+            // The key ends at the first `=`, `:` or blank that no backslash escapes.
+            let (mut end, mut escaped) = (line.len(), false);
+            for (i, c) in line.char_indices() {
+                if !escaped && matches!(c, '=' | ':' | ' ' | '\t' | '\u{c}') {
+                    end = i;
+                    break;
+                }
+                escaped = c == '\\' && !escaped;
+            }
+            let rest = line[end..].trim_start_matches([' ', '\t', '\u{c}']);
+            let rest = rest
+                .strip_prefix(['=', ':'])
+                .unwrap_or(rest)
+                .trim_start_matches([' ', '\t', '\u{c}']);
+            (unescape(&line[..end]), unescape(rest))
+        })
+        .collect()
 }
 
 /// `StringJoiner`: the pieces added so far, joined, between its prefix and suffix.
@@ -1082,6 +1240,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return crate::jsystem::calendar(rt, owner, name, desc, args);
         }
         "java/util/StringJoiner" => return joiner(rt, name, desc, args),
+        "java/util/Properties"
+            if matches!(
+                name,
+                "getProperty"
+                    | "setProperty"
+                    | "load"
+                    | "store"
+                    | "stringPropertyNames"
+                    | "propertyNames"
+            ) =>
+        {
+            return properties(rt, name, desc, args);
+        }
         _ => {}
     }
     // Statics first.
@@ -3669,6 +3840,88 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn properties_load_and_store_their_file() {
+        let mut rt = Rt::new();
+        let c = crate::api::call;
+        let p = rt.new_object("java/util/Properties");
+        c(&mut rt, "java/util/Properties.<init>.()V", &[p]);
+        let file = "# a comment\n! another\nspeed = 7\nname:fast\\ one\npath=C\\:\\\\mods\nlong = a,\\\n   b\nempty\n\\u0444=\\u044f\n";
+        let reader = rt.alloc(
+            "java/io/StringReader",
+            crate::Data::Bytes(file.as_bytes().to_vec(), 0),
+        );
+        c(
+            &mut rt,
+            "java/util/Properties.load.(Ljava/io/Reader;)V",
+            &[p, reader],
+        );
+        let get = |rt: &mut Rt, k: &str| {
+            let k = rt.string(k);
+            let v = c(
+                rt,
+                "java/util/Properties.getProperty.(Ljava/lang/String;)Ljava/lang/String;",
+                &[p, k],
+            );
+            rt.str_of(v).map(str::to_owned)
+        };
+        assert_eq!(get(&mut rt, "speed").as_deref(), Some("7"));
+        assert_eq!(get(&mut rt, "name").as_deref(), Some("fast one"));
+        assert_eq!(get(&mut rt, "path").as_deref(), Some("C:\\mods"));
+        assert_eq!(get(&mut rt, "long").as_deref(), Some("a,b"));
+        assert_eq!(get(&mut rt, "empty").as_deref(), Some(""));
+        assert_eq!(get(&mut rt, "\u{444}").as_deref(), Some("\u{44f}"));
+        assert_eq!(get(&mut rt, "absent"), None);
+        let (absent, fallback) = (rt.string("absent"), rt.string("dflt"));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Properties.getProperty.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[p, absent, fallback]
+            ),
+            fallback
+        );
+        // A map's own methods are there too, and `store` writes what `load` reads back.
+        assert_eq!(c(&mut rt, "java/util/Properties.size.()I", &[p]), V::I(6));
+        let (k, v) = (rt.string("a b"), rt.string(" x=y"));
+        c(
+            &mut rt,
+            "java/util/Properties.setProperty.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+            &[p, k, v],
+        );
+        let (out, title) = (
+            rt.new_object("java/io/StringWriter"),
+            rt.string("made by a mod"),
+        );
+        c(&mut rt, "java/io/StringWriter.<init>.()V", &[out]);
+        c(
+            &mut rt,
+            "java/util/Properties.store.(Ljava/io/Writer;Ljava/lang/String;)V",
+            &[p, out, title],
+        );
+        let written = c(
+            &mut rt,
+            "java/io/StringWriter.toString.()Ljava/lang/String;",
+            &[out],
+        );
+        let written = rt.str_of(written).unwrap().to_owned();
+        assert!(
+            written.starts_with("#made by a mod\n")
+                && written.contains("a\\ b=\\ x\\=y\n")
+                && written.contains("\\u0444=\\u044F\n"),
+            "{written}"
+        );
+        let again: std::collections::BTreeMap<String, String> =
+            parse_properties(&written).into_iter().collect();
+        assert_eq!(again.get("a b").map(String::as_str), Some(" x=y"));
+        assert_eq!(again.len(), 7);
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
     #[test]
     fn a_joiner_joins_between_its_prefix_and_suffix() {
         let mut rt = Rt::new();

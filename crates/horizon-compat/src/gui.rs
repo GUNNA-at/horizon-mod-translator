@@ -1983,6 +1983,10 @@ pub fn fill_minecraft(rt: &mut Rt, mc: V) {
     }
     let f = font(rt);
     rt.put_field(mc, "font", f);
+    // The game's folder, where a mod keeps a cache or a file of its own beside the configs.
+    let dir = crate::files::game_dir(rt).to_string_lossy().into_owned();
+    let dir = crate::files::new_file(rt, &dir);
+    rt.put_field(mc, "gameDirectory", dir);
     let options = single(rt, "net/minecraft/client/Options");
     rt.put_field(options, "hideGui", V::I(0));
     rt.put_field(options, "advancedItemTooltips", V::I(0));

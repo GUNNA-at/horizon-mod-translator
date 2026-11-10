@@ -73,6 +73,7 @@ pub mod jutil;
 pub mod keys;
 pub mod menus;
 pub mod widgets;
+pub mod writers;
 pub mod edit_box;
 pub mod level_env;
 pub mod level_events;
