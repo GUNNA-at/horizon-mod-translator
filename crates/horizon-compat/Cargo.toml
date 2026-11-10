@@ -16,6 +16,8 @@ regex = { version = "1", default-features = false, features = ["std", "unicode-p
 # And for the patterns only a backtracking engine reads (lookahead and lookbehind, which mods
 # split camelCase names and config comments by): the same syntax over the same automata.
 fancy-regex = { version = "0.20", default-features = false, features = ["std", "unicode"] }
+# `java.lang.Math` as HotSpot rounds it (`jmath`): the fdlibm ports horizon-core uses, at its pin.
+libm = "=0.2.16"
 # NBT files and Java's gzip and zlib streams (`NbtIo.readCompressed`, `GZIPInputStream`): the
 # deflate Horizon's own saves use, with its features.
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs", "runtime_detection"] }

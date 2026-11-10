@@ -9934,9 +9934,51 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the optimised one takes 25) cannot be one executable. It is 4.3 to 4.5 GB: Apple's linker gives up
     past 16 branch-island clusters (about 2 GB of code), and rust-lld links it in 13 s but macOS does not
     start a Mach-O file past 4 GB. The optimised one is 2.07 GB and was 1.8 GB into the 2 GB between its
-    start and the region the system maps its own libraries into; it is now linked by rust-lld above that
-    region (`-pagezero_size 0x1000000000`). A fast build needs the mods' code in dynamic libraries.
+    start and the region the system maps its own libraries into. (Linking it above that region with a
+    larger zero page, as this entry first said was done, does not work: see Part 156.) A fast build needs
+    the mods' code in dynamic libraries.
   - Tests: 762 compat, 15 compat-core, 30 translator; the differential test.
+- [x] 2026-11-10 Part 156: JOML is its own code, `Math` rounds as HotSpot's, and what the pack's next
+  build showed. Coverage run 53 had 734 of JOML's methods that mods call unanswered.
+  - JOML, the game's vector and matrix library, is taken whole from the player's install as the JDK's
+    classes are (all but the half of its memory helper that writes through `Unsafe`; it is told there is
+    none). A `Matrix4f` or `Matrix3f` stays the array of numbers the runtime's own drawing code reads and
+    writes: the translator reads a field of such a class as its slot in that array (`ARRAY_CLASSES`: the
+    fields in the order the class declares them, a subclass's after, so a `Matrix4fStack` is one too),
+    and makes one with a slot per field. JOML keeps what it knows of a matrix beside its numbers
+    (`properties`: identity, affine...); the runtime's writes set that to nothing known, and a matrix the
+    runtime makes is of JOML's class, so every method on it is JOML's.
+  - A new test (`tests/joml.rs`) runs a fixture of 12 groups of JOML calls (vectors, quaternions,
+    matrices of each kind multiplied with each other, inverses, projections, a matrix stack) on a JVM
+    with the install's jar and translated: all 25 results match bit for bit.
+  - `Math.sin`, `cos`, `tan`, `exp`, `log`, `pow`, `atan2` and their kin answer as HotSpot rounds them on
+    the machine (`jmath`: Horizon's own port, carried into the runtime, with `libm` at Horizon's pin).
+    They were the platform's libm, which differs in the last bit for some arguments: 2 of the 25 JOML
+    results, both in `double`s, did not match before.
+  - `Boolean.valueOf(String)` gave back the text, so `booleanValue()` of it was false whatever the text
+    said: any option a mod read that way (JOML's own `-Djoml.nounsafe`).
+  - A lambda is an instance of the interface it was made for (`instanceof`, `Class.isInstance`); it was
+    of no type but `Object`. GuideME refused the extensions AE2 registers, and AE2's client was not made.
+  - One bit of a `BitSet` is read and written in place. Each `set` copied the set's words out and back:
+    Chisels & Bits fills sets of up to 16.7 million bits one by one (57 million calls for its three
+    sphere modes) and the game stood there for the five minutes it was given.
+  - A method of the game's or of a library's reached by reflection (`getDeclaredMethod`, `invoke`) is
+    the runtime's answer for it, where it has one: Moonlight loads a config early through FML's private
+    `ConfigTracker.loadConfig`, and the mods built on it read their values in their constructors
+    (Amendments threw `Cannot get config value before config is loaded`).
+  - A jar's file right under a namespace of its resources (`assets/automessage/client_default.json`) is
+    carried as the mod's own; only the files in a resource pack's folders are left to the game.
+  - The executable no longer starts as it was linked. An executable on an Apple silicon Mac lies
+    between 4 GB and 0x180000000, where the system maps its own libraries: 2 GB for code, data and
+    symbols. This build's is 1.94 GB of code and data and 226 MB of symbols, 20 MB too long, and dyld
+    then loads no system library (`syscall to map cache into shared region failed`). No option moves it:
+    a larger zero page covers that region as well (the same error with 8 to 60 GB; with 64 GB the process
+    is killed as it starts), and `-image_base` is not for executables. Linked without its symbols it
+    ends about 150 MB short of the limit, and stack samples are named from an unstripped copy of the same
+    link (`atos`). Of the 566 crates' 1,496 MB of code no crate has more than 13 MB; LLVM's machine
+    outliner takes 42% off the largest (13.0 to 7.6 MB) but the JOML fixture ran 1.57 times slower with
+    it, `opt-level = "z"` 60% off and 3.6 times slower, `"s"` 5% off.
+  - Tests: 766 compat, 15 compat-core, 31 translator; the differential tests (the fixture, JOML).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

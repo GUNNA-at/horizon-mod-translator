@@ -251,22 +251,43 @@ fn normal_of(m: &M4) -> M3 {
 
 // ---- JOML objects: matrices as float arrays, vectors and quaternions with their public fields ----
 
+/// A matrix's numbers: the first `N` slots of its array. JOML's own code, where the player's
+/// install gives it, keeps a `Matrix4f`'s fields in the same array (the translator's
+/// `ARRAY_CLASSES`): its sixteen numbers, then what it knows of them (`properties`), then a
+/// subclass's fields (`Matrix4fStack`).
 fn floats<const N: usize>(rt: &Rt, v: V, default: [f32; N]) -> [f32; N] {
     match rt.heap.get(v.r() as usize).map(|o| &o.data) {
-        Some(Data::Array(a)) if a.len() == N => std::array::from_fn(|i| a[i].f()),
+        Some(Data::Array(a)) if a.len() == N || (N == 16 && a.len() > N) => {
+            std::array::from_fn(|i| a[i].f())
+        }
         _ => default,
     }
 }
 
+/// What JOML keeps beside a `Matrix4f`'s numbers (`properties`: identity, affine, a translation
+/// only...), in the slot after them. Zero says nothing is known, which is what the runtime's own
+/// writes leave: JOML then takes no shortcut on numbers it did not see written.
+const NOTHING_KNOWN: V = V::I(0);
+
 fn set_floats<const N: usize>(rt: &mut Rt, v: V, m: [f32; N]) {
     if let Some(o) = rt.heap.get_mut(v.r() as usize) {
         match &mut o.data {
-            Data::Array(a) if a.len() == N => {
+            Data::Array(a) if a.len() == N || (N == 16 && a.len() > N) => {
                 for (slot, f) in a.iter_mut().zip(m) {
                     *slot = V::F(f);
                 }
+                if let Some(known) = a.get_mut(16).filter(|_| N == 16) {
+                    *known = NOTHING_KNOWN;
+                }
             }
-            data => *data = Data::Array(m.iter().map(|f| V::F(*f)).collect()),
+            data => {
+                *data = Data::Array(
+                    m.iter()
+                        .map(|f| V::F(*f))
+                        .chain((N == 16).then_some(NOTHING_KNOWN))
+                        .collect(),
+                )
+            }
         }
     }
 }
@@ -277,8 +298,18 @@ pub fn mat4(rt: &Rt, v: V) -> M4 {
 fn set_mat4(rt: &mut Rt, v: V, m: M4) {
     set_floats(rt, v, m);
 }
+/// A new matrix of class `class` over `numbers`, as JOML's own class when its code is here (the
+/// rest of its methods are then that code's).
+fn new_matrix(rt: &mut Rt, class: &'static str, numbers: Vec<V>) -> V {
+    let cid = rt.class_ids.get(class).copied().unwrap_or(0);
+    rt.alloc_cid(class, cid, Data::Array(numbers))
+}
 pub fn new_mat4(rt: &mut Rt, m: M4) -> V {
-    rt.alloc("org/joml/Matrix4f", Data::Array(m.iter().map(|f| V::F(*f)).collect()))
+    new_matrix(
+        rt,
+        "org/joml/Matrix4f",
+        m.iter().map(|f| V::F(*f)).chain([NOTHING_KNOWN]).collect(),
+    )
 }
 fn mat3(rt: &Rt, v: V) -> M3 {
     floats(rt, v, IDENTITY3)
@@ -287,7 +318,11 @@ fn set_mat3(rt: &mut Rt, v: V, m: M3) {
     set_floats(rt, v, m);
 }
 fn new_mat3(rt: &mut Rt, m: M3) -> V {
-    rt.alloc("org/joml/Matrix3f", Data::Array(m.iter().map(|f| V::F(*f)).collect()))
+    new_matrix(
+        rt,
+        "org/joml/Matrix3f",
+        m.iter().map(|f| V::F(*f)).collect(),
+    )
 }
 
 fn quat(rt: &Rt, v: V) -> [f32; 4] {
@@ -2056,7 +2091,7 @@ fn new_sbb(rt: &mut Rt, model: V, base: M4) -> V {
     rt.put_field(sbb, "transforms", transforms);
     let model_mat = new_mat4(rt, IDENTITY);
     rt.put_field(sbb, "modelMat", model_mat);
-    let normal_mat = rt.alloc("org/joml/Matrix3f", Data::Array(IDENTITY3.iter().map(|&f| V::F(f)).collect()));
+    let normal_mat = new_mat3(rt, IDENTITY3);
     rt.put_field(sbb, "normalMat", normal_mat);
     for (field, class) in [("pos", "org/joml/Vector4f"), ("lightPos", "org/joml/Vector4f"), ("normal", "org/joml/Vector3f"), ("lightDir0", "org/joml/Vector3f"), ("lightDir1", "org/joml/Vector3f")] {
         let v = rt.new_object(class);

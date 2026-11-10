@@ -1521,6 +1521,7 @@ dependencies = [
  "fancy-regex",
  "flate2",
  "horizon-compat-core",
+ "libm",
  "png",
  "regex",
  "serde_json",

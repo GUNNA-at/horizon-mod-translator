@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 128] = [
+const COMPAT: [(&str, &str); 129] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
@@ -209,6 +209,7 @@ const COMPAT: [(&str, &str); 128] = [
     ("gson.rs", include_str!("../../horizon-compat/src/gson.rs")),
     ("network.rs", include_str!("../../horizon-compat/src/network.rs")),
     ("jlang.rs", include_str!("../../horizon-compat/src/jlang.rs")),
+    ("jmath.rs", include_str!("../../horizon-compat/src/jmath.rs")),
     ("jdk.rs", include_str!("../../horizon-compat/src/jdk.rs")),
     ("jregex.rs", include_str!("../../horizon-compat/src/jregex.rs")),
     ("jsystem.rs", include_str!("../../horizon-compat/src/jsystem.rs")),
@@ -232,7 +233,7 @@ const COMPAT: [(&str, &str); 128] = [
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
 /// in Horizon's Cargo.lock, at a version that lock holds.
-const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\nfancy-regex = { version = \"0.20\", default-features = false, features = [\"std\", \"unicode\"] }\nflate2 = { version = \"1.1.10\", default-features = false, features = [\"zlib-rs\", \"runtime_detection\"] }\n";
+const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\nfancy-regex = { version = \"0.20\", default-features = false, features = [\"std\", \"unicode\"] }\nflate2 = { version = \"1.1.10\", default-features = false, features = [\"zlib-rs\", \"runtime_detection\"] }\nlibm = \"=0.2.16\"\n";
 
 /// horizon-compat's modules for tools only (the port pack's), not carried: nothing carried uses them.
 const TOOL_ONLY: [&str; 1] = ["convention.rs"];

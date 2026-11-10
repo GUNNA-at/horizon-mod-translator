@@ -140,6 +140,13 @@ pub(crate) fn vanilla_is_a(c: &str, class: &str) -> bool {
 /// object, and for the blocks and items 1.21.1 makes plain `Block`s, `Item`s and `BlockItem`s: the
 /// runtime's class already is theirs. A block or item 1.21.1 lacks keeps the runtime's class.
 pub fn vanilla_class(rt: &Rt, v: V, c: &'static str) -> Option<&'static str> {
+    // A lambda is of the interface it was made for (`x instanceof Supplier`, `isInstance`): its
+    // own class names the method that is its body.
+    if rt.cid(v) & crate::LAMBDA != 0
+        && let Some(&(interface, _)) = rt.lambda_info.get(&v.r())
+    {
+        return Some(interface);
+    }
     let table: &[(&str, &str)] = match c {
         "net/minecraft/world/level/block/Block" => &crate::vanilla_classes::BLOCKS,
         "net/minecraft/world/item/Item" | "net/minecraft/world/item/BlockItem" => &crate::vanilla_classes::ITEMS,

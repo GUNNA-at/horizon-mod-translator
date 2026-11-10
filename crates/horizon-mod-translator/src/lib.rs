@@ -127,6 +127,8 @@ pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
         ("com/google/guava/guava", "guava"),
         ("org/apache/commons/commons-lang3", "commons-lang3"),
         ("commons-io/commons-io", "commons-io"),
+        // The game's vector and matrix library, taken whole ([`library_code`]).
+        ("org/joml/joml", "joml"),
     ] {
         let found = dirs(libraries.join(folder), "")
             .into_iter()
@@ -225,6 +227,12 @@ pub const LIBRARY_CODE: &[&str] = &[
 /// vector or quaternion is its fields, here as in JOML, so its own code reads what the runtime
 /// made and the runtime what its code made; 734 of its methods had no answer.
 pub fn library_code(class: &str) -> bool {
+    // The game's vector and matrix library whole: plain arithmetic on its own fields. All but
+    // the half of its memory helper that writes through `Unsafe`, which nothing here has (JOML
+    // is told so: `joml.nounsafe`).
+    if let Some(rest) = class.strip_prefix("org/joml/") {
+        return !rest.starts_with("MemUtil$MemUtilUnsafe");
+    }
     LIBRARY_CODE.iter().any(|p| {
         class
             .strip_prefix(p)
@@ -323,7 +331,12 @@ pub fn neoforge_version() -> Option<String> {
 fn own_resource(path: &str, size: u64) -> bool {
     let lower = path.to_ascii_lowercase();
     let extension = lower.rsplit_once('.').map_or("", |p| p.1);
-    let pack = lower.starts_with("assets/") || lower.starts_with("data/");
+    // A resource pack's own: a file in a folder of a namespace (`assets/create/models/...`), and a
+    // namespace's sound list. A file right under the namespace (AutoMessage's
+    // `assets/automessage/client_default.json`) is no resource the game reads: the mod's own.
+    let depth = lower.split('/').count();
+    let pack = (lower.starts_with("assets/") || lower.starts_with("data/"))
+        && (depth > 3 || lower.ends_with("/sounds.json"));
     !(path.ends_with('/')
         || size > 256 << 10
         || lower.starts_with("meta-inf/")
@@ -2423,6 +2436,49 @@ mod mixin_census_tests {
             ["dev/a/Aeronautics", "dev/o/Offroad", "dev/w/Wheels"]
         );
         assert_eq!(ids, ["aeronautics", "offroad", "wheels"]);
+    }
+
+    /// The files of a jar a mod may read for itself (`getResourceAsStream`) are carried: its own
+    /// folders', and those right under a namespace of its resources (AutoMessage's
+    /// `assets/automessage/client_default.json`). The classes, the manifest's folder, pictures, what
+    /// is large and the resource packs' own files (the game serves those) are not.
+    #[test]
+    fn a_jars_own_files_are_carried_and_its_resource_packs_are_not() {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let large = vec![b'x'; 300 << 10];
+        for (name, bytes) in [
+            ("defaults/machine.json", b"{}".as_slice()),
+            ("assets/m/client_default.json", b"[]"),
+            ("assets/m/readme.txt", b"read me"),
+            ("assets/m/models/block/a.json", b"{}"),
+            ("assets/m/sounds.json", b"{}"),
+            ("assets/m/textures/a.png", b"png"),
+            ("data/m/recipe/a.json", b"{}"),
+            ("data/m/custom.json", b"{}"),
+            ("m/Main.class", b"class"),
+            ("META-INF/neoforge.mods.toml", b"[[mods]]"),
+            ("pack.mcmeta", b"{}"),
+            ("large.txt", large.as_slice()),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut zip, bytes).unwrap();
+        }
+        let path = std::env::temp_dir().join(format!("hz-own-files-{}.jar", std::process::id()));
+        std::fs::write(&path, zip.finish().unwrap().into_inner()).unwrap();
+        let files = jar_resources(&[path.as_path()]);
+        std::fs::remove_file(&path).ok();
+        let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "assets/m/client_default.json",
+                "assets/m/readme.txt",
+                "data/m/custom.json",
+                "defaults/machine.json"
+            ]
+        );
+        assert_eq!(files[1].1, b"read me");
     }
 
     /// FML's sorter (`ModSorter`, a topological sort that takes the earliest free file each time):

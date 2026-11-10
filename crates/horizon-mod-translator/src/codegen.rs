@@ -367,6 +367,23 @@ fn accessor(owner: &str, field: &str, write: bool) -> Option<String> {
 const MOD: &str = "Lnet/neoforged/fml/common/Mod;";
 const SUBSCRIBE_EVENT: &str = "Lnet/neoforged/bus/api/SubscribeEvent;";
 /// `@EventBusSubscriber` (NeoForge 21) and its older home on `@Mod`.
+/// Classes whose objects the runtime keeps as an array of their instance fields, in the order the
+/// class declares them (then a subclass's): the game's matrices, which the runtime's own code
+/// reads and writes as sixteen and nine numbers. Their own code, taken from the player's install,
+/// reads a field as its slot.
+pub const ARRAY_CLASSES: [&str; 2] = ["org/joml/Matrix4f", "org/joml/Matrix3f"];
+
+/// A field's value before anything is written to it, by its descriptor: None for a reference.
+fn zero_of(desc: &str) -> Option<&'static str> {
+    match desc {
+        "I" | "Z" | "B" | "S" | "C" => Some("V::I(0)"),
+        "J" => Some("V::J(0)"),
+        "F" => Some("V::F(0.0)"),
+        "D" => Some("V::D(0.0)"),
+        _ => None,
+    }
+}
+
 const EVENT_BUS_SUBSCRIBER: [&str; 2] = ["Lnet/neoforged/fml/common/EventBusSubscriber;", "Lnet/neoforged/fml/common/Mod$EventBusSubscriber;"];
 
 /// The translation of a set of classes (one jar).
@@ -1442,10 +1459,9 @@ impl<'a> Program<'a> {
         for m in c.methods.iter().filter(|m| concrete && m.name == "<init>" && m.code.is_some()) {
             let _ = writeln!(
                 arms,
-                "        {:?} => {{ {ensure}let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend_from_slice(args); {}(rt, &a); o }}",
+                "        {:?} => {{ {ensure}let o = {}; let mut a = vec![o]; a.extend_from_slice(args); {}(rt, &a); o }}",
                 format!("<init>.{}", m.desc),
-                c.name,
-                self.cid(&c.name),
+                self.new_object(&c.name),
                 fn_name(&c.name, "<init>", &m.desc)
             );
         }
@@ -1563,10 +1579,9 @@ impl<'a> Program<'a> {
                 };
                 // A constructor reference (`BeltBlock::new`) initialises the class as `new` does.
                 format!(
-                    "{{ {}let o = rt.new_object_id({:?}, {}); let mut a = vec![o]; a.extend(full); {init} o }}",
+                    "{{ {}let o = {}; let mut a = vec![o]; a.extend(full); {init} o }}",
                     self.ensure(&m.owner),
-                    m.owner,
-                    self.cid(&m.owner)
+                    self.new_object(&m.owner)
                 )
             }
             (5 | 9, _) if self.private_method(&m.owner, &m.name, &m.desc) => format!("{}(rt, &full)", fn_name(&m.owner, &m.name, &m.desc)),
@@ -2316,6 +2331,9 @@ impl<'a> Program<'a> {
                 let init = if class != c.name { self.ensure(&class) } else { String::new() };
                 // An object of the game's own translated code, or of a class above which there
                 // is some: marked as built here, its fields its own (`game_built_read`).
+                if self.array_fields(&class).is_some() {
+                    return format!("{init}let v = {}; s.push(v); {go}", self.new_object(&class));
+                }
                 let built = if self.game_built(&class) {
                     " rt.put_field(v, \"$vt\", V::I(1));"
                 } else {
@@ -2474,6 +2492,21 @@ impl<'a> Program<'a> {
         // The declaring class initialises, as the JVM does (not the subclass the reference names).
         let init = if matches!(op, 0xb2 | 0xb3) && owner != c.name { self.ensure(&owner) } else { String::new() };
         let pop = "s.p()";
+        // A field of an object kept as an array of its fields ([`ARRAY_CLASSES`]) is its slot. One
+        // the runtime made shorter (a matrix without the flags JOML keeps beside it) reads as zero
+        // there: nothing known of it.
+        if matches!(op, 0xb4 | 0xb5)
+            && let Some(slot) = self.array_slot(&m.owner, &m.name)
+        {
+            let zero = zero_of(&m.desc).unwrap_or("V::NULL");
+            return if op == 0xb4 {
+                format!(
+                    "let o = {pop}; s.push(match rt.array_get(o, {slot}) {{ V::Void => {zero}, v => v }}); {go}"
+                )
+            } else {
+                format!("let v = {pop}; let o = {pop}; rt.array_set(o, {slot}, v); {go}")
+            };
+        }
         let skey = format!("{owner}.{}", m.name);
         // A primitive field nothing wrote reads as its type's zero, as the JVM's defaults (a `long`
         // counter, an `int` angle saved to NBT); a reference one stays unset (null to the code).
@@ -2544,6 +2577,63 @@ impl<'a> Program<'a> {
 
     /// Whether `class`, or a translated class above it, is of the game's own code
     /// ([`crate::game_code`]).
+    /// The instance fields of `class`'s objects when the runtime keeps them as an array
+    /// ([`ARRAY_CLASSES`]): each field's declaring class, name and descriptor, in slot order (the
+    /// array class's own first, in the order it declares them, then each class's below it down to
+    /// `class`). None for any other class.
+    fn array_fields(&self, class: &str) -> Option<Vec<(&str, &str, &str)>> {
+        let mut chain: Vec<&ClassFile> = Vec::new();
+        let mut at = self.classes.get(class);
+        loop {
+            let c = at.filter(|_| chain.len() < 1024)?;
+            chain.push(c);
+            if ARRAY_CLASSES.contains(&c.name.as_str()) {
+                break;
+            }
+            at = c.superclass.as_deref().and_then(|s| self.classes.get(s));
+        }
+        Some(
+            chain
+                .iter()
+                .rev()
+                .flat_map(|c| {
+                    c.fields
+                        .iter()
+                        .filter(|f| f.access & 0x0008 == 0)
+                        .map(|f| (c.name.as_str(), f.name.as_str(), f.desc.as_str()))
+                })
+                .collect(),
+        )
+    }
+
+    /// The expression that makes a new object of `class` before its constructor runs: one kept
+    /// as an array ([`Self::array_fields`]) with each field's slot at its zero.
+    fn new_object(&self, class: &str) -> String {
+        match self.array_fields(class) {
+            Some(fields) => {
+                let slots: Vec<&str> = fields
+                    .iter()
+                    .map(|(_, _, desc)| zero_of(desc).unwrap_or("V::NULL"))
+                    .collect();
+                format!(
+                    "rt.alloc_cid({class:?}, {}, horizon_compat::Data::Array(vec![{}]))",
+                    self.cid(class),
+                    slots.join(", ")
+                )
+            }
+            None => format!("rt.new_object_id({class:?}, {})", self.cid(class)),
+        }
+    }
+
+    /// The slot of instance field `name`, read through class `class`, in an object kept as an
+    /// array ([`Self::array_fields`]); None for a field of any other object.
+    fn array_slot(&self, class: &str, name: &str) -> Option<usize> {
+        let owner = self.field_owner(class, name);
+        self.array_fields(&owner)?
+            .iter()
+            .position(|(c, n, _)| *c == owner && *n == name)
+    }
+
     fn game_built(&self, class: &str) -> bool {
         let mut at = self.classes.get(class);
         let mut steps = 0;
@@ -2676,9 +2766,9 @@ impl<'a> Program<'a> {
                 && let Some(imp) = self.resolve(&target, "<init>", &desc)
             {
                 return Some(format!(
-                    "{{ {}let o = rt.new_object_id({target:?}, {}); let mut a = vec![o]; a.extend_from_slice(&args); {}(rt, &a); o }}",
+                    "{{ {}let o = {}; let mut a = vec![o]; a.extend_from_slice(&args); {}(rt, &a); o }}",
                     self.ensure(&target),
-                    self.cid(&target),
+                    self.new_object(&target),
                     fn_name(&imp, "<init>", &desc)
                 ));
             }

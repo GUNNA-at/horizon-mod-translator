@@ -2317,6 +2317,23 @@ fn tracker_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             unload(rt, &ty);
             V::Void
         }
+        // FML's own `loadConfig(modConfig, path, eventConstructor)`, which a mod reaches by
+        // reflection to load its config before FML would (Moonlight's `forceLoad`, with the
+        // tracker for a receiver though the method is static): the config opened from that file
+        // now, and its mod told.
+        "loadConfig" => {
+            let at = usize::from(rt.class_of(a(0)) == TRACKER);
+            let (config, path) = (a(at), text(rt, a(at + 1)));
+            let dir = path.and_then(|p| {
+                crate::files::on_disk(rt, &p)
+                    .parent()
+                    .map(Path::to_path_buf)
+            });
+            let dir = dir.filter(|_| config_dir(rt).is_some());
+            open(rt, config, dir);
+            post_event(rt, LOADING, config);
+            V::Void
+        }
         "loadDefaultServerConfigs" => {
             for c in registered(rt, |rt, c| of_type(rt, c, "SERVER")) {
                 let spec = field(rt, c, "$spec");
@@ -4149,6 +4166,71 @@ mod tests {
             !dir.join("config/ruby-server.toml").exists(),
             "not made in `config/`"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A mod loads its config before FML would by calling FML's private
+    /// `ConfigTracker.loadConfig(modConfig, path, eventConstructor)` through reflection (Moonlight's
+    /// `forceLoad`, which the mods built on it read their values after): the config is read from
+    /// that file, written first where there is none, and its values are there to read.
+    #[test]
+    fn a_config_loads_early_through_fmls_own_method() {
+        let mut rt = Rt::new();
+        crate::install();
+        let dir = game(&mut rt, "load-early");
+        let ruby = ruby_spec(&mut rt);
+        let events = register_as(&mut rt, ruby.spec, "COMMON", 0);
+        c(&mut rt, &format!("{INT_VALUE}.getAsInt.()I"), &[ruby.magic]);
+        assert!(
+            rt.thrown.take().is_some(),
+            "not loaded yet: reading a value throws"
+        );
+        let id = rt.string("ruby");
+        let configs = c(
+            &mut rt,
+            "net/neoforged/fml/config/ModConfigs.getModConfigs.(Ljava/lang/String;)Ljava/util/List;",
+            &[id],
+        );
+        let config = jutil::elements(&rt, configs)[0];
+        // `ConfigTracker.class.getDeclaredMethod("loadConfig", ModConfig.class, Path.class, Function.class)`.
+        let tracker_class = rt.class_literal(TRACKER);
+        let name = rt.string("loadConfig");
+        let params: Vec<V> = [
+            MOD_CONFIG,
+            "java/nio/file/Path",
+            "java/util/function/Function",
+        ]
+        .iter()
+        .map(|c| rt.class_literal(c))
+        .collect();
+        let params = rt.alloc("[Ljava/lang/Class;", Data::Array(params));
+        let method = crate::api::call(
+            &mut rt,
+            "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+            &[tracker_class, name, params],
+        );
+        let tracker = get_static(&mut rt, TRACKER, "INSTANCE").unwrap();
+        let path = crate::files::new_path(
+            &mut rt,
+            &dir.join("config/ruby-common.toml").to_string_lossy(),
+        );
+        let args = rt.alloc(
+            "[Ljava/lang/Object;",
+            Data::Array(vec![config, path, V::NULL]),
+        );
+        crate::api::call(
+            &mut rt,
+            "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+            &[method, tracker, args],
+        );
+        assert!(rt.thrown.is_none());
+        assert_eq!(magic(&mut rt, &ruby), V::I(42));
+        assert!(
+            dir.join("config/ruby-common.toml").exists(),
+            "the file is made"
+        );
+        assert_eq!(heard(&rt, events), [LOADING]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

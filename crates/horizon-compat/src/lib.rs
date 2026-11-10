@@ -75,6 +75,7 @@ pub mod gson;
 pub mod hand;
 pub mod jdk;
 pub mod jlang;
+pub mod jmath;
 pub mod jregex;
 pub mod jsystem;
 pub mod jutil;

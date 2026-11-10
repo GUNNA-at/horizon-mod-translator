@@ -226,6 +226,37 @@ fn set_bit_words(rt: &mut Rt, v: V, mut words: Vec<u64>) {
     }
 }
 
+/// Bit `i` of a `BitSet` as it was, after writing it in place: `to` when given, its opposite when
+/// `flip`. The words stay as [`set_bit_words`] leaves them, with no zero word at the end.
+fn one_bit(rt: &mut Rt, set: V, i: usize, to: Option<bool>, flip: bool) -> bool {
+    let Some(data) = rt.heap.get_mut(set.r() as usize).map(|o| &mut o.data) else {
+        return false;
+    };
+    if !matches!(data, Data::Array(_)) {
+        *data = Data::Array(Vec::new());
+    }
+    let Data::Array(words) = data else {
+        return false;
+    };
+    let (word, mask) = (i / 64, 1i64 << (i % 64));
+    let was = words.get(word).is_some_and(|w| w.j() & mask != 0);
+    let now = match to {
+        Some(on) => on,
+        None if flip => !was,
+        None => return was,
+    };
+    if now && words.len() <= word {
+        words.resize(word + 1, V::J(0));
+    }
+    if let Some(w) = words.get_mut(word) {
+        *w = V::J(if now { w.j() | mask } else { w.j() & !mask });
+    }
+    while !now && words.last().is_some_and(|w| w.j() == 0) {
+        words.pop();
+    }
+    was
+}
+
 fn new_bitset(rt: &mut Rt, words: Vec<u64>) -> V {
     let b = rt.new_object("java/util/BitSet");
     set_bit_words(rt, b, words);
@@ -236,6 +267,24 @@ fn new_bitset(rt: &mut Rt, words: Vec<u64>) -> V {
 /// contraption's block entities to draw in one).
 fn bitset_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // One bit, read or written where the set keeps it: a mod fills sets of millions of bits one
+    // by one (Chisels & Bits' sphere shapes: 19 million `set` calls for each).
+    if let ("set" | "clear" | "flip" | "get", "(I)V" | "(IZ)V" | "(I)Z", Ok(i)) =
+        (name, desc, usize::try_from(a(1).i()))
+    {
+        let to = match (name, desc) {
+            ("set", "(IZ)V") => Some(a(2).i() != 0),
+            ("set", _) => Some(true),
+            ("clear", _) => Some(false),
+            _ => None,
+        };
+        let was = one_bit(rt, a(0), i, to, name == "flip");
+        return Some(if name == "get" {
+            V::I(was as i32)
+        } else {
+            V::Void
+        });
+    }
     let mut w = bit_words(rt, a(0));
     let get = |w: &[u64], i: usize| w.get(i / 64).is_some_and(|x| x >> (i % 64) & 1 != 0);
     let put = |w: &mut Vec<u64>, i: usize, on: bool| {
@@ -4475,6 +4524,93 @@ mod tests {
         assert_eq!(c(&mut rt, "java/util/BitSet.length.()I", &[b]), V::I(5));
         c(&mut rt, "java/util/BitSet.clear.()V", &[b]);
         assert_eq!(c(&mut rt, "java/util/BitSet.isEmpty.()Z", &[b]), V::I(1));
+        // A bit written by value, cleared and flipped: a set whose high bits went is the set
+        // that never had them (`equals`, `length`), as the JDK trims its words in use.
+        let (wide, small) = (
+            rt.new_object("java/util/BitSet"),
+            rt.new_object("java/util/BitSet"),
+        );
+        for set in [wide, small] {
+            c(&mut rt, "java/util/BitSet.<init>.(I)V", &[set, V::I(4096)]);
+            c(
+                &mut rt,
+                "java/util/BitSet.set.(IZ)V",
+                &[set, V::I(3), V::I(1)],
+            );
+        }
+        c(
+            &mut rt,
+            "java/util/BitSet.set.(I)V",
+            &[wide, V::I(2_000_000)],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/BitSet.length.()I", &[wide]),
+            V::I(2_000_001)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/BitSet.get.(I)Z",
+                &[wide, V::I(2_000_000)]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/BitSet.get.(I)Z",
+                &[wide, V::I(1_999_999)]
+            ),
+            V::I(0)
+        );
+        c(
+            &mut rt,
+            "java/util/BitSet.flip.(I)V",
+            &[wide, V::I(2_000_000)],
+        );
+        c(
+            &mut rt,
+            "java/util/BitSet.set.(IZ)V",
+            &[wide, V::I(900), V::I(0)],
+        );
+        c(&mut rt, "java/util/BitSet.flip.(I)V", &[wide, V::I(70)]);
+        c(&mut rt, "java/util/BitSet.clear.(I)V", &[wide, V::I(70)]);
+        assert_eq!(c(&mut rt, "java/util/BitSet.length.()I", &[wide]), V::I(4));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/BitSet.equals.(Ljava/lang/Object;)Z",
+                &[wide, small]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/BitSet.hashCode.()I", &[wide]),
+            c(&mut rt, "java/util/BitSet.hashCode.()I", &[small])
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/BitSet.cardinality.()I", &[wide]),
+            V::I(1)
+        );
+        // A set of millions, bit by bit, is filled in the time of its bits (it was the time of
+        // its bits times its words: a mod's sphere of 16 million took hours).
+        let started = std::time::Instant::now();
+        for i in 0..2_000_000 {
+            c(
+                &mut rt,
+                "java/util/BitSet.set.(IZ)V",
+                &[wide, V::I(i), V::I(i % 3)],
+            );
+        }
+        assert_eq!(
+            c(&mut rt, "java/util/BitSet.cardinality.()I", &[wide]),
+            V::I(1_333_333)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

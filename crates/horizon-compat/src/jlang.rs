@@ -370,6 +370,38 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
         prefix.push_str(&descriptor_of(rt.str_of(p).unwrap_or("java/lang/Object")));
     }
     prefix.push(')');
+    // A method of the game's or of a library's, private ones included (Moonlight loads a config
+    // early through FML's own `ConfigTracker.loadConfig`): the runtime's answer for it, where it
+    // has one. Only the parameters are known of such a method, so it is asked for as one that
+    // returns nothing, then as one that returns an object; its receiver goes first when given.
+    if !class.is_empty() && !rt.is_mod_class(&class) {
+        let mut all = Vec::with_capacity(args.len() + 1);
+        if obj.r() != 0 {
+            all.push(obj);
+        }
+        for (v, k) in args
+            .iter()
+            .zip(kinds(&prefix[prefix.find('(').unwrap_or(0)..]))
+        {
+            all.push(crate::mixin::unbox(rt, *v, k));
+        }
+        for returned in ["V", "Ljava/lang/Object;"] {
+            let key = rt.static_key(&format!("{class}.{prefix}{returned}"));
+            let before = rt.unmapped.get(key).copied().unwrap_or(0);
+            let r = crate::api::call(rt, key, &all);
+            if rt.unmapped.get(key).copied().unwrap_or(0) == before {
+                return Some(if matches!(r, V::Void) { V::NULL } else { r });
+            }
+            // Not answered: the miss is this lookup's, not the mod's call.
+            match rt.unmapped.get_mut(key) {
+                Some(n) if *n > 1 => *n -= 1,
+                _ => {
+                    rt.unmapped.remove(key);
+                }
+            }
+        }
+        return None;
+    }
     if obj.r() == 0 {
         return None;
     }
@@ -767,6 +799,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }),
         "java/lang/Boolean" => Some(match name {
             "parseBoolean" => V::I(rt.str_of(a(0)).is_some_and(|s| s.eq_ignore_ascii_case("true")) as i32),
+            // `Boolean.valueOf(String)`: the text read as `parseBoolean` reads it, boxed.
+            "valueOf" if desc.starts_with("(Ljava/lang/String;)") => {
+                let on = rt
+                    .str_of(a(0))
+                    .is_some_and(|s| s.eq_ignore_ascii_case("true"));
+                crate::api_common::boolean(rt, on)
+            }
             "toString" if desc.starts_with("(Z)") => {
                 let s = (a(0).i() != 0).to_string();
                 rt.string(&s)
@@ -2725,21 +2764,27 @@ fn math(name: &str, ks: &[char], args: &[V]) -> Option<V> {
             _ => return None,
         },
         "sqrt" => V::D(d(0).sqrt()),
-        "cbrt" => V::D(d(0).cbrt()),
-        "pow" => V::D(d(0).powf(d(1))),
-        "exp" => V::D(d(0).exp()),
-        "log" => V::D(d(0).ln()),
-        "log10" => V::D(d(0).log10()),
-        "sin" => V::D(d(0).sin()),
-        "cos" => V::D(d(0).cos()),
-        "tan" => V::D(d(0).tan()),
-        "asin" => V::D(d(0).asin()),
-        "acos" => V::D(d(0).acos()),
-        "atan" => V::D(d(0).atan()),
-        "atan2" => V::D(d(0).atan2(d(1))),
+        // As HotSpot rounds them on this machine ([`crate::jmath`]), not as the platform's libm does.
+        "cbrt" => V::D(crate::jmath::cbrt(d(0))),
+        "pow" => V::D(crate::jmath::pow(d(0), d(1))),
+        "exp" => V::D(crate::jmath::exp(d(0))),
+        "log" => V::D(crate::jmath::log(d(0))),
+        "log10" => V::D(crate::jmath::log10(d(0))),
+        "sin" => V::D(crate::jmath::sin(d(0))),
+        "cos" => V::D(crate::jmath::cos(d(0))),
+        "tan" => V::D(crate::jmath::tan(d(0))),
+        "asin" => V::D(crate::jmath::asin(d(0))),
+        "acos" => V::D(crate::jmath::acos(d(0))),
+        "atan" => V::D(crate::jmath::atan(d(0))),
+        "atan2" => V::D(crate::jmath::atan2(d(0), d(1))),
         "toRadians" => V::D(d(0).to_radians()),
         "toDegrees" => V::D(d(0).to_degrees()),
-        "hypot" => V::D(d(0).hypot(d(1))),
+        "hypot" => V::D(crate::jmath::hypot(d(0), d(1))),
+        // One rounding for the product and the sum together.
+        "fma" => match k {
+            'F' => V::F(a(0).f().mul_add(a(1).f(), a(2).f())),
+            _ => V::D(d(0).mul_add(d(1), d(2))),
+        },
         "signum" => match k {
             'F' => V::F(if a(0).f() == 0.0 { 0.0 } else { a(0).f().signum() }),
             _ => V::D(if d(0) == 0.0 { 0.0 } else { d(0).signum() }),
@@ -3541,6 +3586,61 @@ mod tests {
         let dot = rt.string("\\.");
         let parts = c(&mut rt, "java/lang/String.split.(Ljava/lang/String;)[Ljava/lang/String;", &[s, dot]);
         assert_eq!(crate::jutil::elements(&rt, parts).len(), 4);
+    }
+
+    /// A lambda is an instance of the interface it was made for and of that interface's own
+    /// supertypes (`Class.isInstance`, `instanceof`): GuideME checks each extension a mod
+    /// registers against its extension point's interface, and AE2's were lambdas.
+    #[test]
+    fn a_lambda_is_an_instance_of_its_interface() {
+        let mut rt = Rt::new();
+        rt.interfaces.insert("t/Mapper", &["t/Named"]);
+        let lambda = rt.lambda_id(
+            "t/Mods.lambda$register$0.(Ljava/lang/Object;)V",
+            7,
+            Vec::new(),
+        );
+        rt.lambda_info.insert(lambda.r(), ("t/Mapper", "map"));
+        let is_instance = "java/lang/Class.isInstance.(Ljava/lang/Object;)Z";
+        for (class, expected) in [
+            ("t/Mapper", 1),
+            ("t/Named", 1),
+            ("java/lang/Object", 1),
+            ("java/lang/Runnable", 0),
+        ] {
+            let c = rt.class_literal(class);
+            assert_eq!(
+                crate::api::call(&mut rt, is_instance, &[c, lambda]),
+                V::I(expected),
+                "{class}"
+            );
+            assert_eq!(
+                rt.instance_of_static(lambda, class),
+                expected == 1,
+                "{class}"
+            );
+        }
+    }
+
+    /// `Boolean.valueOf(String)` reads the text as `parseBoolean` does ("true" in any case, and
+    /// nothing else, is true), and gives the box: it gave the text back, so `booleanValue()` of it
+    /// was false whatever a mod's option said (JOML's `-Djoml.nounsafe`, read so).
+    #[test]
+    fn a_boolean_is_read_from_its_text() {
+        let mut rt = Rt::new();
+        let value_of = "java/lang/Boolean.valueOf.(Ljava/lang/String;)Ljava/lang/Boolean;";
+        let read = |rt: &mut Rt, text: Option<&str>| {
+            let s = text.map_or(V::NULL, |t| rt.string(t));
+            let b = crate::api::call(rt, value_of, &[s]);
+            crate::api::call(rt, "java/lang/Boolean.booleanValue.()Z", &[b])
+        };
+        assert_eq!(read(&mut rt, Some("true")), V::I(1));
+        assert_eq!(read(&mut rt, Some("TRUE")), V::I(1));
+        assert_eq!(read(&mut rt, Some("false")), V::I(0));
+        assert_eq!(read(&mut rt, Some("yes")), V::I(0));
+        assert_eq!(read(&mut rt, Some(" true")), V::I(0));
+        assert_eq!(read(&mut rt, None), V::I(0));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `Boolean.TRUE.equals(x)` where `x` came back raw from a method reference used as a
