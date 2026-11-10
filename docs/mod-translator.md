@@ -10617,6 +10617,26 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `LinkedBlockingDeque` and fastutil's immutable lists as lists; `Stopwatch.elapsed()` as a
     `Duration`; `ReferenceQueue` (never fed) and `PhantomReference`.
   - Tests: 834 compat.
+- [x] 2026-11-10 Part 179: the turns of the runtime's own loops are collected too.
+  - What Part 177 left: a loop the runtime itself runs over the mods' code (`Map.forEach`, a
+    stream's `filter`, a codec reading a file, a hook running its listeners), each turn too
+    small to be collected for itself. The reload listener that filled the memory is such
+    loops inside one another: 98 files, the variants of each, every state of a block for
+    each variant.
+  - The runtime's code becomes a scope at its first call into the mods' code, with nothing
+    for that code to do: from then on the objects it makes itself at that depth, and what
+    each turn answers, are noted as they come. As a turn ends, the objects made since the
+    scope began are collected: the mods' frames are gone, and of those objects the looping
+    code can hold only what was noted (what it held before is older, and kept whole). Its
+    own frames are read as well, for a value it took from the heap into a local. The scope
+    is over when the call of the runtime's that opened it ends, or at the next safe point
+    for a hook's own code.
+  - A vertex format answers where its elements lie (`contains`, `getOffset`, `getElements`,
+    and `VertexFormatElement`'s six constants): NeoForge's `IQuadTransformer`, carried with
+    the mods, finds a quad's colour, texture and light in its ints by them, and with none
+    answered FramedBlocks read every quad's texture at -1 (935 errors in launch 17).
+  - fastutil's `IntList.of(...)` and its lists and sets made of an array.
+  - Tests: 23 compat-core, 835 compat.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

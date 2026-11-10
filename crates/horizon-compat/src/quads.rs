@@ -39,10 +39,108 @@ const FORMATS: [(&str, i32); 12] = [
     ("POSITION_TEX_COLOR_NORMAL", 28),
 ];
 
+const ELEMENT: &str = "com/mojang/blaze3d/vertex/VertexFormatElement";
+/// `VertexFormatElement`'s constants: its id, its index among those of its usage, the type of
+/// a component (with its bytes), the usage, and how many components.
+const ELEMENTS: [(&str, i32, i32, (&str, i32), &str, i32); 6] = [
+    ("POSITION", 0, 0, ("FLOAT", 4), "POSITION", 3),
+    ("COLOR", 1, 0, ("UBYTE", 1), "COLOR", 4),
+    ("UV0", 2, 0, ("FLOAT", 4), "UV", 2),
+    ("UV1", 3, 1, ("SHORT", 2), "UV", 2),
+    ("UV2", 4, 2, ("SHORT", 2), "UV", 2),
+    ("NORMAL", 5, 0, ("BYTE", 1), "NORMAL", 3),
+];
+/// The elements of each of [`FORMATS`], in the order a vertex has them (the offset of each is
+/// the bytes of those before it).
+const FORMAT_ELEMENTS: [(&str, &[&str]); 12] = [
+    ("BLOCK", &["POSITION", "COLOR", "UV0", "UV2", "NORMAL"]),
+    (
+        "NEW_ENTITY",
+        &["POSITION", "COLOR", "UV0", "UV1", "UV2", "NORMAL"],
+    ),
+    ("PARTICLE", &["POSITION", "UV0", "COLOR", "UV2"]),
+    ("POSITION", &["POSITION"]),
+    ("POSITION_COLOR", &["POSITION", "COLOR"]),
+    ("POSITION_COLOR_NORMAL", &["POSITION", "COLOR", "NORMAL"]),
+    ("POSITION_COLOR_LIGHTMAP", &["POSITION", "COLOR", "UV2"]),
+    ("POSITION_TEX", &["POSITION", "UV0"]),
+    ("POSITION_TEX_COLOR", &["POSITION", "UV0", "COLOR"]),
+    (
+        "POSITION_COLOR_TEX_LIGHTMAP",
+        &["POSITION", "COLOR", "UV0", "UV2"],
+    ),
+    (
+        "POSITION_TEX_LIGHTMAP_COLOR",
+        &["POSITION", "UV0", "UV2", "COLOR"],
+    ),
+    (
+        "POSITION_TEX_COLOR_NORMAL",
+        &["POSITION", "UV0", "COLOR", "NORMAL"],
+    ),
+];
+
+/// One of `VertexFormatElement`'s constants (`UV` is `UV0`).
+fn element(rt: &mut Rt, name: &str) -> Option<V> {
+    let name = if name == "UV" { "UV0" } else { name };
+    let &(field, id, index, (ty, _), usage, count) = ELEMENTS.iter().find(|e| e.0 == name)?;
+    Some(rt.intern(format!("compat:vertex-element/{field}"), |rt| {
+        let type_at = ["FLOAT", "UBYTE", "BYTE", "USHORT", "SHORT", "UINT", "INT"]
+            .iter()
+            .position(|t| *t == ty)
+            .unwrap_or(0);
+        let usage_at = ["POSITION", "NORMAL", "COLOR", "UV", "GENERIC"]
+            .iter()
+            .position(|u| *u == usage)
+            .unwrap_or(0);
+        let ty = crate::api::api_enum(
+            rt,
+            "com/mojang/blaze3d/vertex/VertexFormatElement$Type",
+            ty,
+            type_at as i32,
+        );
+        let usage = crate::api::api_enum(
+            rt,
+            "com/mojang/blaze3d/vertex/VertexFormatElement$Usage",
+            usage,
+            usage_at as i32,
+        );
+        let e = crate::records::make(
+            rt,
+            ELEMENT,
+            &[V::I(id), V::I(index), ty, usage, V::I(count)],
+        );
+        let field = rt.string(field);
+        rt.put_field(e, "$name", field);
+        e
+    }))
+}
+
+/// Where the element `e` lies in a vertex of the format `format`, in bytes; None when the
+/// format has no such element.
+fn element_offset(rt: &Rt, format: V, e: V) -> Option<i32> {
+    let (format, wanted) = (
+        rt.str_of(rt.get_field(format, "$name"))?,
+        rt.str_of(rt.get_field(e, "$name"))?,
+    );
+    let list = FORMAT_ELEMENTS.iter().find(|(f, _)| *f == format)?.1;
+    let mut at = 0;
+    for name in list {
+        if *name == wanted {
+            return Some(at);
+        }
+        let &(_, _, _, (_, bytes), _, count) = ELEMENTS.iter().find(|x| x.0 == *name)?;
+        at += bytes * count;
+    }
+    None
+}
+
 /// Faces read from models mods built, by the number a drawable handle keeps (`$mesh`, from 1).
 static MESHES: Mutex<Vec<Arc<[Quad]>>> = Mutex::new(Vec::new());
 
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
+    if owner == ELEMENT {
+        return element(rt, field);
+    }
     if owner != "com/mojang/blaze3d/vertex/DefaultVertexFormat" {
         return None;
     }
@@ -58,8 +156,11 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, VERTEX_FORMAT | BAKED_QUAD | SIMPLE_MODEL | SIMPLE_BUILDER)
+pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        VERTEX_FORMAT | BAKED_QUAD | SIMPLE_MODEL | SIMPLE_BUILDER
+    ) || (owner == ELEMENT && matches!(name, "byteSize" | "mask"))
 }
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -68,6 +169,50 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     Some(match (owner, name) {
         (VERTEX_FORMAT, "getVertexSize") => rt.get_field(a(0), "$size"),
         (VERTEX_FORMAT, "getIntegerSize") => V::I(rt.get_field(a(0), "$size").i() / 4),
+        // An element's bytes (its type's by its count), and its bit among the elements.
+        (ELEMENT, "byteSize") => {
+            let named = rt
+                .str_of(rt.get_field(a(0), "$name"))
+                .unwrap_or("")
+                .to_owned();
+            V::I(
+                ELEMENTS
+                    .iter()
+                    .find(|e| e.0 == named)
+                    .map_or(0, |e| e.3.1 * e.5),
+            )
+        }
+        (ELEMENT, "mask") => V::I(1 << rt.get_field(a(0), "id").i().clamp(0, 31)),
+        // Where its elements lie (NeoForge's `IQuadTransformer` finds a quad's colour, texture
+        // and light in its ints by these: with none answered, a mod read them at -1).
+        (VERTEX_FORMAT, "contains") => V::I(element_offset(rt, a(0), a(1)).is_some() as i32),
+        (VERTEX_FORMAT, "getOffset") => V::I(element_offset(rt, a(0), a(1)).unwrap_or(-1)),
+        (VERTEX_FORMAT, "getElements" | "getElementAttributeNames") => {
+            let format = rt
+                .str_of(rt.get_field(a(0), "$name"))
+                .unwrap_or("")
+                .to_owned();
+            let names = FORMAT_ELEMENTS
+                .iter()
+                .find(|(f, _)| *f == format)
+                .map_or(&[][..], |f| f.1);
+            let items: Vec<V> = match name {
+                "getElements" => names.iter().filter_map(|n| element(rt, n)).collect(),
+                // The names the shaders know them by.
+                _ => names
+                    .iter()
+                    .map(|n| {
+                        rt.string(match *n {
+                            "POSITION" => "Position",
+                            "COLOR" => "Color",
+                            "NORMAL" => "Normal",
+                            other => other,
+                        })
+                    })
+                    .collect(),
+            };
+            crate::jutil::new_list(rt, items)
+        }
         // `BakedQuad(vertices, tintIndex, direction, sprite, shade[, hasAmbientOcclusion])`.
         (BAKED_QUAD, "<init>") => {
             let this = a(0);
@@ -415,6 +560,132 @@ fn pack_normal(n: [f32; 3]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A vertex format tells where its elements lie, which is how NeoForge's `IQuadTransformer`
+    /// (the game's own code, carried) finds a quad's texture coordinates in its ints: a
+    /// block's vertex has position, colour, texture at byte 16, light at 24, normal at 28.
+    #[test]
+    fn a_vertex_format_knows_where_its_elements_lie() {
+        let mut rt = Rt::new();
+        let block = crate::api::get_static(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/DefaultVertexFormat.BLOCK",
+        );
+        let offset = |rt: &mut Rt, format: V, e: &'static str| {
+            let e = crate::api::get_static(rt, e);
+            (
+                crate::api::call(rt, "com/mojang/blaze3d/vertex/VertexFormat.contains.(Lcom/mojang/blaze3d/vertex/VertexFormatElement;)Z", &[format, e]).i(),
+                crate::api::call(rt, "com/mojang/blaze3d/vertex/VertexFormat.getOffset.(Lcom/mojang/blaze3d/vertex/VertexFormatElement;)I", &[format, e]).i(),
+            )
+        };
+        assert_eq!(
+            offset(
+                &mut rt,
+                block,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.POSITION"
+            ),
+            (1, 0)
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                block,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.COLOR"
+            ),
+            (1, 12)
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                block,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.UV0"
+            ),
+            (1, 16)
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                block,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.UV2"
+            ),
+            (1, 24)
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                block,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.NORMAL"
+            ),
+            (1, 28)
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                block,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.UV1"
+            ),
+            (0, -1)
+        );
+        let entity = crate::api::get_static(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/DefaultVertexFormat.NEW_ENTITY",
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                entity,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.UV1"
+            ),
+            (1, 24)
+        );
+        assert_eq!(
+            offset(
+                &mut rt,
+                entity,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.NORMAL"
+            ),
+            (1, 32)
+        );
+        let elements = crate::api::call(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/VertexFormat.getElements.()Ljava/util/List;",
+            &[block],
+        );
+        let elements = crate::jutil::elements(&rt, elements);
+        assert_eq!(elements.len(), 5);
+        let uv =
+            crate::api::get_static(&mut rt, "com/mojang/blaze3d/vertex/VertexFormatElement.UV0");
+        assert_eq!(elements[2], uv);
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.byteSize.()I",
+                &[uv]
+            ),
+            V::I(8)
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.count.()I",
+                &[uv]
+            ),
+            V::I(2)
+        );
+        let float = crate::api::get_static(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/VertexFormatElement$Type.FLOAT",
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "com/mojang/blaze3d/vertex/VertexFormatElement.type.()Lcom/mojang/blaze3d/vertex/VertexFormatElement$Type;",
+                &[uv]
+            ),
+            float
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
     use crate::host::MemoryHost;
     use crate::render::{GET_QUADS_KEY, sprite_named};
 

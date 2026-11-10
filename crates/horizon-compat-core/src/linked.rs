@@ -763,9 +763,9 @@ fn string_at(rt: &mut Rt, v: V, depth: u32) -> V {
     if depth < 16 {
         // It holds the collection's elements while it asks each for its text: the runtime's
         // own code, as far as a collection goes.
-        rt.native += 1;
+        let open = rt.native_begun();
         let text = collection_string(rt, v, depth);
-        rt.native = rt.native.saturating_sub(1);
+        rt.native_done(open);
         if let Some(text) = text {
             return rt.alloc("java/lang/String", Data::Str(text));
         }

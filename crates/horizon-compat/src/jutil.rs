@@ -1848,6 +1848,29 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         {
             t.strategy = s;
         }
+        // From an array, whole or a stretch of it (`new IntImmutableList(values)`,
+        // `new IntArrayList(values, offset, length)`).
+        if let Some(&arg) = args.get(1)
+            && arg.r() != 0
+            && desc.starts_with("([")
+        {
+            let mut items = elements(rt, arg);
+            if desc.ends_with("II)V") {
+                items = items
+                    .into_iter()
+                    .skip(a(2).i().max(0) as usize)
+                    .take(a(3).i().max(0) as usize)
+                    .collect();
+            }
+            match list_mut(rt, this) {
+                Some(l) => l.extend(items),
+                None => {
+                    for e in items {
+                        table_put(rt, this, e, V::I(1));
+                    }
+                }
+            }
+        }
         // A copy constructor, or a sorted collection's comparator.
         if let Some(&arg) = args.get(1)
             && arg.r() != 0
@@ -2152,6 +2175,25 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         {
             let items = if name == "copyOf" || (name == "newArrayList" && desc.starts_with("(Ljava/lang/Iterable")) { elements(rt, a(0)) } else { varargs(rt) };
             new_list(rt, items)
+        }
+        // fastutil's typed lists and sets of the values given (`IntList.of(1, 2, 3)`,
+        // `IntSet.of(ids)`): each value as it is, or the elements of the one array.
+        (o, "of")
+            if o.starts_with("it/unimi/dsi/fastutil/")
+                && !o.contains('2')
+                && (o.ends_with("List") || o.ends_with("Set"))
+                && !desc.contains(")V") =>
+        {
+            let items = if desc.starts_with("([") {
+                elements(rt, a(0))
+            } else {
+                args.to_vec()
+            };
+            if o.ends_with("Set") {
+                new_set(rt, &items)
+            } else {
+                new_list(rt, items)
+            }
         }
         ("java/util/Set" | "com/google/common/collect/ImmutableSet" | "com/google/common/collect/Sets", "of" | "copyOf" | "newHashSet") => {
             let items = if name == "copyOf" || desc.starts_with("(Ljava/lang/Iterable") { elements(rt, a(0)) } else { varargs(rt) };

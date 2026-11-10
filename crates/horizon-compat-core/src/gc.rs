@@ -57,6 +57,28 @@ pub struct Entry {
     survived: u64,
 }
 
+/// A stretch of the runtime's own code that calls into the mods' code again and again (a
+/// `forEach` over a map, a stream's `filter`, a codec reading a file, a hook running its
+/// listeners), from the first of those calls on. Each turn's garbage is too little to collect
+/// for itself, and all the turns' together is what a pack's reload listener filled the memory
+/// with. The objects made since the scope began are collected as a turn ends, where the
+/// mods' frames are gone and the runtime's own code holds, of those objects, only what it
+/// made itself at this depth and what the turns answered: both are kept here as they come
+/// ([`Rt::scope_kept`]), so the code that loops needs to tell of nothing.
+#[derive(Clone, Debug)]
+pub struct Scope {
+    /// [`Object::born`] of the first object made in it.
+    born: u32,
+    /// How many entries were in progress when it began: it is the runtime's code at that
+    /// depth, until that code is done ([`Rt::native_done`]).
+    depth: usize,
+    /// Where [`Rt::scope_kept`] began to be its own.
+    kept: usize,
+    /// As an [`Entry`]'s.
+    examined: u64,
+    survived: u64,
+}
+
 /// What `HORIZON_COMPAT_GC` asks for of the collections inside a hook: `off` for none, `exit`
 /// for those at a call's end alone (none reads the stack); every kind otherwise.
 fn young_mode() -> u8 {
@@ -256,6 +278,21 @@ impl Rt {
             self.entries.pop();
             self.native = self.native.max(1);
         }
+        // The runtime's own code calls into the mods': from here on it is a scope, if it is
+        // not one yet (what it holds of the objects made before is older, and kept whole).
+        let depth = self.entries.len();
+        if self.native >= 1 && self.scopes.last().is_none_or(|s| s.depth != depth) {
+            self.scopes_done(depth + 1);
+            if self.scopes.last().is_none_or(|s| s.depth < depth) {
+                self.scopes.push(Scope {
+                    born: self.next_born(),
+                    depth,
+                    kept: self.scope_kept.len(),
+                    examined: self.made,
+                    survived: 0,
+                });
+            }
+        }
         self.entries.push(Entry {
             born: self.next_born(),
             stack,
@@ -267,12 +304,103 @@ impl Rt {
         let r = f(self);
         if let Some(e) = self.entries.pop() {
             self.native = e.native;
-            if self.made - e.examined >= self.young_min {
+            let scoped = self.scopes.last().is_some_and(|s| s.depth == depth);
+            if scoped || self.made - e.examined >= self.young_min {
                 let kept = kept(&r);
-                self.ended(&e, kept);
+                if self.made - e.examined >= self.young_min {
+                    self.ended(&e, kept);
+                }
+                if scoped {
+                    self.turn_ended(kept);
+                }
             }
         }
         r
+    }
+
+    /// A turn of a [`Scope`] has ended: what it answered is the scope's to hold, and the
+    /// scope's objects are collected when the turns so far made enough of them.
+    #[inline]
+    fn turn_ended(&mut self, answered: V) {
+        if let V::R(r) = answered
+            && r != 0
+        {
+            self.scope_kept.push(r);
+        }
+        if let Some(s) = self.scopes.last()
+            && self.made - s.examined >= self.young_min
+        {
+            self.collect_scope();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn collect_scope(&mut self) {
+        let Some(s) = self.scopes.last() else { return };
+        let (born, kept, interval) = (s.born, s.kept, self.young_interval(s.survived));
+        if young_mode() < 1
+            || self.made - s.examined < interval
+            || self.made - self.young_last < interval / 4
+        {
+            return;
+        }
+        // The frames of the code that loops lie between here and where the entry it runs
+        // under began: read too, for a value it took from the heap and holds in a local.
+        let top = self.entries.last().map(|e| e.stack);
+        let before = self.young_runs.3;
+        let freed = self.collect_young(born, &[], Some(kept), top, "a turn's end");
+        let (made, survived) = (
+            self.made,
+            (self.young_runs.3 - before).saturating_sub(freed as u64),
+        );
+        if let Some(s) = self.scopes.last_mut() {
+            s.examined = made;
+            s.survived = survived;
+        }
+    }
+
+    /// An object was made while scopes are open: the innermost scope's, when it is that
+    /// scope's own code that made it (no entry is in progress under it).
+    #[inline]
+    pub(crate) fn scope_made(&mut self, r: u32) {
+        if self
+            .scopes
+            .last()
+            .is_some_and(|s| s.depth == self.entries.len())
+        {
+            self.scope_kept.push(r);
+        }
+    }
+
+    /// The scopes of depth `depth` and deeper are over: the code they were is done.
+    #[inline]
+    pub(crate) fn scopes_done(&mut self, depth: usize) {
+        while self.scopes.last().is_some_and(|s| s.depth >= depth) {
+            if let Some(s) = self.scopes.pop() {
+                self.scope_kept.truncate(s.kept);
+            }
+        }
+    }
+
+    /// A call of the runtime's own code begins ([`Rt::native`] counts them): how many scopes
+    /// are open, for [`Rt::native_done`].
+    #[inline]
+    pub fn native_begun(&mut self) -> usize {
+        self.native += 1;
+        self.scopes.len()
+    }
+
+    /// That call has ended: the scopes opened since it began (`scopes` were open then) were
+    /// its code's, and are over.
+    #[inline]
+    pub fn native_done(&mut self, scopes: usize) {
+        self.native = self.native.saturating_sub(1);
+        while self.scopes.len() > scopes {
+            if let Some(s) = self.scopes.pop() {
+                self.scope_kept.truncate(s.kept);
+            }
+        }
     }
 
     /// The end of an entry that made many objects: collects them when they are enough for
@@ -285,7 +413,7 @@ impl Rt {
             && self.made - e.examined >= interval
             && self.made - self.young_last >= interval / 4
         {
-            self.collect_young(e.born, &[kept], None, "a call's end");
+            self.collect_young(e.born, &[kept], None, None, "a call's end");
         }
     }
 
@@ -303,7 +431,13 @@ impl Rt {
             && made >= self.born_base
         {
             let born = (made - self.born_base + 1).min(u64::from(u32::MAX)) as u32;
-            self.collect_young(born, &[result], None, "the end of a call into the runtime");
+            self.collect_young(
+                born,
+                &[result],
+                None,
+                None,
+                "the end of a call into the runtime",
+            );
         }
     }
 
@@ -334,7 +468,7 @@ impl Rt {
         if young_mode() >= 2 && since >= interval && self.made - self.young_last >= interval / 4 {
             let (before, freed) = (
                 self.young_runs.3,
-                self.collect_young(born, &[], Some(top), "a call"),
+                self.collect_young(born, &[], None, Some(top), "a call"),
             );
             let (made, survived) = (
                 self.made,
@@ -378,6 +512,7 @@ impl Rt {
         &mut self,
         born: u32,
         roots: &[V],
+        kept: Option<usize>,
         stack_top: Option<usize>,
         when: &str,
     ) -> usize {
@@ -492,6 +627,15 @@ impl Rt {
         }
         self.roots(&mut |v| todo.extend(young_ref(v)));
         todo.extend(roots.iter().filter_map(|v| young_ref(*v)));
+        // What the scope's own code made or was answered ([`Scope`]).
+        if let Some(from) = kept {
+            todo.extend(
+                self.scope_kept[from..]
+                    .iter()
+                    .copied()
+                    .filter(|r| young.get(*r as usize)),
+            );
+        }
         // Mark through the young objects alone.
         let mut marked = Bits::new(n);
         loop {
@@ -554,9 +698,9 @@ impl Rt {
             self.side_fields.retain(|o, _| !gone(*o));
             self.lambda_info.retain(|l, _| !gone(*l));
         }
-        match stack_top {
-            Some(_) => self.young_runs.0 += 1,
-            None => self.young_runs.1 += 1,
+        match (stack_top, kept) {
+            (Some(_), None) => self.young_runs.0 += 1,
+            _ => self.young_runs.1 += 1,
         }
         self.young_runs.2 += freed as u64;
         if Rt::tracing() {
@@ -620,6 +764,8 @@ impl Rt {
         if !self.entries.is_empty() {
             return n - self.free.len();
         }
+        // (The scopes left are of code that is done: this is a safe point.)
+        self.scopes_done(0);
         let mut marked = vec![false; n];
         let mut todo: Vec<u32> = Vec::new();
         self.roots(&mut |v| {
@@ -815,6 +961,95 @@ mod tests {
         assert_eq!(rt.young_runs.1, 1);
     }
 
+    /// The runtime's own code that loops over turns of the mods' code (as a hook runs its
+    /// listeners, or a `forEach` its lambda): no turn makes enough garbage to be collected
+    /// for itself, and all of them together do. It goes as turns end, and what the looping
+    /// code holds stays without its telling: what it made itself, and what the turns answered.
+    #[test]
+    fn a_loop_of_the_runtimes_own_code_leaves_no_turns_garbage() {
+        let mut rt = Rt::new();
+        let (mut made, mut answers) = (Vec::new(), Vec::new());
+        for _ in 0..60 {
+            made.push(rt.new_object("t/Made"));
+            let answer = rt.entered(
+                |rt| {
+                    for _ in 0..20_000 {
+                        rt.new_object("t/Junk");
+                    }
+                    let answer = rt.new_object("t/Answer");
+                    let inner = rt.new_object("t/Inner");
+                    rt.put_field(answer, "inner", inner);
+                    answer
+                },
+                |r| *r,
+            );
+            answers.push(answer);
+        }
+        assert!(made.iter().all(|v| rt.class_of(*v) == "t/Made"));
+        assert!(
+            answers
+                .iter()
+                .all(|v| rt.class_of(rt.get_field(*v, "inner")) == "t/Inner")
+        );
+        assert!(rt.young_runs.1 >= 2, "collections: {:?}", rt.young_runs);
+        assert!(
+            rt.heap.len() < 500_000,
+            "the heap grew to {} objects for 1,200,000 made",
+            rt.heap.len()
+        );
+        // A safe point ends the scope.
+        rt.safe_point();
+        assert!(rt.scopes.is_empty() && rt.scope_kept.is_empty());
+    }
+
+    /// The same under a call from the mods' code (`map.forEach(lambda)`): the scope is the
+    /// runtime's code of that one call, and is over when the call is.
+    #[test]
+    fn a_scope_is_over_when_the_runtimes_code_is_done() {
+        let mut rt = Rt::new();
+        let kept = rt.entered(
+            |rt| {
+                // The mods' code calls into the runtime's (as the trampoline counts it)...
+                let open = rt.native_begun();
+                let mut answers = Vec::new();
+                for _ in 0..50 {
+                    // ...which calls a lambda of theirs for each element.
+                    answers.push(rt.entered(
+                        |rt| {
+                            for _ in 0..20_000 {
+                                rt.new_object("t/Junk");
+                            }
+                            rt.new_object("t/Answer")
+                        },
+                        |r| *r,
+                    ));
+                }
+                // (Under the scope of this test's own code, which called the entry all of
+                // this runs in.)
+                assert_eq!(
+                    rt.scopes.iter().map(|s| s.depth).collect::<Vec<_>>(),
+                    [0, 1]
+                );
+                let list = rt.alloc("java/util/ArrayList", Data::List(answers));
+                rt.native_done(open);
+                assert_eq!(rt.scopes.iter().map(|s| s.depth).collect::<Vec<_>>(), [0]);
+                assert!(rt.scope_kept.is_empty(), "{:?}", rt.scope_kept);
+                list
+            },
+            |r| *r,
+        );
+        let Data::List(answers) = &rt.heap[kept.r() as usize].data else {
+            panic!("no list")
+        };
+        assert_eq!(answers.len(), 50);
+        assert!(answers.iter().all(|v| rt.class_of(*v) == "t/Answer"));
+        assert!(
+            rt.heap.len() < 500_000,
+            "the heap grew to {} objects for 1,000,000 made",
+            rt.heap.len()
+        );
+    }
+
     /// A frame as the mods' code has them: it holds an object in a local while it makes
     /// garbage, then calls into the runtime, where a collection reads the stack.
     #[inline(never)]
@@ -847,7 +1082,7 @@ mod tests {
             rt.free.len()
         );
         // (Its result was not collected again as it ended: that had just been done.)
-        rt.collect_young(born, &[], None, "a test");
+        rt.collect_young(born, &[], None, None, "a test");
         assert_eq!(rt.class_of(held), super::FREE);
     }
 

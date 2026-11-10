@@ -3887,6 +3887,45 @@ mod tests {
         );
         assert_eq!(call(&mut rt, "java/util/Deque.size.()I", &[deque]), V::I(1));
 
+        // fastutil's lists of the values given, and of an array's.
+        let of = call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntList.of.(III)Lit/unimi/dsi/fastutil/ints/IntList;",
+            &[V::I(7), V::I(8), V::I(9)],
+        );
+        assert_eq!(call(&mut rt, "java/util/List.size.()I", &[of]), V::I(3));
+        assert_eq!(
+            call(
+                &mut rt,
+                "it/unimi/dsi/fastutil/ints/IntList.getInt.(I)I",
+                &[of, V::I(2)]
+            ),
+            V::I(9)
+        );
+        let values = rt.alloc("[I", Data::Array(vec![V::I(4), V::I(5), V::I(6)]));
+        let fixed = rt.new_object("it/unimi/dsi/fastutil/ints/IntImmutableList");
+        call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntImmutableList.<init>.([I)V",
+            &[fixed, values],
+        );
+        assert_eq!(call(&mut rt, "java/util/List.size.()I", &[fixed]), V::I(3));
+        let part = rt.new_object("it/unimi/dsi/fastutil/ints/IntArrayList");
+        call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntArrayList.<init>.([III)V",
+            &[part, values, V::I(1), V::I(2)],
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "it/unimi/dsi/fastutil/ints/IntList.getInt.(I)I",
+                &[part, V::I(0)]
+            ),
+            V::I(5)
+        );
+        assert_eq!(call(&mut rt, "java/util/List.size.()I", &[part]), V::I(2));
+
         let watch = call(
             &mut rt,
             "com/google/common/base/Stopwatch.createStarted.()Lcom/google/common/base/Stopwatch;",

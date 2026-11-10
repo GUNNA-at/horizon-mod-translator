@@ -367,6 +367,11 @@ pub struct Rt {
     /// Objects a call makes, at least, before it is collected for itself ([`gc::YOUNG_MIN`],
     /// or what the environment says).
     pub young_min: u64,
+    /// The stretches of the runtime's own code that call into the mods' again and again,
+    /// outermost first ([`gc::Scope`]).
+    pub scopes: Vec<gc::Scope>,
+    /// What the scopes' own code made or was answered, each scope's from where it began.
+    pub scope_kept: Vec<u32>,
 }
 
 impl Default for Rt {
@@ -430,6 +435,8 @@ impl Default for Rt {
             young_runs: (0, 0, 0, 0),
             live_at_collection: 0,
             young_min: gc::young_min().0,
+            scopes: Vec::new(),
+            scope_kept: Vec::new(),
         }
     }
 }
@@ -447,6 +454,7 @@ impl Rt {
         rt.thrown = None;
         rt.unwinding.clear();
         rt.entries.clear();
+        rt.scopes_done(0);
         rt.native = 1;
         (rt.hook_misses, rt.hook_first_miss) = (0, None);
         // Which side of the game a runtime is on (`side:...` among what it keeps by name) is its
@@ -705,22 +713,27 @@ impl Rt {
         };
         self.made += 1;
         let born = self.next_born() - 1;
-        if let Some(r) = self.free.pop() {
-            self.heap[r as usize] = Object {
-                class,
-                cid,
-                born,
-                data,
-            };
-            return V::R(r);
-        }
-        self.heap.push(Object {
+        let object = Object {
             class,
             cid,
             born,
             data,
-        });
-        V::R(self.heap.len() as u32 - 1)
+        };
+        let r = match self.free.pop() {
+            Some(r) => {
+                self.heap[r as usize] = object;
+                r
+            }
+            None => {
+                self.heap.push(object);
+                self.heap.len() as u32 - 1
+            }
+        };
+        // Made by the runtime's own code of a scope: the scope's to hold ([`gc::Scope`]).
+        if !self.scopes.is_empty() {
+            self.scope_made(r);
+        }
+        V::R(r)
     }
 
     /// A point where no translated code runs (a hook's outermost entry, before it makes any
@@ -730,6 +743,7 @@ impl Rt {
             // None of the mods' code runs: whatever a call that never came back left of
             // itself (one that panicked) is no call in progress.
             self.entries.clear();
+            self.scopes_done(0);
             self.native = 1;
             self.maybe_collect();
         }
@@ -1544,18 +1558,18 @@ pub mod api {
             rt.check_collected(key, args);
         }
         let made = rt.made;
-        rt.native += 1;
+        let open = rt.native_begun();
         let r = (fns().call)(rt, key, args);
-        rt.native = rt.native.saturating_sub(1);
+        rt.native_done(open);
         if rt.made - made >= rt.young_min {
             rt.call_ended(made, r);
         }
         r
     }
     pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
-        rt.native += 1;
+        let open = rt.native_begun();
         let r = (fns().get_static)(rt, key);
-        rt.native = rt.native.saturating_sub(1);
+        rt.native_done(open);
         r
     }
     /// A game class's field the code reads itself (one an access transformer opens:
@@ -1578,15 +1592,15 @@ pub mod api {
 pub mod neo {
     use super::{Rt, V, fns};
     pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
-        rt.native += 1;
+        let open = rt.native_begun();
         let r = (fns().constructor_arg)(rt, class);
-        rt.native = rt.native.saturating_sub(1);
+        rt.native_done(open);
         r
     }
     pub fn fire_registrations(rt: &mut Rt) {
-        rt.native += 1;
+        let open = rt.native_begun();
         (fns().fire_registrations)(rt);
-        rt.native = rt.native.saturating_sub(1);
+        rt.native_done(open);
     }
 }
 // END ENGINE ENTRY POINTS
