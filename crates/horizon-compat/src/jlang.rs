@@ -387,13 +387,138 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     })
 }
 
+/// The constructors and methods class `class` declares, as the bundle's table lists them
+/// ([`crate::MEMBERS`]): access, name (`<init>` for a constructor) and descriptor. None listed
+/// for a class that isn't the mods'.
+fn members(rt: &mut Rt, class: &str) -> Vec<(u16, String, String)> {
+    let Some(lines) = rt.reflect(crate::MEMBERS, class, &[]) else {
+        return Vec::new();
+    };
+    let lines = rt.str_of(lines).unwrap_or("").to_owned();
+    lines
+        .lines()
+        .filter_map(|l| {
+            let mut parts = l.splitn(3, ' ');
+            Some((
+                parts.next()?.parse().ok()?,
+                parts.next()?.to_owned(),
+                parts.next()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// The classes of a descriptor's parameters, as an array (`getParameterTypes`).
+fn parameter_classes(rt: &mut Rt, desc: &str) -> V {
+    let list = desc
+        .strip_prefix('(')
+        .and_then(|d| d.split(')').next())
+        .unwrap_or("");
+    let (mut out, mut at) = (Vec::new(), 0);
+    while at < list.len() {
+        let rest = &list[at..];
+        let dims = rest.len() - rest.trim_start_matches('[').len();
+        let len = dims
+            + if rest[dims..].starts_with('L') {
+                rest[dims..].find(';').map_or(rest.len() - dims, |i| i + 1)
+            } else {
+                1
+            };
+        out.push(rt.class_literal(descriptor_class(&rest[..len])));
+        at += len;
+    }
+    rt.alloc("[Ljava/lang/Class;", Data::Array(out))
+}
+
+/// A `Constructor` of class object `class` with descriptor `desc`.
+fn constructor_object(rt: &mut Rt, class: V, desc: &str) -> V {
+    let c = rt.new_object("java/lang/reflect/Constructor");
+    rt.put_field(c, "$class", class);
+    let d = rt.string(desc);
+    rt.put_field(c, "$desc", d);
+    c
+}
+
+/// A `Method` of class object `class`, as a class file lists it: its name, its parameters'
+/// classes, and its descriptor and access for what asks them.
+fn method_object(rt: &mut Rt, class: V, name: &str, desc: &str) -> V {
+    let m = rt.new_object("java/lang/reflect/Method");
+    let (n, params, d) = (
+        rt.string(name),
+        parameter_classes(rt, desc),
+        rt.string(desc),
+    );
+    let access = members_access(rt, class, name, desc);
+    for (field, v) in [
+        ("$class", class),
+        ("$name", n),
+        ("$params", params),
+        ("$desc", d),
+        ("$access", V::I(access)),
+    ] {
+        rt.put_field(m, field, v);
+    }
+    m
+}
+
+fn members_access(rt: &mut Rt, class: V, name: &str, desc: &str) -> i32 {
+    let class = rt.str_of(class).unwrap_or("").replace('.', "/");
+    members(rt, &class)
+        .into_iter()
+        .find(|m| m.1 == name && m.2 == desc)
+        .map_or(1, |m| i32::from(m.0))
+}
+
+/// A file of a mod's jar at `path` ([`crate::resources::jar_file`]) as a stream of its bytes, or
+/// (`url`) as the URL that opens one; null for a file no jar has.
+pub(crate) fn jar_resource(rt: &mut Rt, path: &str, url: bool) -> V {
+    let Some(bytes) = crate::resources::jar_file(rt, path) else {
+        return V::NULL;
+    };
+    if !url {
+        return crate::resources::input_stream(rt, bytes);
+    }
+    let u = rt.new_object("java/net/URL");
+    let spec = rt.string(&format!("modjar:/{}", path.trim_start_matches('/')));
+    rt.put_field(u, "$spec", spec);
+    u
+}
+
 /// `new C(args)` by reflection: the mod's constructor with descriptor `desc`.
 pub(crate) fn construct(rt: &mut Rt, class: &str, desc: &str, args: &[V]) -> V {
     match rt.reflect(class, &format!("<init>.{desc}"), args) {
-        Some(o) => o,
-        None if rt.thrown.is_some() => V::NULL,
-        None => throw_with(rt, "java/lang/NoSuchMethodException", &format!("{}.<init>{desc}", class.replace('/', "."))),
+        Some(o) => return o,
+        None if rt.thrown.is_some() => return V::NULL,
+        None => {}
     }
+    // A class of the game's or a library's (`LevelResource(String)` made by reflection): its
+    // constructor as a mod's `new` calls it, where the runtime answers that.
+    if !rt.is_mod_class(class) {
+        let key = rt.static_key(&format!("{class}.<init>.{desc}"));
+        let (owner, before) = (
+            rt.static_key(class),
+            rt.unmapped.get(key).copied().unwrap_or(0),
+        );
+        let object = rt.new_object(owner);
+        let mut all = vec![object];
+        all.extend_from_slice(args);
+        crate::api::call(rt, key, &all);
+        if rt.unmapped.get(key).copied().unwrap_or(0) == before {
+            return if rt.thrown.is_some() { V::NULL } else { object };
+        }
+        // Not answered: the miss is this lookup's, not the mod's call.
+        match rt.unmapped.get_mut(key) {
+            Some(n) if *n > 1 => *n -= 1,
+            _ => {
+                rt.unmapped.remove(key);
+            }
+        }
+    }
+    throw_with(
+        rt,
+        "java/lang/NoSuchMethodException",
+        &format!("{}.<init>{desc}", class.replace('/', ".")),
+    )
 }
 
 // `ServiceLoader`: the implementations `META-INF/services` names (translated with the
@@ -890,6 +1015,60 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // The loader a class came from: one for the mod's classes, which `ServiceLoader.load`
             // and `Class.forName(name, init, loader)` take.
             "getClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
+            // A file of the mod's jar: by its path from the jar's root (`/defaults.json`), or
+            // from the class's package. Null for one no jar has.
+            "getResourceAsStream" | "getResource" => {
+                let class = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                let asked = text(rt, a(1));
+                let path = match asked.strip_prefix('/') {
+                    Some(rooted) => rooted.to_owned(),
+                    None => format!(
+                        "{}{asked}",
+                        class
+                            .rsplit_once('/')
+                            .map_or(String::new(), |p| format!("{}/", p.0))
+                    ),
+                };
+                jar_resource(rt, &path, name == "getResource")
+            }
+            // The class's constructors and methods, as its class file declares them (`getMethods`
+            // and `getConstructors`: the public ones, a superclass's methods among them).
+            "getConstructors" | "getDeclaredConstructors" | "getDeclaredMethods" | "getMethods" => {
+                let class = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                let (constructors, public) = (
+                    name.ends_with("Constructors"),
+                    matches!(name, "getConstructors" | "getMethods"),
+                );
+                let mut out = Vec::new();
+                let mut at = Some(class.clone());
+                while let Some(c) = at {
+                    for (access, member, desc) in members(rt, &c) {
+                        if (member == "<init>") != constructors || (public && access & 0x0001 == 0)
+                        {
+                            continue;
+                        }
+                        let owner = rt.class_literal(&c);
+                        out.push(if constructors {
+                            constructor_object(rt, owner, &desc)
+                        } else {
+                            method_object(rt, owner, &member, &desc)
+                        });
+                    }
+                    // Only `getMethods` goes up, and only through the mod's own classes.
+                    at = rt
+                        .supers
+                        .get(c.as_str())
+                        .copied()
+                        .filter(|s| name == "getMethods" && rt.is_mod_class(s))
+                        .map(str::to_owned);
+                }
+                let array = if constructors {
+                    "[Ljava/lang/reflect/Constructor;"
+                } else {
+                    "[Ljava/lang/reflect/Method;"
+                };
+                rt.alloc(array, Data::Array(out))
+            }
             // `asSubclass(type)`: the class itself when it is one, as JEI checks its plugins.
             "asSubclass" => {
                 let (this, other) = (rt.str_of(a(0)).unwrap_or("").to_owned(), rt.str_of(a(1)).unwrap_or("").to_owned());
@@ -930,7 +1109,44 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "isAnnotation" | "isAnonymousClass" | "isSynthetic" | "isLocalClass" => V::I(0),
             "isMemberClass" => V::I(rt.str_of(a(0)).is_some_and(|n| n.contains('$')) as i32),
-            "isInterface" | "isRecord" => V::I(0),
+            // A record of a mod's: its class extends `Record`, and its components are its
+            // fields, in their order, each read by the method of its name.
+            "isRecord" => {
+                let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                V::I((rt.supers.get(n.as_str()).copied() == Some("java/lang/Record")) as i32)
+            }
+            "getRecordComponents" => {
+                let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                if rt.supers.get(n.as_str()).copied() != Some("java/lang/Record") {
+                    return Some(V::NULL);
+                }
+                let mut components = Vec::new();
+                for (access, name, desc, signature) in typed_fields(rt, &n).unwrap_or_default() {
+                    if access & 0x0008 != 0 {
+                        continue;
+                    }
+                    let c = rt.new_object("java/lang/reflect/RecordComponent");
+                    let (name, desc, signature) = (
+                        rt.string(&name),
+                        rt.string(&desc),
+                        signature.map_or(V::NULL, |s| rt.string(&s)),
+                    );
+                    for (field, v) in [
+                        ("$class", a(0)),
+                        ("$name", name),
+                        ("$desc", desc),
+                        ("$signature", signature),
+                    ] {
+                        rt.put_field(c, field, v);
+                    }
+                    components.push(c);
+                }
+                rt.alloc(
+                    "[Ljava/lang/reflect/RecordComponent;",
+                    Data::Array(components),
+                )
+            }
+            "isInterface" => V::I(0),
             // Every class a mod can name is one it may use: public.
             "getModifiers" => V::I(1),
             // A mod class's annotations (`@Inherited` ones from its superclasses unless asked
@@ -1018,11 +1234,52 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getDeclaringClass" => rt.get_field(a(0), "$class"),
             "setAccessible" => V::Void,
             "trySetAccessible" => V::I(1),
+            "getParameterCount" => V::I(kinds(&text(rt, rt.get_field(a(0), "$desc"))).len() as i32),
+            "getParameterTypes" => {
+                let desc = text(rt, rt.get_field(a(0), "$desc"));
+                parameter_classes(rt, &desc)
+            }
+            "getModifiers" => {
+                let (class, desc) = (
+                    text(rt, rt.get_field(a(0), "$class")).replace('.', "/"),
+                    text(rt, rt.get_field(a(0), "$desc")),
+                );
+                let access = members(rt, &class)
+                    .into_iter()
+                    .find(|m| m.1 == "<init>" && m.2 == desc)
+                    .map_or(1, |m| m.0);
+                V::I(i32::from(access & 0x0007))
+            }
             _ => return None,
         }),
         // A field a mod looks up by name: reading it reads the object's field, or with no object
         // the class's static (the class initialised first); `get` boxes a primitive, `set` unboxes
         // into a field that holds one, as Java's do.
+        "java/lang/reflect/RecordComponent" => Some(match name {
+            "getName" => rt.get_field(a(0), "$name"),
+            "getDeclaringRecord" => rt.get_field(a(0), "$class"),
+            "getGenericSignature" => rt.get_field(a(0), "$signature"),
+            "getType" | "getGenericType" => {
+                let desc = text(rt, rt.get_field(a(0), "$desc"));
+                rt.class_literal(descriptor_class(&desc))
+            }
+            // The component's accessor: the method of its name, with no parameters.
+            "getAccessor" => {
+                let m = rt.new_object("java/lang/reflect/Method");
+                let (class, name, none) = (
+                    rt.get_field(a(0), "$class"),
+                    rt.get_field(a(0), "$name"),
+                    rt.new_array(0, V::NULL),
+                );
+                for (field, v) in [("$class", class), ("$name", name), ("$params", none)] {
+                    rt.put_field(m, field, v);
+                }
+                m
+            }
+            "isAnnotationPresent" => V::I(0),
+            "getAnnotation" | "getDeclaredAnnotation" => V::NULL,
+            _ => return None,
+        }),
         "java/lang/reflect/Field" => Some(match name {
             "getName" => rt.get_field(a(0), "$name"),
             // What a mod class's field holds and its modifiers, as the class declares it.
@@ -1033,8 +1290,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "getModifiers" => {
                 let (class, name, _) = field_parts(rt, a(0));
-                let (access, _) = find_field(rt, &class, name)?;
-                V::I(i32::from(access & 0x00df))
+                match find_field(rt, &class, name) {
+                    Some((access, _)) => V::I(i32::from(access & 0x00df)),
+                    // A field of the game's or a library's class, which carries no table here:
+                    // by its name's shape, a constant (`LOGGER`: public static final) or a
+                    // public field.
+                    None if !rt.is_mod_class(&class) => {
+                        let constant = name.chars().any(|c| c.is_ascii_uppercase())
+                            && !name.chars().any(|c| c.is_ascii_lowercase());
+                        V::I(if constant { 0x19 } else { 0x1 })
+                    }
+                    None => return None,
+                }
             }
             "getDeclaringClass" => rt.get_field(a(0), "$class"),
             "setAccessible" => V::Void,
@@ -1081,6 +1348,28 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let vals = crate::jutil::elements(rt, a(2));
                 return invoke_method(rt, a(0), a(1), &vals);
             }
+            // What the class file says of it, where the method was listed (`getDeclaredMethods`).
+            "getModifiers" | "getReturnType" | "getGenericReturnType" => {
+                let desc = text(rt, rt.get_field(a(0), "$desc"));
+                if desc.is_empty() {
+                    return None;
+                }
+                if name == "getModifiers" {
+                    V::I(rt.get_field(a(0), "$access").i() & 0x053f)
+                } else {
+                    let returned = desc.rsplit(')').next().unwrap_or("V").to_owned();
+                    rt.class_literal(descriptor_class(&returned))
+                }
+            }
+            "getParameterTypes" | "getGenericParameterTypes" => {
+                let params = rt.get_field(a(0), "$params");
+                let classes = crate::jutil::elements(rt, params);
+                rt.alloc("[Ljava/lang/Class;", Data::Array(classes))
+            }
+            "isSynthetic" | "isBridge" => {
+                V::I((rt.get_field(a(0), "$access").i() & 0x1040 != 0) as i32)
+            }
+            "isDefault" | "isVarArgs" => V::I(0),
             "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
                 let class = text(rt, rt.get_field(a(0), "$class")).replace('.', "/");
                 let method = text(rt, rt.get_field(a(0), "$name"));
@@ -1100,6 +1389,45 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // transactions (Create: New Age's energy) check `this.thread != Thread.currentThread()`.
         // A thread a mod starts runs its body there at once.
         "java/lang/Thread" => crate::jsystem::thread(rt, name, desc, args),
+        // The mods' class loader: one for all of them. It finds the files of their jars by their
+        // paths from a jar's root, and a class by its name as `Class.forName` does.
+        "java/lang/ClassLoader" => Some(match name {
+            "getSystemClassLoader" | "getPlatformClassLoader" | "getParent" => rt
+                .intern("compat:class-loader".into(), |rt| {
+                    rt.new_object("java/lang/ClassLoader")
+                }),
+            "getResourceAsStream"
+            | "getResource"
+            | "getSystemResourceAsStream"
+            | "getSystemResource" => {
+                let path = text(rt, a(usize::from(!name.starts_with("getSystem"))));
+                jar_resource(rt, &path, name.ends_with("Resource"))
+            }
+            "getResources" | "resources" => {
+                let path = text(rt, a(1));
+                let found = jar_resource(rt, &path, true);
+                let all = if found.r() == 0 {
+                    Vec::new()
+                } else {
+                    vec![found]
+                };
+                if name == "resources" {
+                    crate::jutil::new_list(rt, all)
+                } else {
+                    crate::jutil::new_iter(rt, all)
+                }
+            }
+            "loadClass" | "findClass" => {
+                let n = a(1);
+                crate::api::call(
+                    rt,
+                    "java/lang/Class.forName.(Ljava/lang/String;)Ljava/lang/Class;",
+                    &[n],
+                )
+            }
+            "getName" => rt.string("app"),
+            _ => return None,
+        }),
         // A class's package: its name; a mod reads no version out of a manifest here.
         "java/lang/Package" => Some(match name {
             "getName" | "toString" => rt.get_field(a(0), "$name"),
@@ -2768,6 +3096,276 @@ mod tests {
         let no_args = rt.new_array(0, V::NULL);
         let boxed = c(&mut rt, "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", &[method, machine, no_args]);
         assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Long", V::J(7)));
+    }
+
+    #[test]
+    fn a_record_tells_its_components_and_a_game_class_its_field_and_constructor() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            match (class, what) {
+                ("t/Msg", "fields") => Some(rt.string("18 id I\n18 names Ljava/util/List; Ljava/util/List<Ljava/lang/String;>;\n25 CODEC Ljava/lang/Object;")),
+                _ => None,
+            }
+        }
+        let mut rt = Rt::new();
+        rt.supers.insert("t/Msg", "java/lang/Record");
+        rt.supers.insert("t/Plain", "java/lang/Object");
+        rt.reflect = Some(reflect);
+        let (msg, plain) = (
+            class_object(&mut rt, "t/Msg"),
+            class_object(&mut rt, "t/Plain"),
+        );
+        assert_eq!(c(&mut rt, "java/lang/Class.isRecord.()Z", &[msg]), V::I(1));
+        assert_eq!(
+            c(&mut rt, "java/lang/Class.isRecord.()Z", &[plain]),
+            V::I(0)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Class.getRecordComponents.()[Ljava/lang/reflect/RecordComponent;",
+                &[plain]
+            ),
+            V::NULL
+        );
+        let components = c(
+            &mut rt,
+            "java/lang/Class.getRecordComponents.()[Ljava/lang/reflect/RecordComponent;",
+            &[msg],
+        );
+        let components = crate::jutil::elements(&rt, components);
+        assert_eq!(components.len(), 2, "the static field is no component");
+        let name = c(
+            &mut rt,
+            "java/lang/reflect/RecordComponent.getName.()Ljava/lang/String;",
+            &[components[1]],
+        );
+        assert_eq!(rt.str_of(name), Some("names"));
+        let ty = c(
+            &mut rt,
+            "java/lang/reflect/RecordComponent.getType.()Ljava/lang/Class;",
+            &[components[0]],
+        );
+        assert_eq!(
+            ty,
+            crate::api::get_static(&mut rt, "java/lang/Integer.TYPE")
+        );
+        let accessor = c(
+            &mut rt,
+            "java/lang/reflect/RecordComponent.getAccessor.()Ljava/lang/reflect/Method;",
+            &[components[1]],
+        );
+        let accessor_name = c(
+            &mut rt,
+            "java/lang/reflect/Method.getName.()Ljava/lang/String;",
+            &[accessor],
+        );
+        assert_eq!(rt.str_of(accessor_name), Some("names"));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Method.getParameterCount.()I",
+                &[accessor]
+            ),
+            V::I(0)
+        );
+        // A field of the game's class, which carries no table: a constant by its name's shape.
+        let spec = class_object(&mut rt, "net/neoforged/neoforge/common/ModConfigSpec");
+        let (logger, values) = (rt.string("LOGGER"), rt.string("childConfig"));
+        let field = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+            &[spec, logger],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Field.getModifiers.()I",
+                &[field]
+            ),
+            V::I(0x19)
+        );
+        let field = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+            &[spec, values],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Field.getModifiers.()I",
+                &[field]
+            ),
+            V::I(1)
+        );
+        // A class of the JDK's made by reflection, through its constructor as `new` calls it; one
+        // nothing answers is no such method, and no miss of the mod's.
+        let made = construct(&mut rt, "java/lang/StringBuilder", "()V", &[]);
+        assert_eq!(rt.class_of(made), "java/lang/StringBuilder");
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+        construct(&mut rt, "net/minecraft/hztest/Nothing", "(I)V", &[V::I(1)]);
+        let thrown = rt.thrown.take().expect("no such constructor");
+        assert_eq!(rt.class_of(thrown), "java/lang/NoSuchMethodException");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    #[test]
+    fn a_jars_files_and_a_classs_members_come_from_the_bundles_tables() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            match (class, what) {
+                (crate::FILES, "defaults/mod.json") => Some(rt.alloc("[", Data::Array(b"{\"a\":1}".iter().map(|b| V::I(i32::from(*b))).collect()))),
+                (crate::FILES, "t/pkg/near.txt") => Some(rt.alloc("[", Data::Array(b"near".iter().map(|b| V::I(i32::from(*b))).collect()))),
+                (crate::MEMBERS, "t/pkg/Service") => Some(rt.string("1 <init> (Lt/pkg/Grid;I)V\n2 <init> ()V\n1 tick (I)V\n10 helper ()Ljava/lang/String;\n4161 bridge (Ljava/lang/Object;)V")),
+                (crate::MEMBERS, "t/pkg/Base") => Some(rt.string("1 <init> ()V\n1 name ()Ljava/lang/String;")),
+                _ => None,
+            }
+        }
+        let mut rt = Rt::new();
+        rt.supers.insert("t/pkg/Service", "t/pkg/Base");
+        rt.supers.insert("t/pkg/Base", "java/lang/Object");
+        rt.reflect = Some(reflect);
+        let class = class_object(&mut rt, "t/pkg/Service");
+        // Through the whole dispatcher: a URL and an enumeration are other modules'.
+        let c = crate::api::call;
+        // A file by its path from the jar's root, or from the class's package; null for none.
+        let read = |rt: &mut Rt, path: &str| {
+            let p = rt.string(path);
+            let stream = c(
+                rt,
+                "java/lang/Class.getResourceAsStream.(Ljava/lang/String;)Ljava/io/InputStream;",
+                &[class, p],
+            );
+            crate::resources::take(rt, stream).map(|b| String::from_utf8_lossy(&b).into_owned())
+        };
+        assert_eq!(
+            read(&mut rt, "/defaults/mod.json").as_deref(),
+            Some("{\"a\":1}")
+        );
+        assert_eq!(read(&mut rt, "near.txt").as_deref(), Some("near"));
+        assert_eq!(read(&mut rt, "/absent.txt"), None);
+        let (loader, path) = (
+            c(
+                &mut rt,
+                "java/lang/Class.getClassLoader.()Ljava/lang/ClassLoader;",
+                &[class],
+            ),
+            rt.string("defaults/mod.json"),
+        );
+        let url = c(
+            &mut rt,
+            "java/lang/ClassLoader.getResource.(Ljava/lang/String;)Ljava/net/URL;",
+            &[loader, path],
+        );
+        let opened = c(
+            &mut rt,
+            "java/net/URL.openStream.()Ljava/io/InputStream;",
+            &[url],
+        );
+        assert_eq!(
+            crate::resources::take(&mut rt, opened).map(|b| b.len()),
+            Some(7)
+        );
+        let all = c(
+            &mut rt,
+            "java/lang/ClassLoader.getResources.(Ljava/lang/String;)Ljava/util/Enumeration;",
+            &[loader, path],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/Enumeration.hasMoreElements.()Z", &[all]),
+            V::I(1)
+        );
+        // Its constructors: all it declares, or the public ones.
+        let declared = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredConstructors.()[Ljava/lang/reflect/Constructor;",
+            &[class],
+        );
+        assert_eq!(rt.array_len(declared), 2);
+        let public = c(
+            &mut rt,
+            "java/lang/Class.getConstructors.()[Ljava/lang/reflect/Constructor;",
+            &[class],
+        );
+        let public = crate::jutil::elements(&rt, public);
+        assert_eq!(public.len(), 1);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Constructor.getParameterCount.()I",
+                &[public[0]]
+            ),
+            V::I(2)
+        );
+        let types = c(
+            &mut rt,
+            "java/lang/reflect/Constructor.getParameterTypes.()[Ljava/lang/Class;",
+            &[public[0]],
+        );
+        let types = crate::jutil::elements(&rt, types);
+        assert_eq!(
+            (rt.str_of(types[0]), rt.str_of(types[1])),
+            (Some("t/pkg/Grid"), Some("int"))
+        );
+        // Its methods: the class's own, or the public ones with its superclass's.
+        let own = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredMethods.()[Ljava/lang/reflect/Method;",
+            &[class],
+        );
+        let own = crate::jutil::elements(&rt, own);
+        assert_eq!(own.len(), 3);
+        let names = |rt: &mut Rt, methods: &[V]| -> Vec<String> {
+            methods
+                .iter()
+                .map(|&m| {
+                    let n = c(
+                        rt,
+                        "java/lang/reflect/Method.getName.()Ljava/lang/String;",
+                        &[m],
+                    );
+                    rt.str_of(n).unwrap_or("?").to_owned()
+                })
+                .collect()
+        };
+        assert_eq!(names(&mut rt, &own), ["tick", "helper", "bridge"]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Method.getModifiers.()I",
+                &[own[1]]
+            ),
+            V::I(10),
+            "private static"
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Method.isSynthetic.()Z",
+                &[own[2]]
+            ),
+            V::I(1)
+        );
+        let returned = c(
+            &mut rt,
+            "java/lang/reflect/Method.getReturnType.()Ljava/lang/Class;",
+            &[own[1]],
+        );
+        assert_eq!(rt.str_of(returned), Some("java/lang/String"));
+        let all = c(
+            &mut rt,
+            "java/lang/Class.getMethods.()[Ljava/lang/reflect/Method;",
+            &[class],
+        );
+        let all = crate::jutil::elements(&rt, all);
+        assert_eq!(names(&mut rt, &all), ["tick", "bridge", "name"]);
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
     }
 
     #[test]

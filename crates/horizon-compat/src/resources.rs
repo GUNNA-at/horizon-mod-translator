@@ -143,6 +143,26 @@ pub fn file(rt: &Rt, path: &str) -> Option<Vec<u8>> {
     fallback_dirs().iter().find_map(|d| std::fs::read(d.join(path)).ok())
 }
 
+/// A file of a mod's own jar by its path there (`config/defaults.json`), as
+/// `Class.getResourceAsStream` finds it: one the bundle carries ([`crate::FILES`]: what a mod may
+/// read for itself, at any time), else a resource file of the game's ([`file`]: under `assets/`
+/// or `data/`, where a game is there to ask).
+pub(crate) fn jar_file(rt: &mut Rt, path: &str) -> Option<Vec<u8>> {
+    let path = path.trim_start_matches('/');
+    if !safe(path) {
+        return None;
+    }
+    if let Some(bytes) = rt.reflect(crate::FILES, path, &[]) {
+        return Some(
+            crate::jutil::elements(rt, bytes)
+                .into_iter()
+                .map(|b| b.i() as u8)
+                .collect(),
+        );
+    }
+    file(rt, path)
+}
+
 /// The resource files under folder `prefix` (`assets/create/models`), as paths, sorted.
 pub fn paths(rt: &Rt, prefix: &str) -> Vec<String> {
     let prefix = prefix.trim_end_matches('/');

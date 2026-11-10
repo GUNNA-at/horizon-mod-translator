@@ -9855,6 +9855,33 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     method there, 900 bytes of text a function): all its cases give the JVM's results, the JDK's own code
     among them.
   - Not measured yet: the build after it.
+- [x] 2026-11-10 Part 153: the pack's third launch (the build before Parts 148 to 152): 38 constructors
+  fail, 327 pass, and 100 s in KubeJS starts a web server whose accept loop, run on the game's thread, never
+  ends. What it asked for:
+  - A mod has no network: a socket or a server channel fails where it would open, bind, connect or wait
+    (`jsystem.rs`), so a server a mod starts for itself ends in the mod's own handling. The loop guard
+    counts the objects made too (8 million with 1,000 unmapped calls), and a loop may go round 64 unmapped
+    calls and still be one (it was 12; this one went round more and was never stopped).
+  - The mod list has the game and NeoForge too (`getModContainerById("minecraft")`, as Moonlight asks by a
+    registry key's namespace), with their versions: NeoForge's is read off the install. `FMLLoader`'s
+    `versionInfo()` and `getGamePath()` (JourneyMap stopped at "Missing NeoForge version").
+  - Reflection: a record's `isRecord` and `getRecordComponents` with their accessors (Puzzles Lib sends no
+    message that "is not a record"); a class's constructors and methods listed (`getConstructors`,
+    `getDeclaredMethods`, `getMethods`: AE2 found "0 public constructors"), with their modifiers and types;
+    a field of the game's class by its name's shape (Moonlight reads `LOGGER` of a NeoForge class and wants
+    it static); a class of the game's or the JDK's made through its constructor as `new` calls it.
+  - A jar's own files: `Class.getResourceAsStream`, `getResource` and the class loader's find what the
+    bundle now carries of each jar outside its classes, its pictures and its resource packs' own files (up
+    to 256 KB a file), at any time, a mod's constructor too.
+  - Both tables, the files and the members, are carried behind a class of their own (`hz/files`,
+    `hz/members`) whose `reflect` answers from a sorted table in one crate: nothing in the other crates
+    changes for them.
+  - A shape asked with no level is asked with vanilla's empty one: a block written in Kotlin checks its
+    parameters for null first, and its failure message walked a stack trace the runtime has none of, for
+    ten seconds a time.
+  - Seen, of the build under test and fixed since: `AbstractMap.put` of the JDK's own code stood for an
+    anonymous `HashMap` subclass's `put` (Part 151 lets only static methods stand).
+  - Tests: 759 compat, 15 compat-core, 27 translator; the differential test reads both tables back.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

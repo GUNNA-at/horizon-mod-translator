@@ -1111,6 +1111,11 @@ fn main() -> ExitCode {
                 }
                 c.extend(derived);
             }
+            // The bundle's tables, each behind a class of its own: the jars' own files and the
+            // classes' members as reflection lists them.
+            for table in [horizon_compat::FILES, horizon_compat::MEMBERS] {
+                c.push(horizon_mod_translator::codegen::table_class(table));
+            }
             horizon_mod_translator::bundle::write_group(&jars, &c, Path::new(&args[2]), runtime)
         });
         return match result {

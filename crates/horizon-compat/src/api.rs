@@ -249,10 +249,14 @@ const RUNAWAY_TIME: std::time::Duration = std::time::Duration::from_secs(10);
 /// takes all the machine's memory in seconds, long before a million rounds.
 const RUNAWAY_FEW: u64 = 1_000;
 const RUNAWAY_BYTES: u64 = 1 << 30;
+/// Or made this many objects: a loop that makes one on each round (a server thread's accept loop,
+/// run on the game's thread) holds them all until its hook ends, which it never does.
+const RUNAWAY_OBJECTS: usize = 8_000_000;
 
 thread_local! {
-    /// What the runtime had allocated at the running hook's first unmapped call.
-    static HOOK_ALLOCATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// What the runtime had allocated at the running hook's first unmapped call: bytes of text
+    /// and arrays, and objects.
+    static HOOK_ALLOCATED: std::cell::Cell<(u64, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Whether the hook running now (one call of the game's into the mod: a tick, a screen's frame)
@@ -265,16 +269,18 @@ thread_local! {
 /// the mod's constructor or listener it is in, so the mods after it load.
 fn runaway(rt: &mut Rt, key: &'static str) -> bool {
     if rt.host().is_none() {
-        return LOADING.with(|run| run.borrow_mut().stuck(key, rt.allocated));
+        return LOADING.with(|run| run.borrow_mut().stuck(key, (rt.allocated, rt.heap.len())));
     }
     rt.hook_misses += 1;
     if rt.hook_misses == 1 {
-        HOOK_ALLOCATED.set(rt.allocated);
+        HOOK_ALLOCATED.set((rt.allocated, rt.heap.len()));
     }
     let first = *rt.hook_first_miss.get_or_insert_with(std::time::Instant::now);
+    let (bytes, objects) = HOOK_ALLOCATED.get();
+    let grown = rt.allocated.saturating_sub(bytes) >= RUNAWAY_BYTES
+        || rt.heap.len().saturating_sub(objects) >= RUNAWAY_OBJECTS;
     (rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME)
-        || (rt.hook_misses >= RUNAWAY_FEW
-            && rt.allocated.saturating_sub(HOOK_ALLOCATED.get()) >= RUNAWAY_BYTES)
+        || (rt.hook_misses >= RUNAWAY_FEW && grown)
 }
 
 /// The unmapped calls of a loop while the mods load, where no hook bounds them: the few keys the
@@ -286,18 +292,20 @@ struct Run {
     keys: Vec<&'static str>,
     calls: u64,
     since: Option<std::time::Instant>,
-    /// What the runtime had allocated when the count began.
-    allocated: Option<u64>,
+    /// What the runtime had allocated when the count began: bytes of text and arrays, and
+    /// objects.
+    allocated: Option<(u64, usize)>,
 }
 
-/// How many unmapped keys a loop may go round and still be told from loading going on.
-const RUN_KEYS: usize = 12;
+/// How many unmapped keys a loop may go round and still be told from loading going on: KubeJS's
+/// web server, started on the game's thread, went round more than a dozen.
+const RUN_KEYS: usize = 64;
 
 impl Run {
     /// Counts an unmapped call of `key`; whether its loop is stuck ([`RUNAWAY_MISSES`] calls of the
     /// same few keys over [`RUNAWAY_TIME`]). A key past [`RUN_KEYS`] starts the count again:
     /// loading that goes on meets new ones.
-    fn stuck(&mut self, key: &'static str, allocated: u64) -> bool {
+    fn stuck(&mut self, key: &'static str, allocated: (u64, usize)) -> bool {
         if !self.keys.contains(&key) {
             if self.keys.len() >= RUN_KEYS {
                 *self = Run::default();
@@ -306,9 +314,11 @@ impl Run {
         }
         self.calls += 1;
         let since = *self.since.get_or_insert_with(std::time::Instant::now);
-        let grown = allocated.saturating_sub(*self.allocated.get_or_insert(allocated));
+        let (bytes, objects) = *self.allocated.get_or_insert(allocated);
+        let grown = allocated.0.saturating_sub(bytes) >= RUNAWAY_BYTES
+            || allocated.1.saturating_sub(objects) >= RUNAWAY_OBJECTS;
         let stuck = (self.calls >= RUNAWAY_MISSES && since.elapsed() >= RUNAWAY_TIME)
-            || (self.calls >= RUNAWAY_FEW && grown >= RUNAWAY_BYTES);
+            || (self.calls >= RUNAWAY_FEW && grown);
         if stuck {
             *self = Run::default();
         }
@@ -4428,7 +4438,7 @@ mod tests {
             since: Some(long_ago()),
             allocated: None,
         };
-        assert!(run.stuck(key, 0) && run.calls == 0);
+        assert!(run.stuck(key, (0, 0)) && run.calls == 0);
         let mut run = Run {
             keys: vec![key],
             calls: RUNAWAY_MISSES - 1,
@@ -4436,7 +4446,7 @@ mod tests {
             allocated: None,
         };
         assert!(
-            !run.stuck(key, 0),
+            !run.stuck(key, (0, 0)),
             "a million calls in no time are not a stuck loop"
         );
         let mut run = Run {
@@ -4446,25 +4456,33 @@ mod tests {
             allocated: None,
         };
         assert!(
-            !run.stuck(key, 0) && run.calls == 1,
+            !run.stuck(key, (0, 0)) && run.calls == 1,
             "a new key past the loop's few starts the count again"
         );
+        // One that made eight million objects meanwhile is too.
+        let mut run = Run {
+            keys: vec![key],
+            calls: RUNAWAY_FEW - 1,
+            since: Some(std::time::Instant::now()),
+            allocated: Some((0, 10)),
+        };
+        assert!(run.stuck(key, (0, 10 + RUNAWAY_OBJECTS)));
         // And one that has allocated a gigabyte meanwhile, after far fewer calls and at once.
         let mut run = Run {
             keys: vec![key],
             calls: RUNAWAY_FEW - 1,
             since: Some(std::time::Instant::now()),
-            allocated: Some(5),
+            allocated: Some((5, 0)),
         };
-        assert!(run.stuck(key, 5 + RUNAWAY_BYTES) && run.calls == 0);
+        assert!(run.stuck(key, (5 + RUNAWAY_BYTES, 0)) && run.calls == 0);
         let mut run = Run {
             keys: vec![key],
             calls: RUNAWAY_FEW - 1,
             since: Some(std::time::Instant::now()),
-            allocated: Some(5),
+            allocated: Some((5, 0)),
         };
         assert!(
-            !run.stuck(key, RUNAWAY_BYTES),
+            !run.stuck(key, (RUNAWAY_BYTES, RUNAWAY_OBJECTS - 1)),
             "a thousand calls that allocated less are loading going on"
         );
         LOADING.with(|run| {

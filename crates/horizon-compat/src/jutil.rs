@@ -1240,6 +1240,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return crate::jsystem::calendar(rt, owner, name, desc, args);
         }
         "java/util/StringJoiner" => return joiner(rt, name, desc, args),
+        // An `Enumeration` here is an iterator under its older names.
+        "java/util/Enumeration" => {
+            let key = match name {
+                "hasMoreElements" => "java/util/Iterator.hasNext.()Z",
+                "nextElement" => "java/util/Iterator.next.()Ljava/lang/Object;",
+                "asIterator" => return Some(a(0)),
+                _ => return None,
+            };
+            return Some(crate::api::call(rt, key, args));
+        }
         "java/util/Properties"
             if matches!(
                 name,

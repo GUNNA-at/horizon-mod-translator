@@ -35,6 +35,46 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
                 | LATCH
                 | "java/util/concurrent/Semaphore"
         )
+        || socket(owner)
+}
+
+/// The sockets and channels a mod would reach the network or listen on it with.
+fn socket(owner: &str) -> bool {
+    matches!(
+        owner,
+        "java/net/Socket"
+            | "java/net/ServerSocket"
+            | "java/net/DatagramSocket"
+            | "java/net/MulticastSocket"
+            | "java/nio/channels/SocketChannel"
+            | "java/nio/channels/ServerSocketChannel"
+            | "java/nio/channels/DatagramChannel"
+            | "java/nio/channels/AsynchronousSocketChannel"
+            | "java/nio/channels/AsynchronousServerSocketChannel"
+    )
+}
+
+/// A socket or a channel of one, with no network for a mod: it can be made unconnected and
+/// closed, and whatever would open, bind, connect or wait on it fails as on a machine offline,
+/// so a server a mod starts for itself (KubeJS's, a remote console) ends in the mod's own
+/// handling and no thread of it spins on the game's.
+fn sockets(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    Some(match name {
+        "<init>" if args.len() <= 1 => V::Void,
+        "close"
+        | "setReuseAddress"
+        | "setSoTimeout"
+        | "setTcpNoDelay"
+        | "setKeepAlive"
+        | "setReceiveBufferSize"
+        | "setSendBufferSize" => V::Void,
+        "isClosed" => V::I(1),
+        "isOpen" | "isBound" | "isConnected" | "isBlocking" => V::I(0),
+        _ if desc.ends_with(")V") || desc.ends_with(';') || name == "<init>" => {
+            crate::jlang::throw_with(rt, IO_EXCEPTION, OFFLINE)
+        }
+        _ => return None,
+    })
 }
 
 const LOCKS: &str = "java/util/concurrent/locks/";
@@ -388,6 +428,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner.starts_with(LOCKS) || matches!(owner, LATCH | "java/util/concurrent/Semaphore") {
         return locks(rt, owner, name, desc, args);
     }
+    if socket(owner) {
+        return sockets(rt, name, desc, args);
+    }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let offline = |rt: &mut Rt| crate::jlang::throw_with(rt, IO_EXCEPTION, OFFLINE);
     if owner == URL {
@@ -437,13 +480,35 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "equals" => V::I((rt.class_of(a(1)) == URL && spec(rt) == rt.str_of(rt.get_field(a(1), "$spec")).unwrap_or("")) as i32),
             "hashCode" => V::I(crate::jlang::string_hash(&spec(rt))),
+            // A file of a mod's own jar (`Class.getResource`) opens; anything else is the network.
+            "openStream" if spec(rt).starts_with("modjar:/") => {
+                let path = spec(rt)["modjar:/".len()..].to_owned();
+                crate::jlang::jar_resource(rt, &path, false)
+            }
+            "openConnection" if spec(rt).starts_with("modjar:/") => {
+                let c = rt.new_object("java/net/URLConnection");
+                let s = rt.get_field(a(0), "$spec");
+                rt.put_field(c, "$spec", s);
+                c
+            }
             "openConnection" | "openStream" | "getContent" => offline(rt),
             _ => return None,
         });
     }
     if !owner.starts_with("java/net/http/") {
-        // A connection can't be had ([`URL`]'s `openConnection` fails), so nothing is asked of one.
-        return None;
+        // A connection can be had only to a file of a mod's jar: its bytes, and no more is asked.
+        let spec = rt
+            .str_of(rt.get_field(a(0), "$spec"))
+            .unwrap_or("")
+            .to_owned();
+        return match (name, spec.strip_prefix("modjar:/")) {
+            ("getInputStream", Some(path)) => Some(crate::jlang::jar_resource(rt, path, false)),
+            (
+                "connect" | "setUseCaches" | "setConnectTimeout" | "setReadTimeout" | "disconnect",
+                Some(_),
+            ) => Some(V::Void),
+            _ => None,
+        };
     }
     let simple = owner.rsplit('/').next().unwrap_or(owner);
     Some(match name {
@@ -551,6 +616,35 @@ mod tests {
         );
         let response = c(&mut rt, "java/util/concurrent/CompletableFuture.join.()Ljava/lang/Object;", &[later]);
         assert_eq!(c(&mut rt, "java/net/http/HttpResponse.statusCode.()I", &[response]), V::I(503));
+        // A server a mod would listen with fails where it is opened, and a socket where it connects.
+        c(
+            &mut rt,
+            "java/nio/channels/ServerSocketChannel.open.()Ljava/nio/channels/ServerSocketChannel;",
+            &[],
+        );
+        assert_eq!(rt.thrown.take().map(|t| rt.class_of(t)), Some(IO_EXCEPTION));
+        let (socket, host) = (rt.new_object("java/net/Socket"), rt.string("example.org"));
+        c(&mut rt, "java/net/Socket.<init>.()V", &[socket]);
+        assert!(rt.thrown.is_none());
+        c(
+            &mut rt,
+            "java/net/Socket.<init>.(Ljava/lang/String;I)V",
+            &[socket, host, V::I(80)],
+        );
+        assert_eq!(rt.thrown.take().map(|t| rt.class_of(t)), Some(IO_EXCEPTION));
+        let server = rt.new_object("java/net/ServerSocket");
+        c(
+            &mut rt,
+            "java/net/ServerSocket.accept.()Ljava/net/Socket;",
+            &[server],
+        );
+        assert_eq!(rt.thrown.take().map(|t| rt.class_of(t)), Some(IO_EXCEPTION));
+        c(&mut rt, "java/net/ServerSocket.close.()V", &[server]);
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
         // A URL is its text; a connection to it can't be had.
         let url = rt.new_object(URL);
         let spec = rt.string("https://example.org:8443/a/b.json?x=1#top");

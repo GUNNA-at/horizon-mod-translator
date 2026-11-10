@@ -5,6 +5,14 @@
 pub use horizon_compat_core::*;
 pub use horizon_compat_core::host;
 
+/// A class of no mod's that carries the mods' jars' own files: its `reflect` answers a path with
+/// the file's bytes (`rt.reflect(FILES, "config/defaults.json", &[])`), None for a file no jar
+/// has.
+pub const FILES: &str = "hz/files";
+/// And one that carries every class's constructors and methods as reflection lists them: its
+/// `reflect` answers a class's name with a line each, `access name descriptor`.
+pub const MEMBERS: &str = "hz/members";
+
 pub mod annotations;
 pub mod api;
 pub mod api_common;

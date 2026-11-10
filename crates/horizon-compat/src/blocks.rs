@@ -3283,7 +3283,10 @@ fn state_shapes(rt: &mut Rt, b: V, name: &str, states: &[(String, Vec<String>)])
         };
         let st = api::state(rt, &text);
         rt.interned.remove("compat:missing-property");
-        let shape = vc(rt, owner, GET_SHAPE, &[b, st, V::NULL, origin, ctx]);
+        // With vanilla's empty level, as it asks a shape that depends on none: a block written in
+        // Kotlin checks each parameter for null before anything else.
+        let nowhere = api::get_static(rt, "net/minecraft/world/level/EmptyBlockGetter.INSTANCE");
+        let shape = vc(rt, owner, GET_SHAPE, &[b, st, nowhere, origin, ctx]);
         let unknown = rt.thrown.is_some() || rt.interned.remove("compat:missing-property").is_some();
         rt.report_thrown("getShape");
         let boxes = crate::shapes::boxes(rt, shape).filter(|_| !unknown)?;

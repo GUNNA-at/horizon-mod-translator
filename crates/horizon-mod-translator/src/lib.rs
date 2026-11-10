@@ -295,6 +295,82 @@ fn java_images() -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// The version of the player's NeoForge install ([`find_game_jars`]): its folder's name
+/// (`21.1.256`).
+pub fn neoforge_version() -> Option<String> {
+    let jars = find_game_jars()?;
+    Some(
+        jars.first()?
+            .parent()?
+            .file_name()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// A file of a jar that a mod may read for itself (`getResourceAsStream`): none of the classes,
+/// the manifest's folder, the pictures and sounds, the resource packs' own files (which the game
+/// serves), and nothing large.
+fn own_resource(path: &str, size: u64) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let extension = lower.rsplit_once('.').map_or("", |p| p.1);
+    let pack = lower.starts_with("assets/") || lower.starts_with("data/");
+    !(path.ends_with('/')
+        || size > 256 << 10
+        || lower.starts_with("meta-inf/")
+        || matches!(extension, "class" | "jar" | "png" | "jpg" | "jpeg" | "gif" | "ogg" | "wav" | "mp3" | "nbt" | "ttf" | "otf" | "dll" | "so" | "dylib" | "jnilib" | "bbmodel" | "xcf" | "psd")
+        || matches!(lower.as_str(), "pack.mcmeta" | "license" | "license.txt" | "license.md" | "readme.md" | "changelog.md" | "fabric.mod.json" | "quilt.mod.json")
+        || lower.ends_with(".mixins.json")
+        || lower.ends_with(".refmap.json")
+        || lower.ends_with("-refmap.json")
+        || lower.ends_with(".accesswidener")
+        // In a resource pack's folders only what the game itself doesn't read from them.
+        || (pack && matches!(extension, "json" | "mcmeta" | "mcfunction" | "fsh" | "vsh" | "glsl" | "snbt" | "lang")))
+}
+
+/// The files of `jars` and of the jars they bundle that a mod may read for itself
+/// ([`own_resource`]), by path, sorted; a path two jars have is the first one's. At most 32 MB.
+pub fn jar_resources(jars: &[&Path]) -> Vec<(String, Vec<u8>)> {
+    fn read<R: Read + std::io::Seek>(
+        zip: &mut zip::ZipArchive<R>,
+        out: &mut BTreeMap<String, Vec<u8>>,
+        left: &mut usize,
+    ) {
+        for i in 0..zip.len() {
+            let Ok(mut e) = zip.by_index(i) else { continue };
+            let Ok(name) = e.name().map(|n| n.into_owned()) else {
+                continue;
+            };
+            if !own_resource(&name, e.size())
+                || out.contains_key(&name)
+                || e.size() as usize > *left
+            {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            if e.read_to_end(&mut bytes).is_ok() {
+                *left -= bytes.len();
+                out.insert(name, bytes);
+            }
+        }
+        for inner in nested_jars(zip) {
+            if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(inner)) {
+                read(&mut inner, out, left);
+            }
+        }
+    }
+    let (mut out, mut left) = (BTreeMap::new(), 32usize << 20);
+    for jar in jars {
+        if let Ok(mut zip) = std::fs::File::open(jar)
+            .map_err(|e| e.to_string())
+            .and_then(|f| zip::ZipArchive::new(f).map_err(|e| e.to_string()))
+        {
+            read(&mut zip, &mut out, &mut left);
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// The classes of the game's own jars that are code ([`game_code`]) and name no LWJGL class,
 /// without their annotations (the loader's own `@EventBusSubscriber` classes are not a mod's);
 /// and of a Java runtime's image among them, those that are ([`jdk_code`]).

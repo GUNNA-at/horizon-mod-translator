@@ -202,9 +202,17 @@ fn translated_fixture_matches_the_jvm() {
         deriver.classes()
     };
     parsed.extend(carried);
+    // The bundle's tables: a file of the jar's and the classes' members, each behind its class.
+    for table in [horizon_compat::FILES, horizon_compat::MEMBERS] {
+        parsed.push(horizon_mod_translator::codegen::table_class(table));
+    }
     let mut program = horizon_mod_translator::codegen::Program::new(&parsed);
     program.services = horizon_mod_translator::services(&jar).unwrap();
     // Small enough that the fixture's longer blocks are cut into functions, and its short ones not.
+    program.jar_files = vec![(
+        "defaults/fixture.json".to_owned(),
+        b"{\"speed\": 7}\n\x00\xff".to_vec(),
+    )];
     program.long_block = (600, 200);
     // And a method of any length counts as a big one, cut into functions of a few blocks each.
     program.big_method = (60, 900);
@@ -253,6 +261,8 @@ fn translated_fixture_matches_the_jvm() {
             ));
         }
     }
+    // The tables, read as the runtime reads them.
+    main.push_str("    let file = rt.reflect(\"hz/files\", \"defaults/fixture.json\", &[]).map(|a| (rt.array_len(a), rt.array_get(a, 14)));\n    let members = rt.reflect(\"hz/members\", \"Fixture\", &[]).and_then(|m| rt.str_of(m).map(|m| m.lines().any(|l| l == \"9 sumTo (I)I\")));\n    let absent = rt.reflect(\"hz/files\", \"nothing\", &[]).is_none();\n    eprintln!(\"tables {file:?} {members:?} {absent}\");\n");
     // And what the runtime had no answer for.
     main.push_str("    let mut unmapped: Vec<_> = rt.unmapped.keys().collect();\n    unmapped.sort();\n    for k in unmapped { eprintln!(\"unmapped {k}\"); }\n");
     main.push_str("}\n");
@@ -267,6 +277,10 @@ fn translated_fixture_matches_the_jvm() {
     assert!(out.status.success(), "generated crate failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let actual = String::from_utf8(out.stdout).unwrap();
     let notes = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        notes.contains("tables Some((15, I(-1))) Some(true) true"),
+        "{notes}"
+    );
     for (e, a) in expected.lines().zip(actual.lines()) {
         assert_eq!(a, e, "{notes}");
     }

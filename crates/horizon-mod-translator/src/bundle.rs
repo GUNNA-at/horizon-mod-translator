@@ -5685,6 +5685,22 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     program.services = crate::services_of(jars)?;
     // The mods FML lists: the jars', and those they bundle for jar-in-jar (Flywheel, Ponder).
     program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j).into_iter().chain(crate::nested_mod_metadata(j))).collect();
+    // The game and NeoForge are in FML's list too: the version of the install the game's code
+    // was read from.
+    program.metadata.push((
+        "minecraft".to_owned(),
+        "1.21.1".to_owned(),
+        "Minecraft".to_owned(),
+    ));
+    if let Some(version) = crate::neoforge_version() {
+        program
+            .metadata
+            .push(("neoforge".to_owned(), version, "NeoForge".to_owned()));
+    }
+    // The jars' own files, where the program has the class that carries them.
+    if classes.iter().any(|c| c.name == horizon_compat::FILES) {
+        program.jar_files = crate::jar_resources(jars);
+    }
     program.scan_files = jars.iter().map(|j| (crate::mod_metadata(j).into_iter().map(|m| m.0).collect(), crate::class_names(j))).collect();
     program.use_mixin_configs(&crate::mixin_configs_of(jars));
     // Translated here before: each class and lambda keeps the id it had, so the crates of the

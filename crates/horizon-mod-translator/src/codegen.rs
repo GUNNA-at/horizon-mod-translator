@@ -142,6 +142,24 @@ fn ranges(
     main
 }
 
+/// An empty class of the name of one of the bundle's tables ([`horizon_compat::FILES`],
+/// [`horizon_compat::MEMBERS`]): given with the program's classes, it gets an id and a
+/// definition like any, and its `reflect` function answers from the table.
+pub fn table_class(name: &str) -> ClassFile {
+    ClassFile {
+        pool: Vec::new(),
+        access: 0x0011,
+        name: name.to_owned(),
+        superclass: Some("java/lang/Object".to_owned()),
+        interfaces: Vec::new(),
+        fields: Vec::new(),
+        methods: Vec::new(),
+        bootstrap: Vec::new(),
+        annotations: Vec::new(),
+        signature: None,
+    }
+}
+
 /// FNV-1a, for short stable suffixes on generated names.
 fn hash(s: &str) -> u32 {
     s.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
@@ -396,6 +414,9 @@ pub struct Program<'a> {
     /// A basic block of more text than the first is cut into functions of about the second
     /// ([`cut`]): [`LONG_BLOCK`] and [`BLOCK_PIECE`] unless a test asks for less.
     pub long_block: (usize, usize),
+    /// The mods' jars' own files, by path, sorted ([`crate::jar_resources`]): what
+    /// `Class.getResourceAsStream` finds, carried behind [`horizon_compat::FILES`].
+    pub jar_files: Vec<(String, Vec<u8>)>,
     /// How much bytecode makes a method a big one, cut into functions of several blocks, and
     /// about how much text each holds ([`ranges`]): [`BIG_METHOD`] and [`RANGE_TEXT`] unless a
     /// test asks for less.
@@ -670,6 +691,7 @@ impl<'a> Program<'a> {
             scan_files: Vec::new(),
             long_block: (LONG_BLOCK, BLOCK_PIECE),
             big_method: (BIG_METHOD, RANGE_TEXT),
+            jar_files: Vec::new(),
             caller_sensitive: classes
                 .iter()
                 .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
@@ -1328,6 +1350,13 @@ impl<'a> Program<'a> {
     /// made (`getConstructor(Builder.class).newInstance(builder)`, as Max Henkel's configs are
     /// made): the runtime hands it the arguments, primitives unboxed. None when it has nothing.
     fn reflect_fn(&self, c: &ClassFile) -> Option<(String, String)> {
+        // The bundle's tables, each behind a class of its own ([`table_class`]).
+        if c.name == horizon_compat::FILES {
+            return Some(self.table_fn(c, &self.jar_files, false));
+        }
+        if c.name == horizon_compat::MEMBERS {
+            return Some(self.table_fn(c, &self.members(), true));
+        }
         let ensure = self.ensure(&c.name).replace("return V::Void;", "return Some(V::Void);");
         let mut arms = String::new();
         if !ensure.is_empty() {
@@ -1354,6 +1383,54 @@ impl<'a> Program<'a> {
         }
         let name = format!("r_{}", self.cid(&c.name));
         Some((name.clone(), format!("fn {name}(rt: &mut Rt, what: &str, args: &[V]) -> Option<V> {{\n    Some(match what {{\n{arms}        _ => return None,\n    }})\n}}\n\n")))
+    }
+
+    /// Each class's constructors and methods as reflection lists them, by the class's name: a
+    /// line each, `access name descriptor` (a constructor's name is `<init>`), in the class
+    /// file's order. One table for the whole program, so that `getDeclaredMethods` costs the
+    /// crates of the classes nothing.
+    fn members(&self) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = self
+            .classes
+            .values()
+            .filter(|c| !c.name.starts_with("hz/"))
+            .map(|c| {
+                let lines: Vec<String> = c
+                    .methods
+                    .iter()
+                    .filter(|m| m.name != "<clinit>")
+                    .map(|m| format!("{} {} {}", m.access, m.name, m.desc))
+                    .collect();
+                (c.name.clone(), lines.join("\n").into_bytes())
+            })
+            .filter(|(_, lines)| !lines.is_empty())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The `reflect` function of a table's class: what the table holds under the name asked for
+    /// (`rows`, sorted by name), as a string (`text`) or as a `byte[]`.
+    fn table_fn(&self, c: &ClassFile, rows: &[(String, Vec<u8>)], text: bool) -> (String, String) {
+        let name = format!("r_{}", self.cid(&c.name));
+        let mut table = String::new();
+        for (key, value) in rows {
+            let literal: String = value
+                .iter()
+                .flat_map(|b| std::ascii::escape_default(*b))
+                .map(char::from)
+                .collect();
+            let _ = writeln!(table, "        ({key:?}, b\"{literal}\"),");
+        }
+        let made = if text {
+            "rt.string(&String::from_utf8_lossy(TABLE[i].1))".to_owned()
+        } else {
+            "{ let a = rt.new_array(TABLE[i].1.len() as i32, V::I(0)); for (at, b) in TABLE[i].1.iter().enumerate() { rt.array_set(a, at as i32, V::I(i32::from(*b as i8))); } a }".to_owned()
+        };
+        let body = format!(
+            "fn {name}(rt: &mut Rt, what: &str, _args: &[V]) -> Option<V> {{\n    static TABLE: &[(&str, &[u8])] = &[\n{table}    ];\n    let i = TABLE.binary_search_by(|row| row.0.cmp(what)).ok()?;\n    Some({made})\n}}\n\n"
+        );
+        (name, body)
     }
 
     /// The methods mixin `c` adds to the game's classes `targets` (or overwrites there): for each,

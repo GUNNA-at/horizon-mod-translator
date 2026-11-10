@@ -1543,6 +1543,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // The side: Horizon runs mods in the client.
         ("net/neoforged/fml/loading/FMLLoader", "isProduction") => V::I(1),
+        // The versions FML was started with, and the game's folder.
+        ("net/neoforged/fml/loading/FMLLoader", "versionInfo") => rt
+            .intern("compat:version-info".into(), |rt| {
+                rt.new_object("net/neoforged/fml/loading/VersionInfo")
+            }),
+        ("net/neoforged/fml/loading/VersionInfo", "neoForgeVersion") => neoforge_version(rt),
+        ("net/neoforged/fml/loading/VersionInfo", "mcVersion") => rt.string("1.21.1"),
+        ("net/neoforged/fml/loading/VersionInfo", "neoFormVersion") => rt.string("20240808.144430"),
+        ("net/neoforged/fml/loading/VersionInfo", "mcAndNeoFormVersion") => {
+            rt.string("1.21.1-20240808.144430")
+        }
+        ("net/neoforged/fml/loading/FMLLoader", "getGamePath") => {
+            let dir = crate::files::game_dir(rt).to_string_lossy().into_owned();
+            crate::files::new_path(rt, &dir)
+        }
         ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => {
             crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.CLIENT")
         }
@@ -2033,8 +2048,20 @@ pub(crate) fn loaded_mods(rt: &Rt) -> Vec<String> {
     if rt.mods.is_empty() && !rt.namespace.is_empty() { vec![rt.namespace.clone()] } else { rt.mods.clone() }
 }
 
+/// Whether FML has a mod of this id: one this engine carries, or the game or NeoForge itself,
+/// which every `ModList` has too (a mod asks for `minecraft`'s container by a registry key's
+/// namespace, for `neoforge`'s version).
 pub(crate) fn mod_loaded(rt: &Rt, id: &str) -> bool {
-    !id.is_empty() && loaded_mods(rt).iter().any(|m| m == id)
+    matches!(id, "minecraft" | "neoforge")
+        || (!id.is_empty() && loaded_mods(rt).iter().any(|m| m == id))
+}
+
+/// NeoForge's version: what the translator read off the player's install, else the line's first.
+fn neoforge_version(rt: &mut Rt) -> V {
+    match rt.interned.get("compat:mod-version/neoforge").copied() {
+        Some(v) => v,
+        None => rt.string("21.1.0"),
+    }
 }
 
 /// NeoForge's container of a Java mod: what a mod's constructor, `ModList` and `ModLoadingContext`
@@ -2129,7 +2156,12 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 /// The mod's container, one per id.
 pub(crate) fn mod_container(rt: &mut Rt, id: &str) -> V {
     rt.intern(format!("compat:mod-container/{id}"), |rt| {
-        let c = rt.new_object(FML_CONTAINER);
+        // The game's own and NeoForge's are no Java mods' containers.
+        let c = rt.new_object(if matches!(id, "minecraft" | "neoforge") {
+            MOD_CONTAINER
+        } else {
+            FML_CONTAINER
+        });
         let s = rt.string(id);
         rt.put_field(c, "$modId", s);
         c
@@ -2153,6 +2185,8 @@ fn mod_info(rt: &mut Rt, id: &str) -> V {
         rt.put_field(info, "$displayName", name);
         let text = match rt.interned.get(&format!("compat:mod-version/{id}")).copied() {
             Some(v) => v,
+            None if id == "minecraft" => rt.string("1.21.1"),
+            None if id == "neoforge" => neoforge_version(rt),
             None => rt.string("1"),
         };
         let version = rt.new_object(VERSION);
@@ -3291,6 +3325,60 @@ mod tests {
         rt.listeners.push((REGISTER_EVENT.to_owned(), listener));
         fire_registrations(&mut rt);
         assert_eq!(registry_get(&mut rt, "trigger_type", "t:charged"), trigger);
+        // The game and NeoForge are in the mod list too, with their versions.
+        let (list, id) = (
+            rt.new_object("net/neoforged/fml/ModList"),
+            rt.string("minecraft"),
+        );
+        let found = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/ModList.getModContainerById.(Ljava/lang/String;)Ljava/util/Optional;",
+            &[list, id],
+        );
+        let container = crate::api::call(
+            &mut rt,
+            "java/util/Optional.get.()Ljava/lang/Object;",
+            &[found],
+        );
+        assert_eq!(rt.class_of(container), MOD_CONTAINER);
+        let info = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/ModContainer.getModInfo.()Lnet/neoforged/neoforgespi/language/IModInfo;",
+            &[container],
+        );
+        let version = crate::api::call(
+            &mut rt,
+            "net/neoforged/neoforgespi/language/IModInfo.getVersion.()Lorg/apache/maven/artifact/versioning/ArtifactVersion;",
+            &[info],
+        );
+        let text = crate::api::call(
+            &mut rt,
+            "org/apache/maven/artifact/versioning/ArtifactVersion.toString.()Ljava/lang/String;",
+            &[version],
+        );
+        assert_eq!(rt.str_of(text), Some("1.21.1"));
+        let versions = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/loading/FMLLoader.versionInfo.()Lnet/neoforged/fml/loading/VersionInfo;",
+            &[],
+        );
+        let neoforge = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/loading/VersionInfo.neoForgeVersion.()Ljava/lang/String;",
+            &[versions],
+        );
+        assert!(rt.str_of(neoforge).is_some_and(|v| v.starts_with("21.1.")));
+        let dir = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/loading/FMLLoader.getGamePath.()Ljava/nio/file/Path;",
+            &[],
+        );
+        assert_eq!(rt.class_of(dir), "java/nio/file/Path");
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
         // The registry of registries gives each registry by its key's location.
         let blocks = crate::api::get_static(
             &mut rt,
