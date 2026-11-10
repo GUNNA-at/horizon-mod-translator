@@ -134,6 +134,12 @@ pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
             .find(|j| j.is_file());
         jars.extend(found);
     }
+    // And the jar of the side markers (`Dist`, `@OnlyIn`), which goes by its classifier.
+    let sides = dirs(libraries.join("net/neoforged/mergetool"), "")
+        .into_iter()
+        .map(|(d, v)| d.join(format!("mergetool-{v}-api.jar")))
+        .find(|j| j.is_file());
+    jars.extend(sides);
     Some(jars)
 }
 

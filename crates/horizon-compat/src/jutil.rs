@@ -539,6 +539,35 @@ pub fn table_keys(rt: &Rt, m: V) -> Vec<V> {
     table_entries(rt, m).into_iter().map(|(k, _)| k).collect()
 }
 
+/// `Collection.toArray()` and `toArray(array)`: a new array of the items, or the array given
+/// where it holds them all, filled, with a null after the last when it is longer (a mod builds
+/// a path as `stack.toArray(new String[stack.size() + 1])` and sets the last itself).
+fn to_array(rt: &mut Rt, items: Vec<V>, given: V) -> V {
+    if given.r() != 0 && rt.class_of(given).starts_with('[') {
+        let len = rt.array_len(given).max(0) as usize;
+        if len >= items.len() {
+            for (i, v) in items.iter().enumerate() {
+                rt.array_set(given, i as i32, *v);
+            }
+            if len > items.len() {
+                rt.array_set(given, items.len() as i32, V::NULL);
+            }
+            return given;
+        }
+    }
+    rt.alloc("[Ljava/lang/Object;", Data::Array(items))
+}
+
+/// How many entries the map or set at `m` has: counted where they are. A set's every call asked
+/// its size by copying all its entries first, so filling one with a pack's block states (Puzzles
+/// Lib's model locations) took time by the square of their number, and never ended.
+fn table_len(rt: &Rt, m: V) -> usize {
+    match rt.heap.get(m.r() as usize).map(|o| &o.data) {
+        Some(Data::Table(t)) => t.entries.len(),
+        _ => 0,
+    }
+}
+
 fn table_entries(rt: &Rt, m: V) -> Vec<(V, V)> {
     match rt.heap.get(m.r() as usize).map(|o| &o.data) {
         Some(Data::Table(t)) => t.entries.clone(),
@@ -1270,6 +1299,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return Some(v);
     }
     match rt.class_of(a(0)) {
+        TABLE_CELL => {
+            return Some(match name {
+                "getRowKey" => rt.get_field(a(0), "$row"),
+                "getColumnKey" => rt.get_field(a(0), "$column"),
+                "getValue" => rt.get_field(a(0), "$value"),
+                _ => return None,
+            });
+        }
         LIST_ITERATOR => return list_iter_call(rt, name, args),
         STREAM_BUILDER => return stream_builder_call(rt, name, args),
         _ => {}
@@ -1542,7 +1579,7 @@ fn cache_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         (_, "asMap") => map(rt, a(0)),
         (_, "size") => {
             let m = map(rt, a(0));
-            V::J(table_entries(rt, m).len() as i64)
+            V::J(table_len(rt, m) as i64)
         }
         (_, "cleanUp") => V::Void,
         _ => return None,
@@ -1906,6 +1943,18 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         ("java/util/Collections", "newSetFromMap") => rt.alloc("java/util/HashSet", Data::Table(Table::default())),
         // Guava's `Tables.newCustomTable(backingMap, factory)`: a table of rows.
         ("com/google/common/collect/Tables", "newCustomTable") => rt.alloc("com/google/common/collect/HashBasedTable", Data::Table(Table::default())),
+        // A synchronised or unmodifiable view of one of Guava's collections is the collection:
+        // one thread, and nobody here writes through a view it was told not to (Balm keeps its
+        // registrations in `Tables.synchronizedTable(HashBasedTable.create())`).
+        (o, n)
+            if o.starts_with("com/google/common/collect/")
+                && (n.starts_with("synchronized") || n.starts_with("unmodifiable"))
+                && a(0).r() != 0
+                && args.len() <= 2 =>
+        {
+            a(0)
+        }
+        ("com/google/common/collect/Tables", "immutableCell") => table_cell(rt, a(0), a(1), a(2)),
         // fastutil's `ObjectArrayList.of(items...)`.
         (o, "of") if o.starts_with("it/unimi/dsi/fastutil/") && o.ends_with("ArrayList") => {
             let items = if desc.starts_with("([") { elements(rt, a(0)) } else { args.to_vec() };
@@ -2605,7 +2654,7 @@ fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "toArray" => {
             let items = list(rt, this)?.clone();
-            rt.alloc("[Ljava/lang/Object;", Data::Array(items))
+            to_array(rt, items, a(1))
         }
         n if typed_array(n).is_some() => {
             let items = list(rt, this)?.clone();
@@ -2847,7 +2896,7 @@ fn entry_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
-    let len = table_entries(rt, this).len();
+    let len = table_len(rt, this);
     Some(match name {
         "size" => V::I(len as i32),
         "isEmpty" => V::I((len == 0) as i32),
@@ -2933,7 +2982,7 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         }
         "toArray" => {
             let items = elements(rt, this);
-            rt.alloc("[Ljava/lang/Object;", Data::Array(items))
+            to_array(rt, items, a(1))
         }
         n if typed_array(n).is_some() => {
             let items = elements(rt, this);
@@ -3156,8 +3205,8 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     // A stored value, or what a missing key gives (`missing`).
     let found = |rt: &Rt, v: Option<V>| v.unwrap_or_else(|| missing(rt, this, desc));
     Some(match name {
-        "size" => V::I(table_entries(rt, this).len() as i32),
-        "isEmpty" => V::I(table_entries(rt, this).is_empty() as i32),
+        "size" => V::I(table_len(rt, this) as i32),
+        "isEmpty" => V::I((table_len(rt, this) == 0) as i32),
         // fastutil: what `get` of a missing key gives.
         "defaultReturnValue" if args.len() > 1 => {
             if let Some(Data::Table(t)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data)
@@ -3348,10 +3397,67 @@ fn row(rt: &mut Rt, t: V, r: V) -> V {
     m
 }
 
+/// A cell of a Guava table: its row's key, its column's and its value.
+fn table_cell(rt: &mut Rt, row: V, column: V, value: V) -> V {
+    let c = rt.new_object(TABLE_CELL);
+    for (field, v) in [("$row", row), ("$column", column), ("$value", value)] {
+        rt.put_field(c, field, v);
+    }
+    c
+}
+
+const TABLE_CELL: &str = "com/google/common/collect/Tables$ImmutableCell";
+
 fn guava_table_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
     Some(match name {
+        // Every cell, row by row.
+        "cellSet" => {
+            let mut cells = Vec::new();
+            for (r, m) in table_entries(rt, this) {
+                for (c, v) in table_entries(rt, m) {
+                    cells.push(table_cell(rt, r, c, v));
+                }
+            }
+            identity_set(rt, &cells)
+        }
+        "columnKeySet" => {
+            let mut keys: Vec<V> = Vec::new();
+            for (_, m) in table_entries(rt, this) {
+                for (c, _) in table_entries(rt, m) {
+                    if !keys.iter().any(|&k| equals(rt, k, c)) {
+                        keys.push(c);
+                    }
+                }
+            }
+            new_set(rt, &keys)
+        }
+        "containsColumn" => {
+            let rows = table_entries(rt, this);
+            V::I(
+                rows.into_iter()
+                    .any(|(_, m)| table_get(rt, m, a(1)).is_some()) as i32,
+            )
+        }
+        "containsValue" => {
+            let mut hit = false;
+            for (_, m) in table_entries(rt, this) {
+                for (_, v) in table_entries(rt, m) {
+                    hit = hit || equals(rt, v, a(1));
+                }
+            }
+            V::I(hit as i32)
+        }
+        "putAll" => {
+            for (r, m) in table_entries(rt, a(1)) {
+                let mine = row(rt, this, r);
+                for (c, v) in table_entries(rt, m) {
+                    table_put(rt, mine, c, v);
+                }
+            }
+            V::Void
+        }
         "put" => {
             let m = row(rt, this, a(1));
             table_put(rt, m, a(2), a(3))
@@ -3930,6 +4036,40 @@ mod tests {
             "{:?}",
             rt.unmapped
         );
+    }
+
+    #[test]
+    fn to_array_fills_the_array_given_when_it_is_long_enough() {
+        let mut rt = Rt::new();
+        let c = crate::api::call;
+        let (a, b) = (rt.string("a"), rt.string("b"));
+        let list = new_list(&mut rt, vec![a, b]);
+        const TO_ARRAY: &str = "java/util/List.toArray.([Ljava/lang/Object;)[Ljava/lang/Object;";
+        // Longer: the same array, filled, a null after the last, the rest as it was.
+        let given = rt.new_array(4, b);
+        assert_eq!(c(&mut rt, TO_ARRAY, &[list, given]), given);
+        assert_eq!(elements(&rt, given), [a, b, V::NULL, b]);
+        // Too short: a new one of the list's size.
+        let short = rt.new_array(0, V::NULL);
+        let made = c(&mut rt, TO_ARRAY, &[list, short]);
+        assert!(made != short && elements(&rt, made) == [a, b]);
+        let set = new_set_of(&mut rt, &[a, b]);
+        let given = rt.new_array(2, V::NULL);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Set.toArray.([Ljava/lang/Object;)[Ljava/lang/Object;",
+                &[set, given]
+            ),
+            given
+        );
+        assert_eq!(elements(&rt, given), [a, b]);
+        let plain = c(
+            &mut rt,
+            "java/util/List.toArray.()[Ljava/lang/Object;",
+            &[list],
+        );
+        assert_eq!(elements(&rt, plain), [a, b]);
     }
 
     #[test]
@@ -4655,6 +4795,45 @@ mod tests {
         let r = c(&mut rt, "com/google/common/collect/Table.row.(Ljava/lang/Object;)Ljava/util/Map;", &[t, block]);
         assert_eq!(c(&mut rt, "java/util/Map.size.()I", &[r]), V::I(2));
         assert_eq!(c(&mut rt, "com/google/common/collect/Table.get.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[t, item, shaft]), V::I(3));
+        // A synchronised view is the table, and its cells are its rows' entries.
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/Tables.synchronizedTable.(Lcom/google/common/collect/Table;)Lcom/google/common/collect/Table;",
+                &[t]
+            ),
+            t
+        );
+        let cells = c(
+            &mut rt,
+            "com/google/common/collect/Table.cellSet.()Ljava/util/Set;",
+            &[t],
+        );
+        let cells = elements(&rt, cells);
+        assert_eq!(cells.len(), 3);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/Table$Cell.getRowKey.()Ljava/lang/Object;",
+                &[cells[2]]
+            ),
+            item
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/Table$Cell.getValue.()Ljava/lang/Object;",
+                &[cells[1]]
+            ),
+            V::I(2)
+        );
+        let columns = c(
+            &mut rt,
+            "com/google/common/collect/Table.columnKeySet.()Ljava/util/Set;",
+            &[t],
+        );
+        assert_eq!(elements(&rt, columns).len(), 2);
+        assert_eq!(c(&mut rt, "com/google/common/collect/Table.containsColumn.(Ljava/lang/Object;)Z", &[t, cog]), V::I(1));
         let m = c(&mut rt, "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;", &[]);
         assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.isEmpty.()Z", &[m]), V::I(1));
         c(&mut rt, "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z", &[m, block, V::I(7)]);

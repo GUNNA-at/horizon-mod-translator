@@ -9882,6 +9882,29 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Seen, of the build under test and fixed since: `AbstractMap.put` of the JDK's own code stood for an
     anonymous `HashMap` subclass's `put` (Part 151 lets only static methods stand).
   - Tests: 759 compat, 15 compat-core, 27 translator; the differential test reads both tables back.
+- [x] 2026-11-10 Part 154: the pack's fourth launch (the build of Parts 148 to 152): 19 constructors fail,
+  346 pass. It stops where Puzzles Lib collects the model location of every state of every block into a
+  set, and never finishes. What it showed:
+  - A set's every call copied all its entries to learn its size, so filling one took time by the square of
+    its size: a pack's block states never fitted. The size is counted in place (`table_len`).
+  - `Collection.toArray(array)` fills the array given when it is long enough and returns it, with a null
+    after the last element. It returned a new array and left the given one empty: a config builder's path,
+    `stack.toArray(new String[stack.size() + 1])` with the last element set after, came out empty (Trash
+    Cans: "An entry for '' is already defined!"), and so did any array a mod sized first and filled so.
+  - A static `@Invoker` or `@Accessor` in an accessor mixin is no method of its target: its body is the
+    placeholder `javac` wants. Taken for an overwrite, Dreams 'n Desires' `@Invoker("make")` replaced
+    Create's own `GaugeShaper.make()` with `throw new AssertionError()`, and Create's gauges were not
+    registered. A test fails without the fix.
+  - Lookahead and lookbehind in patterns: read by `fancy-regex` (a new dependency: the same syntax and
+    automata, backtracking only for such a pattern), the rest by `regex` as before. Moonlight splits
+    camelCase names by one and Cupboard its config comments; without it no config of a mod built on
+    Moonlight was made. Both patterns give what a JVM gives.
+  - A synchronised or unmodifiable view of a Guava collection is the collection, and a table has its
+    cells: Balm keeps its registrations in `Tables.synchronizedTable(...)`, which nothing answered, so no
+    object of the nine mods built on it was resolved.
+  - `Dist` is listed as an enum (its jar, of the side markers, was not among those read for the game's
+    enums; it is now): three mods still ended in `MatchException`.
+  - Tests: 760 compat, 15 compat-core, 28 translator; the differential test.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -38,10 +38,59 @@ enum Mode {
 thread_local! {
     /// The patterns compiled on this thread, by source, flags and anchoring: most are constants a
     /// mod compiles once, so a call costs a lookup.
-    static COMPILED: RefCell<HashMap<(String, i32, Mode), Result<regex::Regex, String>>> = RefCell::new(HashMap::new());
+    static COMPILED: RefCell<HashMap<(String, i32, Mode), Result<Re, String>>> = RefCell::new(HashMap::new());
 }
 
-fn compiled(source: &str, flags: i32, mode: Mode) -> Result<regex::Regex, String> {
+/// A compiled pattern: the `regex` crate's engine, which never backtracks, or, for a pattern
+/// with what only a backtracking engine reads (lookahead, lookbehind), `fancy-regex`'s over the
+/// same syntax.
+#[derive(Clone)]
+enum Re {
+    Plain(regex::Regex),
+    Fancy(std::rc::Rc<fancy_regex::Regex>),
+}
+
+impl Re {
+    fn is_match(&self, t: &str) -> bool {
+        match self {
+            Re::Plain(r) => r.is_match(t),
+            Re::Fancy(r) => r.is_match(t).unwrap_or(false),
+        }
+    }
+
+    /// The first match at or after `from`, with what precedes `from` in view (an anchor, a
+    /// lookbehind): each group's span.
+    fn groups_at(&self, t: &str, from: usize) -> Option<Groups> {
+        match self {
+            Re::Plain(r) => r.captures_at(t, from).map(|c| groups_of(&c)),
+            Re::Fancy(r) => {
+                let c = r.captures_from_pos(t, from).ok().flatten()?;
+                Some(
+                    (0..c.len())
+                        .map(|i| c.get(i).map(|m| (m.start(), m.end())))
+                        .collect(),
+                )
+            }
+        }
+    }
+
+    /// Each group's name, the whole match's (none) first.
+    fn names(&self) -> Vec<Option<String>> {
+        match self {
+            Re::Plain(r) => r.capture_names().map(|n| n.map(str::to_owned)).collect(),
+            Re::Fancy(r) => r.capture_names().map(|n| n.map(str::to_owned)).collect(),
+        }
+    }
+
+    fn captures_len(&self) -> usize {
+        match self {
+            Re::Plain(r) => r.captures_len(),
+            Re::Fancy(r) => r.captures_len(),
+        }
+    }
+}
+
+fn compiled(source: &str, flags: i32, mode: Mode) -> Result<Re, String> {
     let key = (source.to_owned(), flags, mode);
     if let Some(r) = COMPILED.with(|c| c.borrow().get(&key).cloned()) {
         return r;
@@ -55,7 +104,19 @@ fn compiled(source: &str, flags: i32, mode: Mode) -> Result<regex::Regex, String
             Mode::Full => format!(r"\A(?:{p})\z"),
             Mode::Prefix => format!(r"\A(?:{p})"),
         };
-        regex::Regex::new(&p).map_err(|e| e.to_string())
+        // Lookaround is the backtracking engine's; the rest stays with the one that never is.
+        if ["(?=", "(?!", "(?<=", "(?<!"]
+            .iter()
+            .any(|look| p.contains(look))
+        {
+            fancy_regex::Regex::new(&p)
+                .map(|r| Re::Fancy(std::rc::Rc::new(r)))
+                .map_err(|e| e.to_string())
+        } else {
+            regex::Regex::new(&p)
+                .map(Re::Plain)
+                .map_err(|e| e.to_string())
+        }
     });
     COMPILED.with(|c| {
         let mut c = c.borrow_mut();
@@ -239,7 +300,15 @@ pub(crate) fn to_rust(p: &str, flags: i32) -> Result<String, String> {
                         out.push_str("(?:");
                         i += 3;
                     }
-                    (Some('=' | '!'), _) | (Some('<'), Some('=' | '!')) => return Err("Lookaround is not supported".into()),
+                    // Lookahead and lookbehind, as they are written ([`Re::Fancy`] reads them).
+                    (Some('=' | '!'), _) => {
+                        out.extend(&chars[i..i + 3]);
+                        i += 3;
+                    }
+                    (Some('<'), Some('=' | '!')) => {
+                        out.extend(&chars[i..i + 4]);
+                        i += 4;
+                    }
                     (Some('<'), _) => {
                         out.push_str("(?<");
                         i += 3;
@@ -325,7 +394,7 @@ fn throw(rt: &mut Rt, class: &'static str, msg: &str) {
 }
 
 /// `source` compiled for `mode`, or Java's `PatternSyntaxException` thrown and None.
-fn regex_for(rt: &mut Rt, source: &str, flags: i32, mode: Mode) -> Option<regex::Regex> {
+fn regex_for(rt: &mut Rt, source: &str, flags: i32, mode: Mode) -> Option<Re> {
     match compiled(source, flags, mode) {
         Ok(r) => Some(r),
         Err(e) => {
@@ -434,7 +503,11 @@ fn search(rt: &mut Rt, m: V, from: usize, mode: Mode) -> bool {
     let (source, flags) = source_of(rt, p);
     let Some(re) = regex_for(rt, &source, flags, mode) else { return false };
     let t = matcher_text(rt, m);
-    let found = if from > t.len() { None } else { re.captures_at(&t, from).map(|c| groups_of(&c)) };
+    let found = if from > t.len() {
+        None
+    } else {
+        re.groups_at(&t, from)
+    };
     set_groups(rt, m, found.as_ref());
     found.is_some()
 }
@@ -456,7 +529,7 @@ fn find(rt: &mut Rt, m: V) -> bool {
 
 /// Java's replacement `repl` for a match of `re` in `t` (`appendReplacement`): `$n` and `${name}`
 /// are its groups, `\x` is `x`. Err is the exception Java throws.
-fn expand(re: &regex::Regex, t: &str, g: &Groups, repl: &str) -> Result<String, (&'static str, String)> {
+fn expand(re: &Re, t: &str, g: &Groups, repl: &str) -> Result<String, (&'static str, String)> {
     let chars: Vec<char> = repl.chars().collect();
     let count = g.len().saturating_sub(1);
     let mut out = String::new();
@@ -475,7 +548,10 @@ fn expand(re: &regex::Regex, t: &str, g: &Groups, repl: &str) -> Result<String, 
                     let end = chars[i..].iter().position(|&ch| ch == '}').ok_or((ILLEGAL_ARGUMENT, "named capturing group is missing trailing '}'".to_owned()))?;
                     let name: String = chars[i..i + end].iter().collect();
                     i += end + 1;
-                    re.capture_names().position(|n| n == Some(name.as_str())).ok_or((ILLEGAL_ARGUMENT, format!("No group with name {{{name}}}")))?
+                    re.names()
+                        .iter()
+                        .position(|n| n.as_deref() == Some(name.as_str()))
+                        .ok_or((ILLEGAL_ARGUMENT, format!("No group with name {{{name}}}")))?
                 } else {
                     let mut n = c.to_digit(10).ok_or((ILLEGAL_ARGUMENT, "Illegal group reference".to_owned()))? as usize;
                     // Java takes the next digits while they name a group.
@@ -505,12 +581,13 @@ fn expand(re: &regex::Regex, t: &str, g: &Groups, repl: &str) -> Result<String, 
 }
 
 /// Every match of `re` in `t`, as `Matcher.find` walks them (or only the first).
-fn all_matches(re: &regex::Regex, t: &str, first_only: bool) -> Vec<Groups> {
+fn all_matches(re: &Re, t: &str, first_only: bool) -> Vec<Groups> {
     let mut out = Vec::new();
     let (mut from, mut last_empty_at) = (0usize, None);
     while from <= t.len() {
-        let Some(c) = re.captures_at(t, from) else { break };
-        let g = groups_of(&c);
+        let Some(g) = re.groups_at(t, from) else {
+            break;
+        };
         let (s, e) = g[0].unwrap_or((from, from));
         // An empty match where the last one ended is skipped, as Java's `find` steps past it.
         if s == e && last_empty_at == Some(s) {
@@ -533,7 +610,7 @@ fn all_matches(re: &regex::Regex, t: &str, first_only: bool) -> Vec<Groups> {
 }
 
 /// `Matcher.replaceAll`/`replaceFirst` over `t`.
-fn replace_in(rt: &mut Rt, re: &regex::Regex, t: &str, repl: &str, first_only: bool) -> Option<String> {
+fn replace_in(rt: &mut Rt, re: &Re, t: &str, repl: &str, first_only: bool) -> Option<String> {
     let mut out = String::new();
     let mut at = 0;
     for g in all_matches(re, t, first_only) {
@@ -556,7 +633,7 @@ fn replace_in(rt: &mut Rt, re: &regex::Regex, t: &str, repl: &str, first_only: b
 
 /// `Pattern.split(input, limit)`, Java's: no leading empty string for an empty match at the start,
 /// at most `limit` parts when positive, trailing empty ones dropped when it is 0.
-fn split_with(re: &regex::Regex, t: &str, limit: i32) -> Vec<String> {
+fn split_with(re: &Re, t: &str, limit: i32) -> Vec<String> {
     let limited = limit > 0;
     let mut parts: Vec<String> = Vec::new();
     let mut index = 0;
@@ -711,7 +788,11 @@ fn matcher_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let p = rt.get_field(m, "$pattern");
             let (source, flags) = source_of(rt, p);
             let re = regex_for(rt, &source, flags, Mode::Find)?;
-            match re.capture_names().position(|g| g == Some(n.as_str())) {
+            match re
+                .names()
+                .iter()
+                .position(|g| g.as_deref() == Some(n.as_str()))
+            {
                 Some(i) => Some(i),
                 None => {
                     throw(rt, ILLEGAL_ARGUMENT, &format!("No group with name <{n}>"));
@@ -945,7 +1026,48 @@ mod tests {
         assert!(compiled("a++b", 0, Mode::Full).unwrap().is_match("aaab"));
         assert!(compiled(r"[\w-]+\.[a-z&&[^aeiou]]+", 0, Mode::Full).unwrap().is_match("my-mod.txt"));
         assert!(compiled(r"(?u)\p{Alpha}+", 0, Mode::Full).unwrap().is_match("abc"));
-        let src = rt.string("(?<=a)b");
+        // Lookahead and lookbehind: a name split where its case turns (Moonlight's), a sentence
+        // split at its full stops but not after "e.g" (Cupboard's), a lookbehind at a search's
+        // start seeing what precedes it.
+        let camel = r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])(?![A-Z]s(?![a-z]))";
+        let split = |rt: &mut Rt, regex: &str, input: &str| -> Vec<String> {
+            let (s, r) = (rt.string(input), rt.string(regex));
+            let parts = c(
+                rt,
+                "java/lang/String.split.(Ljava/lang/String;)[Ljava/lang/String;",
+                &[s, r],
+            );
+            crate::jutil::elements(rt, parts)
+                .iter()
+                .map(|&p| rt.str_of(p).unwrap_or("?").to_owned())
+                .collect()
+        };
+        assert_eq!(
+            split(&mut rt, camel, "maxStackSizeXPBonus"),
+            ["max", "Stack", "Size", "XP", "Bonus"]
+        );
+        assert_eq!(
+            split(
+                &mut rt,
+                r"((?<!latest)(?<!e\.g)\.(?!g\.)|,)\h*",
+                "Sets the speed, e.g. 2. Default: 1"
+            ),
+            ["Sets the speed", "e.g. 2", "Default: 1"]
+        );
+        assert!(
+            compiled("(?<=a)b", 0, Mode::Find)
+                .unwrap()
+                .groups_at("ab", 1)
+                .is_some()
+        );
+        assert!(
+            compiled("(?<=a)b", 0, Mode::Find)
+                .unwrap()
+                .groups_at("cb", 1)
+                .is_none()
+        );
+        assert!(rt.thrown.is_none());
+        let src = rt.string("(?<=a)b(");
         let p = c(&mut rt, "java/util/regex/Pattern.compile.(Ljava/lang/String;)Ljava/util/regex/Pattern;", &[src]);
         assert_eq!(p, V::NULL);
         let e = rt.thrown.take().expect("thrown");

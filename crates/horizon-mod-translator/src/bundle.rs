@@ -232,7 +232,7 @@ const COMPAT: [(&str, &str); 128] = [
 
 /// The registry crates the carried runtime uses, as the engine's `[dependencies]`: each must be
 /// in Horizon's Cargo.lock, at a version that lock holds.
-const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\nflate2 = { version = \"1.1.10\", default-features = false, features = [\"zlib-rs\", \"runtime_detection\"] }\n";
+const ENGINE_DEPENDENCIES: &str = "serde_json = \"1.0.151\"\npng = \"0.18\"\nregex = { version = \"1\", default-features = false, features = [\"std\", \"unicode-perl\", \"unicode-case\"] }\nfancy-regex = { version = \"0.20\", default-features = false, features = [\"std\", \"unicode\"] }\nflate2 = { version = \"1.1.10\", default-features = false, features = [\"zlib-rs\", \"runtime_detection\"] }\n";
 
 /// horizon-compat's modules for tools only (the port pack's), not carried: nothing carried uses them.
 const TOOL_ONLY: [&str; 1] = ["convention.rs"];

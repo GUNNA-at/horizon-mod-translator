@@ -504,9 +504,20 @@ fn boxed(k: char) -> String {
     format!("{{ let b = rt.new_object({class:?}); rt.put_field(b, \"value\", r); b }}")
 }
 
-/// Whether a mixin's method only stands for its target's (`@Shadow`).
+/// Whether a mixin's method only stands for its target's: a `@Shadow`, or an `@Accessor` or
+/// `@Invoker`, whose static form has a body only because `javac` wants one (`throw new
+/// AssertionError()`) and Mixin replaces it. Taken for the target's own, a static invoker's
+/// placeholder ran in place of the method it names: Create's `GaugeShaper.make()` threw, by
+/// another mod's `@Invoker("make")`, and its gauges were never registered.
 fn is_shadow(m: &crate::class::Method) -> bool {
-    m.annotations.iter().any(|a| a.ty == "Lorg/spongepowered/asm/mixin/Shadow;")
+    m.annotations.iter().any(|a| {
+        matches!(
+            a.ty.as_str(),
+            "Lorg/spongepowered/asm/mixin/Shadow;"
+                | "Lorg/spongepowered/asm/mixin/gen/Accessor;"
+                | "Lorg/spongepowered/asm/mixin/gen/Invoker;"
+        )
+    })
 }
 
 /// The kind letter of what a descriptor returns (`V`, `I`..., `L` for any reference).
@@ -2868,6 +2879,91 @@ mod mixin_tests {
         assert_eq!(super::accessor_name("getOPERATING_SYSTEM", &accessor), "OPERATING_SYSTEM");
         assert_eq!(super::accessor_name("getter", &accessor), "getter");
         assert_eq!(super::accessor_name("mod$callIsValid", &["call", "invoke"]), "isValid");
+    }
+}
+
+#[cfg(test)]
+mod invoker_tests {
+    use crate::class::ClassFile;
+    use std::process::Command;
+
+    /// A static `@Invoker` in an accessor mixin has a body only for `javac`. The method it names
+    /// stays its class's own, for that class's callers and for the invoker's alike.
+    #[test]
+    fn an_invokers_placeholder_does_not_stand_for_the_method_it_names() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("horizon-invoker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = [
+            (
+                "org/spongepowered/asm/mixin/Mixin.java",
+                "package org.spongepowered.asm.mixin; import java.lang.annotation.*; @Retention(RetentionPolicy.CLASS) public @interface Mixin { Class<?>[] value() default {}; }",
+            ),
+            (
+                "org/spongepowered/asm/mixin/gen/Invoker.java",
+                "package org.spongepowered.asm.mixin.gen; import java.lang.annotation.*; @Retention(RetentionPolicy.RUNTIME) public @interface Invoker { String value() default \"\"; }",
+            ),
+            (
+                "t/Shaper.java",
+                "package t; public class Shaper { static Shaper make() { return new Shaper(); } }",
+            ),
+            (
+                "t/ShaperAccessor.java",
+                "package t; @org.spongepowered.asm.mixin.Mixin(Shaper.class) public interface ShaperAccessor { @org.spongepowered.asm.mixin.gen.Invoker(\"make\") static Shaper make() { throw new AssertionError(); } }",
+            ),
+            (
+                "t/User.java",
+                "package t; public class User { static Object own() { return Shaper.make(); } static Object through() { return ShaperAccessor.make(); } }",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let classes: Vec<ClassFile> = ["t/Shaper.class", "t/ShaperAccessor.class", "t/User.class"]
+            .iter()
+            .map(|c| ClassFile::parse(&std::fs::read(root.join(c)).unwrap()).unwrap())
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        let mut p = super::Program::new(&classes);
+        assert_eq!(
+            p.resolve("t/Shaper", "make", "()Lt/Shaper;").as_deref(),
+            Some("t/Shaper")
+        );
+        let module = p.emit();
+        // Both callers reach `Shaper.make`'s own code, and nothing calls the placeholder.
+        let own = super::fn_name("t/Shaper", "make", "()Lt/Shaper;");
+        let placeholder = super::fn_name("t/ShaperAccessor", "make", "()Lt/Shaper;");
+        let body = |f: &str| {
+            let at = module
+                .find(&format!("pub fn {f}("))
+                .unwrap_or_else(|| panic!("{f} is not written"));
+            &module[at..at + module[at..].find("\n}\n").unwrap()]
+        };
+        for user in ["own", "through"] {
+            let text = body(&super::fn_name("t/User", user, "()Ljava/lang/Object;"));
+            assert!(
+                text.contains(&format!("{own}(rt")),
+                "{user} does not call Shaper.make:\n{text}"
+            );
+            assert!(
+                !text.contains(&format!("{placeholder}(rt")),
+                "{user} calls the placeholder:\n{text}"
+            );
+        }
+        assert!(p.unsupported.is_empty(), "{:?}", p.unsupported);
     }
 }
 

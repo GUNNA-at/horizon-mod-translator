@@ -324,7 +324,9 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 23] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 24] = [
+    // The side a game runs on: a `switch` over it builds its table from `values()`.
+    ("net/neoforged/api/distmarker/Dist", &["CLIENT", "DEDICATED_SERVER"]),
     (MONTH, &["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"]),
     // FML's config files, in its order: what `ModConfig.Type.values()` and an enum codec give.
     ("net/neoforged/fml/config/ModConfig$Type", &["COMMON", "CLIENT", "SERVER", "STARTUP"]),
