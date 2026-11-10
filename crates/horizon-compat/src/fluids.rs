@@ -1077,6 +1077,68 @@ mod tests {
     use crate::api::call as c;
     use crate::host::MemoryHost;
 
+    /// Tag keys are one object for each registry and location, and two of them are two keys of a
+    /// map: AE2 keys a map by the sixteen dye tags.
+    #[test]
+    fn tag_keys_are_keys_of_their_own() {
+        crate::install();
+        let mut rt = Rt::new();
+        let registry = api::get_static(&mut rt, "net/minecraft/core/registries/Registries.ITEM");
+        let tag = |rt: &mut Rt, name: &str| {
+            let s = rt.string(name);
+            let location = api::call(
+                rt,
+                "net/minecraft/resources/ResourceLocation.parse.(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;",
+                &[s],
+            );
+            api::call(
+                rt,
+                "net/minecraft/tags/TagKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/tags/TagKey;",
+                &[registry, location],
+            )
+        };
+        let (white, gray, again) = (
+            tag(&mut rt, "c:dyes/white"),
+            tag(&mut rt, "c:dyes/gray"),
+            tag(&mut rt, "c:dyes/white"),
+        );
+        assert_eq!(white, again);
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "java/lang/Object.equals.(Ljava/lang/Object;)Z",
+                &[white, gray]
+            ),
+            V::I(0)
+        );
+        assert_ne!(
+            api::call(&mut rt, "java/lang/Object.hashCode.()I", &[white]),
+            api::call(&mut rt, "java/lang/Object.hashCode.()I", &[gray])
+        );
+        let map = rt.new_object("java/util/HashMap");
+        api::call(&mut rt, "java/util/HashMap.<init>.()V", &[map]);
+        for (i, key) in [white, gray, again].into_iter().enumerate() {
+            api::call(
+                &mut rt,
+                "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[map, key, V::I(i as i32)],
+            );
+        }
+        assert_eq!(
+            api::call(&mut rt, "java/util/Map.size.()I", &[map]),
+            V::I(2)
+        );
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[map, gray]
+            ),
+            V::I(1)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// NeoForge 1.21.1's `FluidStack.is(Holder)`: `is((Fluid) holder.value())`.
     #[test]
     fn a_fluid_stack_is_its_holders_fluid() {

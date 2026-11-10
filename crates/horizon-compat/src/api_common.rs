@@ -2313,8 +2313,6 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         ("net/neoforged/neoforge/fluids/FluidStack", "hashFluidAndComponents") => V::I(stack_hash(rt, a(0), true)),
         // The missing texture's sprite name (`minecraft:missingno`), which a mod compares a sprite with.
         ("net/minecraft/client/renderer/texture/MissingTextureAtlasSprite", "getLocation") => rt.string("minecraft:missingno"),
-        // `BuiltInLootTables.register(key)` adds a table's key to vanilla's set and answers it.
-        ("net/minecraft/world/level/storage/loot/BuiltInLootTables", "register") => a(0),
         // `LazyLoadedValue(supplier)`: the supplier asked once, at the first `get()`.
         ("net/minecraft/util/LazyLoadedValue", "<init>") => {
             rt.put_field(a(0), "$supplier", a(1));

@@ -130,13 +130,74 @@ fn fallback_dirs() -> &'static [PathBuf] {
     DIRS.get_or_init(|| std::env::var("HORIZON_COMPAT_RESOURCES").map(|v| v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()).unwrap_or_default())
 }
 
+/// Content folders by the namespace folders each has under `assets` and `data`.
+type ByNamespace = std::collections::HashMap<(String, String), Vec<PathBuf>>;
+
+/// [`ByNamespace`] of `folders`: those that are no folder (a packed mod) have none.
+fn by_namespace(folders: &[PathBuf]) -> ByNamespace {
+    let mut out = ByNamespace::new();
+    for folder in folders {
+        for root in ["assets", "data"] {
+            let Ok(entries) = std::fs::read_dir(folder.join(root)) else {
+                continue;
+            };
+            for e in entries.flatten().filter(|e| e.path().is_dir()) {
+                if let Some(namespace) = e.file_name().to_str() {
+                    out.entry((root.to_owned(), namespace.to_owned()))
+                        .or_default()
+                        .push(folder.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The mods' content folders that have files for `namespace` under `root` (`assets`, `data`):
+/// the folders the game was started with (`--dev-mod`) and those in its `horizon-mods` folder, where the
+/// translator put each jar's resource files as they were. A mod reads its own through its class
+/// loader while it is being constructed (Sophisticated Backpacks its models, for its shapes),
+/// before any game is there to ask for a resource.
+fn content_dirs(root: &str, namespace: &str) -> &'static [PathBuf] {
+    static DIRS: std::sync::OnceLock<ByNamespace> = std::sync::OnceLock::new();
+    let all = DIRS.get_or_init(|| {
+        let mut folders = Vec::new();
+        let mut args = std::env::args_os();
+        while let Some(arg) = args.next() {
+            if arg == "--dev-mod"
+                && let Some(path) = args.next()
+            {
+                folders.push(PathBuf::from(path));
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("horizon-mods") {
+            let mut installed: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            installed.sort();
+            folders.extend(installed);
+        }
+        by_namespace(&folders)
+    });
+    all.get(&(root.to_owned(), namespace.to_owned()))
+        .map_or(&[], Vec::as_slice)
+}
+
+/// The content folders that may hold resource file `path` (`assets/<namespace>/...`).
+fn content_dirs_of(path: &str) -> &'static [PathBuf] {
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next()) {
+        (Some(root), Some(namespace)) => content_dirs(root, namespace),
+        _ => &[],
+    }
+}
+
 /// A resource path a mod may read: relative, no `..`, no empty part.
 fn safe(path: &str) -> bool {
     !path.is_empty() && !path.contains('\\') && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
 }
 
 /// The bytes of resource file `path` (`assets/create/lang/en_us.json`): the host's, else those of
-/// the first fallback folder that has it.
+/// the first fallback folder that has it, else of the first of the mods' content folders
+/// ([`content_dirs`]).
 pub fn file(rt: &Rt, path: &str) -> Option<Vec<u8>> {
     if !safe(path) {
         return None;
@@ -144,7 +205,10 @@ pub fn file(rt: &Rt, path: &str) -> Option<Vec<u8>> {
     if let Some(bytes) = rt.host().and_then(|h| h.resource(path)) {
         return Some(bytes);
     }
-    fallback_dirs().iter().find_map(|d| std::fs::read(d.join(path)).ok())
+    fallback_dirs()
+        .iter()
+        .chain(content_dirs_of(path))
+        .find_map(|d| std::fs::read(d.join(path)).ok())
 }
 
 /// A file of a mod's own jar by its path there (`config/defaults.json`), as
@@ -1244,6 +1308,35 @@ mod tests {
 
     /// A reader's lines and chars; `listResources` finds the files under a folder that its filter
     /// takes, by location, in every namespace.
+    /// Content folders are found by the namespaces they have files for, so a mod's own resource
+    /// file is looked for only where one can be.
+    #[test]
+    fn content_folders_are_known_by_their_namespaces() {
+        let dir = std::env::temp_dir().join(format!("hz-content-{}", std::process::id()));
+        let (gears, belts, packed) = (
+            dir.join("content-gears"),
+            dir.join("content-belts"),
+            dir.join("packed.hmod"),
+        );
+        std::fs::create_dir_all(gears.join("assets/gears/models/block")).unwrap();
+        std::fs::create_dir_all(gears.join("data/gears/recipe")).unwrap();
+        std::fs::create_dir_all(belts.join("assets/belts/lang")).unwrap();
+        std::fs::create_dir_all(belts.join("assets/gears/lang")).unwrap();
+        std::fs::write(&packed, b"PK").unwrap();
+        let found = by_namespace(&[gears.clone(), belts.clone(), packed]);
+        let of = |root: &str, namespace: &str| {
+            found
+                .get(&(root.to_owned(), namespace.to_owned()))
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(of("assets", "gears"), [gears.clone(), belts.clone()]);
+        assert_eq!(of("assets", "belts"), [belts]);
+        assert_eq!(of("data", "gears"), [gears]);
+        assert!(of("data", "belts").is_empty() && of("assets", "minecraft").is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn readers_and_listing_read_as_javas_do() {
         crate::install();

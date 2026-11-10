@@ -49,6 +49,16 @@ pub(crate) fn enum_constants(rt: &mut Rt, class: &str) -> Option<V> {
     if let Some(v) = rt.reflect(class, "values", &[]) {
         return Some(v);
     }
+    // A class of the mod's that lists none, a primitive or an array is no enum; nor is a class
+    // the API was asked about before and had no constants for (a config library asks
+    // `isEnum()` of every field's class, each time it reads one).
+    if rt.is_mod_class(class) || !class.contains('/') || class.starts_with('[') {
+        return None;
+    }
+    let known = format!("compat:not-an-enum/{class}");
+    if rt.interned.contains_key(&known) {
+        return None;
+    }
     let key = rt.static_key(&format!("{class}.values.()[L{class};"));
     let before = rt.unmapped.get(key).copied().unwrap_or(0);
     let v = crate::api::call(rt, key, &[]);
@@ -60,6 +70,7 @@ pub(crate) fn enum_constants(rt: &mut Rt, class: &str) -> Option<V> {
                 rt.unmapped.remove(key);
             }
         }
+        rt.interned.insert(known, V::NULL);
         return None;
     }
     (v.r() != 0).then_some(v)

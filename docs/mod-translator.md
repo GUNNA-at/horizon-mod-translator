@@ -10134,6 +10134,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     names, each kind of adapter and their order, a factory with its delegate, the naming policies
     and strategies.
   - Tests: 784 compat (the types' own two), 16 compat-core, 31 translator.
+- [x] 2026-11-10 Part 164: launch 10 (the build of Parts 159–161), and what it showed. Every crate
+  was built again for the runtime's core (2353 s for the round). The mods' loading took about 190 s
+  where launch 9 spent 650 s on its first of several; the game went through its resources, the
+  server thread started (`ServerAboutToStartEvent`, `ServerStartingEvent` and `ServerStartedEvent`
+  reached their listeners) and the game answered as ready after 533 s. 28,194 blocks and items
+  were declared (13,095 at launch 8). Then the window stopped: the pack has 23,177 block textures
+  and the renderer draws from 8 arrays of 2048.
+  - Tag keys in a map: `TagKey` is a record in the table of vanilla's records and an object of the
+    runtime's own with other field names, so the record's `equals` found every two tags equal and
+    their hash 0: AE2's map of the sixteen dye tags was one entry ("Duplicate key"). A record's
+    `equals` and `hashCode` are now for objects that hold its components.
+  - A mod's own resource files while it is constructed: Sophisticated Backpacks reads its models
+    through its class loader (`assets/<mod>/models/...`) before any game is there to ask. Such a
+    file is now found in the mods' content folders (the ones the game is started with and those in
+    its `horizon-mods` folder), where the translator put the jar's files as they were.
+  - `BuiltInLootTables` is the game's own code again: one arm of the runtime named it, which kept
+    its constants (`SIMPLE_DUNGEON`...) from being taken from the player's install.
+  - Whether a class is an enum is asked of the API once for each class, and never for a mod's own
+    class or a primitive: a config library asked `isEnum()` of every field's class at every read.
+  - Alone (`modcheck.sh`): Sophisticated Backpacks is constructed (6 blocks, 65 items, 1 key left
+    unmapped of 14), Molten Vents and Sparse Structures too.
+  - Tests: 786 compat, 16 compat-core, 31 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

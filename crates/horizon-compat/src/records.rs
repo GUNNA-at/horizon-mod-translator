@@ -34,9 +34,21 @@ fn zero(desc: &str) -> V {
     }
 }
 
-/// Whether `v` is a record of `class` made here: its components are fields.
+/// Whether `v` is a record of `class` made here: its components are fields. An object of the
+/// class that another module made and keeps under names of its own (a tag key, one object for
+/// each registry and location) holds none of them and is that module's to answer for: taken for
+/// a record, every two of them were equal with a hash of 0, and a map keyed by tags held one.
 fn made_here(rt: &Rt, v: V, class: &str) -> bool {
-    v.r() != 0 && rt.class_of(v) == class && matches!(rt.heap.get(v.r() as usize).map(|o| &o.data), Some(Data::Fields(_)))
+    if v.r() == 0 || rt.class_of(v) != class {
+        return false;
+    }
+    let Some(Data::Fields(fields)) = rt.heap.get(v.r() as usize).map(|o| &o.data) else {
+        return false;
+    };
+    match components(class) {
+        Some(all) if !all.is_empty() => all.iter().any(|(name, _)| fields.contains_key(name)),
+        _ => true,
+    }
 }
 
 /// `a.equals(b)` for a vanilla record or data class made here, as the class's own `equals` answers
@@ -59,7 +71,8 @@ fn own_key(rt: &mut Rt, v: V, method: &str) -> Option<&'static str> {
         return None;
     }
     let class = rt.class_of(v);
-    if RECORDS.binary_search_by(|(c, _)| (*c).cmp(class)).is_err() && members(class).is_none() {
+    let record = RECORDS.binary_search_by(|(c, _)| (*c).cmp(class)).is_ok();
+    if (record && !made_here(rt, v, class)) || (!record && members(class).is_none()) {
         return None;
     }
     Some(rt.static_key(&format!("{class}.{method}")))
