@@ -965,11 +965,11 @@ fn derived_classes(
     // classes (`Arrays.binarySearch`, `Math.nextUp`): where the runtime has no answer, the JDK's
     // own code may stand as the game's does.
     let mut calls = horizon_mod_translator::code_calls(&all, &|c| {
-        (horizon_mod_translator::is_api(c) || horizon_mod_translator::derive::is_jdk(c))
+        (horizon_mod_translator::is_api(c) || horizon_mod_translator::derive::is_library(c))
             && !own.contains(c)
     });
     calls.retain(|m, (_, is_static)| {
-        *is_static || !horizon_mod_translator::derive::is_jdk(&m.owner)
+        *is_static || !horizon_mod_translator::derive::is_library(&m.owner)
     });
     let statics_called = calls
         .iter()
@@ -1097,10 +1097,10 @@ fn main() -> ExitCode {
                 let derived = derived_classes(&c, &game)?;
                 println!("  of the game's own code: {own} classes the runtime doesn't model, and {} methods of {} it does", derived.iter().map(|k| k.methods.len()).sum::<usize>(), derived.len());
                 let of_java = |k: &&horizon_mod_translator::class::ClassFile| {
-                    k.name.strip_prefix(horizon_compat::linked::DERIVED).is_some_and(horizon_mod_translator::derive::is_jdk)
+                    k.name.strip_prefix(horizon_compat::linked::DERIVED).is_some_and(horizon_mod_translator::derive::is_library)
                 };
                 if java.is_some() {
-                    println!("  and of the Java runtime's: {} methods of {} classes it models", derived.iter().filter(of_java).map(|k| k.methods.len()).sum::<usize>(), derived.iter().filter(of_java).count());
+                    println!("  and of the Java runtime's and the libraries': {} methods of {} classes the runtime models", derived.iter().filter(of_java).map(|k| k.methods.len()).sum::<usize>(), derived.iter().filter(of_java).count());
                 }
                 if std::env::var_os("HZ_DEBUG_DERIVED_JDK").is_some() {
                     for k in derived.iter().filter(of_java) {
@@ -1629,7 +1629,7 @@ fn main() -> ExitCode {
                 };
                 let stands = !answered
                     && is_static
-                    && horizon_mod_translator::derive::is_jdk(&m.owner)
+                    && horizon_mod_translator::derive::is_library(&m.owner)
                     && jdk_deriver
                         .as_mut()
                         .is_some_and(|d| d.blockers(&m.owner, &m.name, &m.desc, false).is_empty());

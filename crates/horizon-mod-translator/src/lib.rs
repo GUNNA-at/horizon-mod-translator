@@ -122,6 +122,11 @@ pub fn game_jars_in(libraries: &Path) -> Option<Vec<std::path::PathBuf>> {
         ("com/mojang/authlib", "authlib"),
         ("net/neoforged/bus", "bus"),
         ("net/neoforged/fancymodloader/loader", "loader"),
+        // The plain libraries every mod leans on: their static helpers stand for the ones the
+        // runtime has no answer for, and a few of their classes are taken whole ([`LIBRARY_CODE`]).
+        ("com/google/guava/guava", "guava"),
+        ("org/apache/commons/commons-lang3", "commons-lang3"),
+        ("commons-io/commons-io", "commons-io"),
     ] {
         let found = dirs(libraries.join(folder), "")
             .into_iter()
@@ -196,10 +201,33 @@ pub fn jdk_code(class: &str) -> bool {
     })
 }
 
-/// Whether a class is code of the player's install, the game's or the Java runtime's
-/// ([`game_code`], [`jdk_code`]): translated as far as the mods reach into it.
+/// Classes of the game's plain libraries (Guava, Apache Commons) that are code over what the
+/// runtime models, taken from the player's install as [`JDK_CODE`]'s are from their Java: by name
+/// with the classes nested in it, or every class whose name starts so (`*` at the end).
+pub const LIBRARY_CODE: &[&str] = &[
+    "com/google/common/base/Ascii",
+    "com/google/common/base/CaseFormat",
+    "com/google/common/base/CharMatcher",
+    "com/google/common/base/Converter",
+    "com/google/common/base/MoreObjects$ToStringHelper",
+    "org/apache/commons/lang3/math/Fraction",
+];
+
+/// Whether a class of the game's libraries is code to translate as a mod's library is
+/// ([`LIBRARY_CODE`]).
+pub fn library_code(class: &str) -> bool {
+    LIBRARY_CODE.iter().any(|p| {
+        class
+            .strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('$'))
+    })
+}
+
+/// Whether a class is code of the player's install, the game's, its libraries' or the Java
+/// runtime's ([`game_code`], [`library_code`], [`jdk_code`]): translated as far as the mods reach
+/// into it.
 pub fn install_code(class: &str) -> bool {
-    game_code(class) || jdk_code(class)
+    game_code(class) || library_code(class) || jdk_code(class)
 }
 
 /// Whether a path among the game's jars is a Java runtime's image ([`jimage`]) and no jar.
@@ -303,7 +331,7 @@ fn game_classes(
             let Some(class) = name.strip_suffix(".class") else {
                 continue;
             };
-            if !game_code(class) || have.contains(class) {
+            if !(game_code(class) || library_code(class)) || have.contains(class) {
                 continue;
             }
             let mut b = Vec::new();

@@ -29,6 +29,15 @@ pub fn is_jdk(class: &str) -> bool {
     class.starts_with("java/") || class.starts_with("javax/")
 }
 
+/// Whether a class is of the plain libraries read for their code beside the game's: the Java
+/// runtime's ([`is_jdk`]), Guava's, Apache Commons'. A static method of one that the runtime has
+/// no answer for stands by its own code where that asks only what is answered.
+pub fn is_library(class: &str) -> bool {
+    is_jdk(class)
+        || class.starts_with("com/google/common/")
+        || class.starts_with("org/apache/commons/")
+}
+
 /// The Java runtime's classes read for their code ([`Game::open`]): those of `java.lang`,
 /// `java.util` and `java.util.function` themselves, where the static helpers a mod calls are
 /// (`Arrays`, `Collections`, `Math`, `Character`).
@@ -97,7 +106,9 @@ impl Game {
                 let Some(class) = name.strip_suffix(".class") else {
                     continue;
                 };
-                if classes.contains_key(class) || !crate::is_api(class) {
+                if classes.contains_key(class)
+                    || !(crate::is_api(class) || (is_library(class) && !crate::library_code(class)))
+                {
                     continue;
                 }
                 let mut b = Vec::new();
@@ -399,6 +410,14 @@ impl<'a> Deriver<'a> {
 
     /// The blockers of one method's own code.
     fn body(&mut self, c: &'a ClassFile, m: &'a Method) -> BTreeSet<String> {
+        // Of the libraries' own code only static methods stand: an object of a library's class is
+        // the runtime's to answer for, however it keeps it.
+        if is_library(&c.name) && m.access & 0x0008 == 0 {
+            return BTreeSet::from([format!(
+                "{}.{}.{} [a library's object]",
+                c.name, m.name, m.desc
+            )]);
+        }
         let key = (c.name.clone(), m.name.clone(), m.desc.clone());
         if let Some(b) = self.bodies.get(&key) {
             return b.clone();
@@ -424,7 +443,7 @@ impl<'a> Deriver<'a> {
         // The Java runtime's own code is held to everything it asks: the game's may take the
         // libraries for answered (the runtime models them as far as the game uses them), but
         // the JDK's code reaches under itself, for what only a JVM has.
-        let strict = is_jdk(&c.name);
+        let strict = is_library(&c.name);
         let mut out = BTreeSet::new();
         for i in insns {
             let idx = match i.arg {

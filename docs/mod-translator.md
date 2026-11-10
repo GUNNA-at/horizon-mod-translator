@@ -9826,6 +9826,22 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - `Class.getInterfaces`, `getPackage`, `getEnclosingClass`, `isAnnotation`; an unmapped static field is
     traced like an unmapped call (a null codec's source was invisible in the log).
   - Tests: one per piece; 757 compat tests pass. Not in a game yet: the pack's build finishes first.
+- [x] 2026-11-10 Part 151: Guava's and Apache Commons' own code, as the JDK's. The pack misses some 400
+  uses of their static helpers (`StringUtils.splitByCharacterTypeCamelCase`, `Validate.notNull`,
+  `ArrayUtils.add`, `Ints.saturatedCast`, `Strings.padStart`), and Puzzles Lib's config builder named its
+  categories by `CaseFormat`, which nothing answered: ten mods' configs ended in "Attempted to pop 1
+  elements".
+  - The install's `guava`, `commons-lang3` and `commons-io` jars are read beside the game's. A static method
+    of theirs the runtime has no answer for stands by its own code, held to every call it makes as the
+    JDK's is (`derive`, `is_library`). In a bundle of 60 of the pack's mods 125 static methods of the JDK
+    and the libraries stand.
+  - Only static methods of a library's or the JDK's class stand now: an instance method that stood was
+    carried too (318 of Guava's in that bundle, its cache's and its ranges' insides) and could have been
+    found for an object the runtime keeps its own way.
+  - A few of their classes are taken whole, as `JDK_CODE`'s are (`LIBRARY_CODE`): `CaseFormat`,
+    `CharMatcher`, `Ascii`, `Converter`, `MoreObjects.ToStringHelper`, commons' `Fraction`.
+  - Not checked against a JVM yet (the differential fixture has no library on its class path): the pack's
+    next launch is the test. The translator's tests pass.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
