@@ -435,6 +435,26 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     if let Some((_, l)) = SHEET_ATLASES.iter().find(|(f, _)| *f == field) {
         return Some(rt.string(l));
     }
+    // The signs' materials by wood type: vanilla's woods', and a mod puts its own wood's there
+    // itself where it doesn't call `addWoodType` (GlitchCore's `SheetHelper`).
+    if matches!(field, "SIGN_MATERIALS" | "HANGING_SIGN_MATERIALS") {
+        let key = format!("compat:sheets/{field}");
+        if let Some(&map) = rt.interned.get(&key) {
+            return Some(map);
+        }
+        let map = rt.alloc("java/util/HashMap", crate::Data::Table(Default::default()));
+        rt.interned.insert(key, map);
+        let woods = crate::api::call(
+            rt,
+            "net/minecraft/world/level/block/state/properties/WoodType.values.()Ljava/util/stream/Stream;",
+            &[],
+        );
+        for wood in jutil::elements(rt, woods) {
+            let material = sign_material(rt, wood, field == "HANGING_SIGN_MATERIALS");
+            jutil::table_put(rt, map, wood, material);
+        }
+        return Some(map);
+    }
     let &(_, atlas, texture) = SHEET_MATERIALS.iter().find(|(f, _, _)| *f == field)?;
     Some(rt.intern(format!("compat:sheets/{field}"), |rt| material(rt, sheet(atlas), &format!("minecraft:{texture}"))))
 }

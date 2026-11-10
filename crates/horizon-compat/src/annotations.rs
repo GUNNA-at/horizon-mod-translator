@@ -274,7 +274,7 @@ mod tests {
     }
 
     fn content() -> Rt {
-        let mut rt = Rt::default();
+        let mut rt = Rt::new();
         rt.reflect = Some(reflect);
         for c in [CONTENT, REINFORCED, GROUP, "net/geforcemods/securitycraft/util/Marked", "compat:test/Sub"] {
             rt.supers.insert(c, "java/lang/Object");

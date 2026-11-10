@@ -470,7 +470,8 @@ fn same_value(rt: &Rt, a: V, b: V) -> bool {
 
 fn data_items(rt: &mut Rt, data: V) -> Option<&mut Vec<V>> {
     match rt.heap.get_mut(data.r() as usize).map(|o| &mut o.data) {
-        Some(Data::Array(items)) => Some(items),
+        // `null` is an array too (the heap's first object), and no entity's data.
+        Some(Data::Array(items)) if data.r() != 0 => Some(items),
         _ => None,
     }
 }

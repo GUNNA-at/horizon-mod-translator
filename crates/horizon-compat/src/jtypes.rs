@@ -15,10 +15,15 @@ pub(crate) const VARIABLE: &str = "java/lang/reflect/TypeVariable";
 const TYPE: &str = "java/lang/reflect/Type";
 const OBJECT: &str = "Ljava/lang/Object;";
 
+/// Guava's `TypeToken`: a type kept as a value, which mods key their tables by (MineColonies'
+/// request system finds a factory by the token of what it makes).
+const GUAVA_TOKEN: &str = "com/google/common/reflect/TypeToken";
+const TYPE_SET: &str = "com/google/common/reflect/TypeToken$TypeSet";
+
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     matches!(
         owner,
-        PARAMETERIZED | GENERIC_ARRAY | WILDCARD | VARIABLE | TYPE
+        PARAMETERIZED | GENERIC_ARRAY | WILDCARD | VARIABLE | TYPE | GUAVA_TOKEN | TYPE_SET
     )
 }
 
@@ -237,10 +242,215 @@ pub(crate) fn type_parameters(rt: &mut Rt, class: &str) -> V {
     rt.alloc("[Ljava/lang/reflect/TypeVariable;", crate::Data::Array(all))
 }
 
+/// The `TypeToken` of a signature: one object for each, so two tokens of a type are the same key.
+fn token_of(rt: &mut Rt, sig: &str) -> V {
+    let key = format!("compat:type-token/{sig}");
+    if let Some(&t) = rt.interned.get(&key) {
+        return t;
+    }
+    let t = rt.new_object(GUAVA_TOKEN);
+    let text = rt.string(sig);
+    rt.put_field(t, "$signature", text);
+    rt.interned.insert(key, t);
+    t
+}
+
+/// The class above `class` and the interfaces it names: a mod's class by its own definition, the
+/// game's by its class file. `Object` is above a class only: an interface's types end at
+/// interfaces, as reflection has them (one is told from a class by being named as an interface).
+fn parents(rt: &Rt, class: &str) -> Vec<String> {
+    let mut up: Vec<String> = Vec::new();
+    let named_interface = |rt: &Rt, c: &str| {
+        rt.interfaces.values().any(|all| all.contains(&c)) || crate::api::game_interface(c)
+    };
+    if let Some(s) = rt.supers.get(class) {
+        up.push((*s).to_owned());
+        up.extend(
+            rt.interfaces
+                .get(class)
+                .copied()
+                .unwrap_or_default()
+                .iter()
+                .map(|i| (*i).to_owned()),
+        );
+    } else if let Some((above, interfaces)) = crate::api::game_parents(class) {
+        // The table names no class above one that is right under `Object`.
+        up.push(
+            if above.is_empty() {
+                "java/lang/Object"
+            } else {
+                above
+            }
+            .to_owned(),
+        );
+        up.extend(interfaces.iter().map(|i| (*i).to_owned()));
+    } else if class != "java/lang/Object" {
+        up.push("java/lang/Object".to_owned());
+    }
+    if named_interface(rt, class) {
+        up.retain(|c| c != "java/lang/Object");
+    }
+    up
+}
+
+/// Every class and interface `class` is or is under, each before the ones above it, as
+/// `TypeToken.getTypes()` lists them (the order among unrelated ones is not promised there).
+fn supertypes(rt: &Rt, class: &str) -> Vec<String> {
+    let mut all = vec![class.to_owned()];
+    let mut above: Vec<Vec<String>> = Vec::new();
+    let mut i = 0;
+    while i < all.len() {
+        let up = parents(rt, &all[i]);
+        for c in &up {
+            if !all.contains(c) {
+                all.push(c.clone());
+            }
+        }
+        above.push(up);
+        i += 1;
+    }
+    // How many types are above each, itself included: one under another has more than it.
+    let count = |start: usize| {
+        let mut seen = vec![start];
+        let mut at = 0;
+        while at < seen.len() {
+            for c in &above[seen[at]] {
+                let j = all.iter().position(|x| x == c).unwrap_or(start);
+                if !seen.contains(&j) {
+                    seen.push(j);
+                }
+            }
+            at += 1;
+        }
+        seen.len()
+    };
+    let mut order: Vec<usize> = (0..all.len()).collect();
+    let counts: Vec<usize> = order.iter().map(|&i| count(i)).collect();
+    order.sort_by(|a, b| counts[*b].cmp(&counts[*a]));
+    order.into_iter().map(|i| all[i].clone()).collect()
+}
+
+/// The raw class of a signature: an array's is the array.
+fn raw_class(sig: &str) -> String {
+    match sig.as_bytes().first() {
+        Some(b'[') => sig.to_owned(),
+        Some(b'L') => parts(sig).0,
+        _ => crate::jlang::descriptor_class(sig).to_owned(),
+    }
+}
+
+/// `TypeToken` and its `TypeSet`. Types here compare by their raw classes: a token is a subtype
+/// of another when its class is under the other's, whatever the two name as type arguments.
+fn guava(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    if owner == TYPE_SET {
+        let tokens = crate::jutil::elements(rt, this);
+        return Some(match name {
+            "rawTypes" => {
+                let classes: Vec<V> = tokens
+                    .iter()
+                    .map(|t| {
+                        let raw = raw_class(&signature(rt, *t));
+                        rt.class_literal(&raw)
+                    })
+                    .collect();
+                crate::jutil::new_set_of(rt, &classes)
+            }
+            _ => return None,
+        });
+    }
+    let own = |rt: &Rt, v: V| {
+        rt.str_of(rt.get_field(v, "$signature"))
+            .unwrap_or(OBJECT)
+            .to_owned()
+    };
+    Some(match name {
+        "of" => {
+            let sig = signature(rt, this);
+            token_of(rt, &sig)
+        }
+        // `new TypeToken<Type>() {}`: the type argument the object's class gives `TypeToken`,
+        // found up its classes; a wildcard or a type variable there stands for its bound.
+        "<init>" => {
+            let mut class = rt.class_of(this).to_owned();
+            let mut sig = OBJECT.to_owned();
+            loop {
+                if let Some((_, up, _)) = class_signature(rt, &class)
+                    && up.starts_with("Lcom/google/common/reflect/TypeToken<")
+                {
+                    sig = parts(&up).1.first().cloned().unwrap_or(sig);
+                    break;
+                }
+                match rt.supers.get(class.as_str()).copied() {
+                    Some(up) if up != GUAVA_TOKEN => class = up.to_owned(),
+                    _ => break,
+                }
+            }
+            let sig = match sig.as_bytes().first() {
+                Some(b'+' | b'-') => sig[1..].to_owned(),
+                Some(b'*' | b'T') => OBJECT.to_owned(),
+                _ => sig,
+            };
+            let text = rt.string(&sig);
+            rt.put_field(this, "$signature", text);
+            V::Void
+        }
+        "getType" => {
+            let sig = own(rt, this);
+            of(rt, &sig)
+        }
+        "getRawType" => {
+            let raw = raw_class(&own(rt, this));
+            rt.class_literal(&raw)
+        }
+        // The token itself, then its class's supertypes, each raw.
+        "getTypes" => {
+            let sig = own(rt, this);
+            let mut tokens = vec![this];
+            for class in supertypes(rt, &raw_class(&sig)).into_iter().skip(1) {
+                tokens.push(token_of(rt, &format!("L{class};")));
+            }
+            crate::jutil::new_set_of(rt, &tokens)
+        }
+        "isSubtypeOf" | "isSupertypeOf" => {
+            let (mine, theirs) = (raw_class(&own(rt, this)), raw_class(&signature(rt, a(1))));
+            let (under, over) = if name == "isSubtypeOf" {
+                (mine, theirs)
+            } else {
+                (theirs, mine)
+            };
+            V::I(rt.is_a(&under, &over) as i32)
+        }
+        "isArray" => V::I(own(rt, this).starts_with('[') as i32),
+        "getComponentType" => match own(rt, this).strip_prefix('[') {
+            Some(of) => token_of(rt, of),
+            None => V::NULL,
+        },
+        "equals" if desc == "(Ljava/lang/Object;)Z" => {
+            let other = a(1);
+            let same = this == other
+                || (other.r() != 0
+                    && rt.instance_of(other, GUAVA_TOKEN)
+                    && own(rt, this) == own(rt, other));
+            V::I(same as i32)
+        }
+        "hashCode" => V::I(crate::jlang::string_hash(&own(rt, this))),
+        "toString" => {
+            let text = type_name(&own(rt, this));
+            rt.string(&text)
+        }
+        _ => return None,
+    })
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     if !claims(owner, name, desc) {
         return None;
+    }
+    if matches!(owner, GUAVA_TOKEN | TYPE_SET) {
+        return guava(rt, owner, name, desc, args);
     }
     let this = args.first().copied().unwrap_or_default();
     // A `Class` asked as a `Type` (`type.getTypeName()`): its name, an array's with `[]`.
@@ -315,6 +525,148 @@ mod tests {
 
     fn text(rt: &Rt, v: V) -> String {
         rt.str_of(v).unwrap_or("?").to_owned()
+    }
+
+    /// Guava's `TypeToken` as MineColonies' request system uses it: one token for a class, so a
+    /// table keyed by tokens finds what was put under another token of the class; its types are
+    /// the class's supertypes, each before those above it; and one type is under another by
+    /// their classes.
+    #[test]
+    fn a_type_token_is_its_class_and_lists_what_is_above_it() {
+        crate::install();
+        let mut rt = Rt::new();
+        const OF: &str = "com/google/common/reflect/TypeToken.of.(Ljava/lang/Class;)Lcom/google/common/reflect/TypeToken;";
+        let level = rt.class_literal("net/minecraft/server/level/ServerLevel");
+        let token = call(&mut rt, OF, &[level]);
+        assert_eq!(token, call(&mut rt, OF, &[level]), "one token for a class");
+        assert_eq!(
+            call(
+                &mut rt,
+                "com/google/common/reflect/TypeToken.getRawType.()Ljava/lang/Class;",
+                &[token]
+            ),
+            level
+        );
+        let name = call(
+            &mut rt,
+            "com/google/common/reflect/TypeToken.toString.()Ljava/lang/String;",
+            &[token],
+        );
+        assert_eq!(text(&rt, name), "net.minecraft.server.level.ServerLevel");
+
+        // A table keyed by tokens (`primaryInputMappings.putIfAbsent(factory.getFactoryInputType(), ...)`).
+        let table = rt.new_object("java/util/HashMap");
+        call(&mut rt, "java/util/HashMap.<init>.()V", &[table]);
+        let held = rt.string("held");
+        call(
+            &mut rt,
+            "java/util/Map.putIfAbsent.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[table, token, held],
+        );
+        let again = call(&mut rt, OF, &[level]);
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[table, again]
+            ),
+            held
+        );
+
+        // Its types: itself first, `Level` before the interfaces `Level` names, `Object` among them.
+        let types = call(
+            &mut rt,
+            "com/google/common/reflect/TypeToken.getTypes.()Lcom/google/common/reflect/TypeToken$TypeSet;",
+            &[token],
+        );
+        let names: Vec<String> = crate::jutil::elements(&rt, types)
+            .into_iter()
+            .map(|t| {
+                let n = call(
+                    &mut rt,
+                    "com/google/common/reflect/TypeToken.toString.()Ljava/lang/String;",
+                    &[t],
+                );
+                text(&rt, n)
+            })
+            .collect();
+        assert_eq!(names[0], "net.minecraft.server.level.ServerLevel");
+        let at = |n: &str| {
+            names
+                .iter()
+                .position(|x| x == n)
+                .unwrap_or_else(|| panic!("{n} is not among {names:?}"))
+        };
+        assert!(
+            at("net.minecraft.world.level.Level") < at("net.minecraft.world.level.LevelAccessor")
+        );
+        assert!(
+            at("net.minecraft.world.level.LevelAccessor")
+                < at("net.minecraft.world.level.LevelReader")
+        );
+        at("java.lang.Object");
+        let raw = call(
+            &mut rt,
+            "com/google/common/reflect/TypeToken$TypeSet.rawTypes.()Ljava/util/Set;",
+            &[types],
+        );
+        let world = rt.class_literal("net/minecraft/world/level/Level");
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/Set.contains.(Ljava/lang/Object;)Z",
+                &[raw, world]
+            ),
+            V::I(1)
+        );
+
+        // An interface's types end at interfaces.
+        let reader = rt.class_literal("net/minecraft/world/level/LevelReader");
+        let reader = call(&mut rt, OF, &[reader]);
+        let above = call(
+            &mut rt,
+            "com/google/common/reflect/TypeToken.getTypes.()Lcom/google/common/reflect/TypeToken$TypeSet;",
+            &[reader],
+        );
+        let object = rt.class_literal("java/lang/Object");
+        let object = call(&mut rt, OF, &[object]);
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/Set.contains.(Ljava/lang/Object;)Z",
+                &[above, object]
+            ),
+            V::I(0)
+        );
+
+        const UNDER: &str = "com/google/common/reflect/TypeToken.isSubtypeOf.(Lcom/google/common/reflect/TypeToken;)Z";
+        let world_token = call(&mut rt, OF, &[world]);
+        assert_eq!(call(&mut rt, UNDER, &[token, world_token]), V::I(1));
+        assert_eq!(call(&mut rt, UNDER, &[world_token, token]), V::I(0));
+        assert_eq!(
+            call(
+                &mut rt,
+                "com/google/common/reflect/TypeToken.isSubtypeOf.(Ljava/lang/reflect/Type;)Z",
+                &[token, world]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "com/google/common/reflect/TypeToken.equals.(Ljava/lang/Object;)Z",
+                &[token, again]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "com/google/common/reflect/TypeToken.equals.(Ljava/lang/Object;)Z",
+                &[token, world_token]
+            ),
+            V::I(0)
+        );
     }
 
     /// A signature read as `java.lang.reflect` shows it: a map of lists apart into its raw class

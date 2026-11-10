@@ -856,7 +856,7 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
         rt.report_thrown("resource reload listener");
         // What one listener left behind goes before the next begins: a pack's listeners
         // together make far more garbage than fits (those who run this hold nothing more).
-        crate::api::between(rt, &held);
+        crate::api::between(rt, &held, l);
     }
 }
 

@@ -575,6 +575,7 @@ pub fn fire_registrations(rt: &mut Rt) {
     }
     crate::network::fire_registration(rt);
     rt.interned.remove(LOADING);
+    crate::api::census_of_all(rt, "the mods' registration");
 }
 
 /// Set while the mods load ([`fire_registrations`]).

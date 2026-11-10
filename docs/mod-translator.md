@@ -10513,6 +10513,39 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     9 GB), 204 s in: the game is larger than that by itself there (launch 13: 10.7 GB by
     220 s). The watch samples at that size and kills only for the swap or the disk.
   - Tests: 825 compat, 16 compat-core, 36 translator; the differential and weave tests.
+- [x] 2026-11-10 Part 175: `null` stays empty, and five of launch 16's errors.
+  - Launch 16 ran every handler a mixin injects on the number 31 from some point on: `this`
+    was `J(31)` for KubeJS's and Immersive Portals' handlers on the server, for Slice & Dice's
+    at `updateRegistryTags`, for Cucumber's at the end of `ReloadableServerResources`'
+    constructor (so "Recipe Manager is not available"), and Moonlight's check of a new
+    `ResourceLocation` read the location as its namespace ("Invalid ResourceLocation namespace:
+    minecolonies:colony_manager:minecolonies"). Java's `null` is the heap's first object, an
+    empty array, and a `BitSet.set` on a `null` set wrote its words there (bits 0 to 4: 31);
+    a handler runs with no lambda object, which reads what it captured from that same object.
+    What a call on `null` writes in place is dropped now as the call ends, whatever the call
+    (a `BitSet`'s and an entity's synched data refuse `null` themselves), and told of when
+    tracing. Four tests ran on a runtime made without its `null` and kept a class in its
+    place; they take a real one.
+  - `ServiceLoader` passes over a provider whose class is not in the translation: Sable lists
+    its physics pipelines, the first a native library's through JNI, and failed there for
+    all of them.
+  - `WoodType`: `new WoodType(name, setType)` (wood's sounds for the rest), `register` and
+    `values`, the constants whole records (Biomes O' Plenty's woods were `null`, and
+    GlitchCore's sign materials threw on them); `Sheets.SIGN_MATERIALS` and
+    `HANGING_SIGN_MATERIALS`, which a mod fills itself.
+  - `ByteBufUtil.getBytes` and `writeUtf8` (FancyMenu's packet checks the count of bytes it
+    answers), and Guava's `TypeToken`: one token for a type, `getRawType`, `getTypes` (the
+    class's supertypes by the mods' classes and the game's class files, each before those
+    above it), `isSubtypeOf`, the anonymous subclass that names its type argument.
+    MineColonies' request system keys its factories by them (`TypeToken.of` at 177 places).
+  - A reflective call that finds no code says which method it was, once for each, when
+    tracing: `Method.invoke` alone was the miss until now (69 of the pack's jars call it; a
+    mod's static method has no code to find yet).
+  - `HORIZON_COMPAT_CENSUS` counts the heap by class (objects, and about the bytes they and
+    their data take): all of it once the mods have registered, and around the collection
+    after each reload listener, so what one listener leaves as garbage is seen by kind before
+    the collector is taught anything more.
+  - Tests: 831 compat.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

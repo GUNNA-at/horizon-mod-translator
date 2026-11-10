@@ -117,14 +117,108 @@ fn over_time() -> Option<u64> {
 /// the caller itself still holds. The collector otherwise runs between hooks alone, so one
 /// hook that runs many listeners (the client's first resource load) kept every listener's
 /// garbage until its last.
-pub(crate) fn between(rt: &mut Rt, keep: &[V]) {
+pub(crate) fn between(rt: &mut Rt, keep: &[V], after: V) {
     if DEPTH.with(|d| d.get()) != 0 {
         return;
     }
     let pinned = rt.pinned.len();
     rt.pinned.extend_from_slice(keep);
-    rt.maybe_collect();
+    if census_asked() {
+        // Every time, and counted: what the piece that just ran (`after`) left behind.
+        let before = census(rt);
+        rt.collect();
+        let live = census(rt);
+        let what = rt.class_of(after).to_owned();
+        tell_census(&what, &before, &live);
+    } else {
+        rt.maybe_collect();
+    }
     rt.pinned.truncate(pinned);
+}
+
+/// When the census is asked for: everything the heap holds at this point, garbage with the
+/// rest (no collection: the callers here hold values of their own).
+pub(crate) fn census_of_all(rt: &Rt, after: &str) {
+    if census_asked() {
+        let all = census(rt);
+        tell_census(after, &all, &all);
+    }
+}
+
+/// Whether `HORIZON_COMPAT_CENSUS` asks for the heap to be counted at each [`between`].
+fn census_asked() -> bool {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ASKED.get_or_init(|| std::env::var_os("HORIZON_COMPAT_CENSUS").is_some())
+}
+
+/// A class's objects and about how many bytes they take, by class.
+type Census = std::collections::HashMap<&'static str, (u64, u64)>;
+
+/// What the heap holds: each class's objects and about the bytes they take (the object and what
+/// its data owns), freed slots apart.
+pub(crate) fn census(rt: &Rt) -> Census {
+    use std::mem::size_of;
+    let mut by = Census::new();
+    for o in rt.heap.iter().skip(1).filter(|o| o.class != "compat:free") {
+        let owned = match &o.data {
+            Data::Fields(f) => f.capacity() * (size_of::<(&str, V)>() + 1),
+            Data::Str(s) => s.capacity(),
+            Data::Array(a) | Data::List(a) | Data::Stream(a) | Data::Iter(a, _) => {
+                a.capacity() * size_of::<V>()
+            }
+            Data::Map(m) => {
+                m.capacity() * (size_of::<(String, V)>() + 1)
+                    + m.keys().map(String::capacity).sum::<usize>()
+            }
+            Data::Table(t) => {
+                t.entries.capacity() * size_of::<(V, V)>()
+                    + t.index.capacity() * (size_of::<(i32, Vec<usize>)>() + 1)
+                    + t.index
+                        .values()
+                        .map(|at| at.capacity() * size_of::<usize>())
+                        .sum::<usize>()
+            }
+            Data::Native(..) => 0,
+            Data::Bytes(b, _) => b.capacity(),
+        };
+        let class = by.entry(o.class).or_default();
+        class.0 += 1;
+        class.1 += (size_of::<crate::Object>() + owned) as u64;
+    }
+    by
+}
+
+/// One line for a collection: what stayed and what went, with the classes that take the most.
+fn tell_census(after: &str, before: &Census, live: &Census) {
+    let total = |c: &Census| c.values().fold((0u64, 0u64), |t, v| (t.0 + v.0, t.1 + v.1));
+    let top = |c: &Census| {
+        let mut all: Vec<(&&'static str, &(u64, u64))> =
+            c.iter().filter(|(_, v)| v.1 > 0).collect();
+        all.sort_by_key(|(_, v)| std::cmp::Reverse(v.1));
+        let parts: Vec<String> = all
+            .iter()
+            .take(10)
+            .map(|(k, v)| format!("{k} {} {}M", v.0, v.1 >> 20))
+            .collect();
+        parts.join(", ")
+    };
+    let freed: Census = before
+        .iter()
+        .map(|(k, v)| {
+            let l = live.get(k).copied().unwrap_or_default();
+            (*k, (v.0.saturating_sub(l.0), v.1.saturating_sub(l.1)))
+        })
+        .collect();
+    let (b, l) = (total(before), total(live));
+    eprintln!(
+        "horizon-compat: census after {after}: {} objects {} MB live; freed {} objects {} MB\n    live: {}\n    freed: {}",
+        l.0,
+        l.1 >> 20,
+        b.0 - l.0,
+        (b.1.saturating_sub(l.1)) >> 20,
+        top(live),
+        top(&freed)
+    );
 }
 
 /// API calls nested deeper than this are a loop (a handler calling a functional object that
@@ -180,6 +274,7 @@ fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         V::Void
     } else {
         let r = call_nested(rt, key, args);
+        keep_null(rt, key);
         // A constructor of the game's has ended: what mixins inject at its end runs on the
         // object made, as in the constructor the mods' code called ([`crate::places`]).
         if is_constructor(key) {
@@ -189,6 +284,27 @@ fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     };
     DEPTH.with(|d| d.set(d.get() - 1));
     r
+}
+
+/// Java's `null` is the heap's first object, an empty array, and stays one. A call on a `null`
+/// receiver that writes its receiver's data in place wrote there: a `BitSet.set` on `null` left
+/// its words where a lambda with nothing captured reads what it captured, and from then on every
+/// handler a mixin injects ran on a number. Java throws at such a call; the runtime answers it,
+/// so what it wrote is dropped as the call ends (told of when tracing, by the call that wrote).
+fn keep_null(rt: &mut Rt, key: &str) {
+    let Some(null) = rt.heap.first_mut() else {
+        return;
+    };
+    if matches!(&null.data, Data::Array(a) if a.is_empty()) && null.class == "null" {
+        return;
+    }
+    null.class = "null";
+    null.cid = 0;
+    null.data = Data::Array(Vec::new());
+    thread_local!(static TOLD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+    if Rt::tracing() && TOLD.with(|t| t.replace(t.get() + 1)) < 40 {
+        eprintln!("horizon-compat: {key} wrote to null; dropped");
+    }
 }
 
 /// Whether API key `key` is a constructor's (`<class>.<init>.<descriptor>`): asked of every
@@ -475,11 +591,27 @@ const STAND_IN: &str = "$standIn";
 /// The class above the game's or the loader's class `class` ("" for none) and the interfaces it
 /// declares, as their class files have them ([`crate::game_classes`]); None for a class
 /// that is not one of theirs.
-fn game_parents(class: &str) -> Option<(&'static str, &'static [&'static str])> {
+pub(crate) fn game_parents(class: &str) -> Option<(&'static str, &'static [&'static str])> {
     let all = &crate::game_classes::CLASSES;
     all.binary_search_by(|e| e.0.cmp(class))
         .ok()
         .map(|i| (all[i].1, all[i].2))
+}
+
+/// Whether one of the game's or the loader's classes names `class` as an interface of its own:
+/// what the table of their classes says of a class being an interface (one nothing implements
+/// reads as a class). Found once, by looking through all of them.
+pub(crate) fn game_interface(class: &str) -> bool {
+    static NAMED: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
+        std::sync::OnceLock::new();
+    NAMED
+        .get_or_init(|| {
+            crate::game_classes::CLASSES
+                .iter()
+                .flat_map(|c| c.2.iter().copied())
+                .collect()
+        })
+        .contains(class)
 }
 
 /// The hash `tools/vanilla_classes.py` files a declared method under: FNV-1a (32 bits) of its
@@ -3867,6 +3999,69 @@ mod tests {
                 "noSuchMethod.()V"
             ),
             None
+        );
+    }
+
+    /// The census counts what the heap holds by class, and a collection's garbage is the
+    /// difference of two: a list nothing names is counted before it and gone after.
+    #[test]
+    fn the_census_counts_what_a_collection_frees() {
+        let mut rt = Rt::new();
+        let kept = crate::jutil::new_list(&mut rt, vec![V::I(1); 100]);
+        rt.pinned.push(kept);
+        crate::jutil::new_list(&mut rt, vec![V::I(2); 1000]);
+        let before = census(&rt);
+        let lists = before["java/util/ArrayList"];
+        assert_eq!(lists.0, 2);
+        assert!(
+            lists.1 >= 1100 * 16,
+            "the two lists' elements are counted: {} bytes",
+            lists.1
+        );
+        rt.collect();
+        let after = census(&rt);
+        assert_eq!(after["java/util/ArrayList"].0, 1);
+        assert!(after["java/util/ArrayList"].1 < 1000 * 16);
+        tell_census("a test", &before, &after);
+    }
+
+    /// Java's `null` stays empty whatever a call on a `null` receiver writes in place: a lambda
+    /// with nothing captured (a mixin's handler, run with no lambda object) reads nothing from
+    /// it afterwards, where a `BitSet.set` on `null` once left its words.
+    #[test]
+    fn a_call_on_null_leaves_null_empty() {
+        let mut rt = Rt::new();
+        call(
+            &mut rt,
+            "java/util/BitSet.set.(II)V",
+            &[V::NULL, V::I(0), V::I(5)],
+        );
+        call(&mut rt, "java/util/BitSet.set.(I)V", &[V::NULL, V::I(70)]);
+        assert!(
+            rt.captured(V::NULL).is_empty(),
+            "a bit set on null wrote {:?}",
+            rt.captured(V::NULL)
+        );
+        // A constructor that makes its object over in place, called on nothing.
+        let inner = rt.new_object("com/mojang/serialization/MapCodec");
+        call(
+            &mut rt,
+            "com/mojang/serialization/MapCodec$MapCodecCodec.<init>.(Lcom/mojang/serialization/MapCodec;)V",
+            &[V::NULL, inner],
+        );
+        assert!(rt.captured(V::NULL).is_empty());
+        assert_eq!(rt.heap[0].class, "null");
+        // And a bit set that is one still holds its bits.
+        let bits = rt.new_object("java/util/BitSet");
+        call(&mut rt, "java/util/BitSet.<init>.()V", &[bits]);
+        call(
+            &mut rt,
+            "java/util/BitSet.set.(II)V",
+            &[bits, V::I(0), V::I(5)],
+        );
+        assert_eq!(
+            call(&mut rt, "java/util/BitSet.cardinality.()I", &[bits]),
+            V::I(5)
         );
     }
 

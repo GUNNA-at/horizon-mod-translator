@@ -294,7 +294,10 @@ fn set_bit_words(rt: &mut Rt, v: V, mut words: Vec<u64>) {
     while words.last() == Some(&0) {
         words.pop();
     }
-    if let Some(o) = rt.heap.get_mut(v.r() as usize) {
+    // Never `null`'s: the heap's first object is what every null reference reads.
+    if v.r() != 0
+        && let Some(o) = rt.heap.get_mut(v.r() as usize)
+    {
         o.data = Data::Array(words.into_iter().map(|w| V::J(w as i64)).collect());
     }
 }
@@ -302,6 +305,9 @@ fn set_bit_words(rt: &mut Rt, v: V, mut words: Vec<u64>) {
 /// Bit `i` of a `BitSet` as it was, after writing it in place: `to` when given, its opposite when
 /// `flip`. The words stay as [`set_bit_words`] leaves them, with no zero word at the end.
 fn one_bit(rt: &mut Rt, set: V, i: usize, to: Option<bool>, flip: bool) -> bool {
+    if set.r() == 0 {
+        return false;
+    }
     let Some(data) = rt.heap.get_mut(set.r() as usize).map(|o| &mut o.data) else {
         return false;
     };

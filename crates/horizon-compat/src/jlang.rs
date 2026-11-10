@@ -450,6 +450,34 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     })
 }
 
+/// When tracing: which method a reflective call found no code for, once for each (the miss
+/// itself is told of by its key alone, `Method.invoke`, whatever the method).
+fn told_of_missed_invoke(rt: &Rt, method: V, obj: V) {
+    if !Rt::tracing() {
+        return;
+    }
+    thread_local!(static TOLD: std::cell::RefCell<std::collections::HashSet<String>> = Default::default());
+    let class = text(rt, rt.get_field(method, "$class"));
+    let name = text(rt, rt.get_field(method, "$name"));
+    let params: Vec<String> = crate::jutil::elements(rt, rt.get_field(method, "$params"))
+        .iter()
+        .map(|p| rt.str_of(*p).unwrap_or("?").to_owned())
+        .collect();
+    let what = format!("{class}.{name}({})", params.join(", "));
+    let on = if obj.r() == 0 {
+        "no object (a static method)".to_owned()
+    } else {
+        format!("a {}", rt.class_of(obj))
+    };
+    let first = TOLD.with(|t| {
+        let mut told = t.borrow_mut();
+        told.len() < 300 && told.insert(what.clone())
+    });
+    if first {
+        eprintln!("horizon-compat: no code for the reflective call of {what} on {on}");
+    }
+}
+
 /// A primitive boxed as what declares it says (`kind`: a field's or an array's type, a
 /// method's return type): a `boolean` as a `Boolean`, a `char` as a `Character`. The runtime
 /// holds those, a `byte` and a `short` as an int, which alone says `Integer`.
@@ -667,6 +695,22 @@ fn service_providers(rt: &mut Rt, loader: V) -> Vec<V> {
     let mut out = Vec::new();
     for n in names {
         let p = construct(rt, &n, "()V", &[]);
+        // A provider whose class is not in the translation (a library a jar carries for its
+        // native code: Sable's Rapier physics, named beside its own static one) is not there
+        // to load: the loader goes on to the next, as if that library's jar were absent,
+        // where failing would take the providers that are there with it.
+        if let Some(e) = rt.thrown
+            && rt.class_of(e) == "java/lang/NoSuchMethodException"
+            && !rt.is_mod_class(&n)
+        {
+            rt.thrown = None;
+            if Rt::tracing() {
+                eprintln!(
+                    "horizon-compat: the service provider {n} is not in the translation; left out"
+                );
+            }
+            continue;
+        }
         if rt.thrown.is_some() {
             return out;
         }
@@ -1730,7 +1774,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "invoke" => {
                 let vals = crate::jutil::elements(rt, a(2));
-                return invoke_method(rt, a(0), a(1), &vals);
+                let answered = invoke_method(rt, a(0), a(1), &vals);
+                if answered.is_none() {
+                    told_of_missed_invoke(rt, a(0), a(1));
+                }
+                return answered;
             }
             // What the class file says of it, where the method was listed (`getDeclaredMethods`).
             "getModifiers" | "getReturnType" | "getGenericReturnType" => {
@@ -3371,6 +3419,48 @@ fn bool_value(rt: &Rt, v: V) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ServiceLoader` passes over a provider whose class is not in the translation (a
+    /// library a jar carries for its native code) and makes those that are, in the file's
+    /// order: Sable names a Rapier physics provider beside its own static one, and failing
+    /// at the first left it with none.
+    #[test]
+    fn a_service_loader_leaves_out_a_provider_that_is_not_translated() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _args: &[V]) -> Option<V> {
+            match (class, what) {
+                ("m/Physics", "services") => {
+                    let names = ["lib/NativePhysics", "m/StaticPhysics"]
+                        .map(|n| rt.string(n))
+                        .to_vec();
+                    Some(rt.alloc("[Ljava/lang/String;", Data::Array(names)))
+                }
+                ("m/StaticPhysics", "<init>.()V") => Some(rt.new_object_id("m/StaticPhysics", 7)),
+                _ => None,
+            }
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.reflect = Some(reflect);
+        rt.supers.insert("m/StaticPhysics", "java/lang/Object");
+        let service = rt.class_literal("m/Physics");
+        let loader = crate::api::call(
+            &mut rt,
+            "java/util/ServiceLoader.load.(Ljava/lang/Class;)Ljava/util/ServiceLoader;",
+            &[service],
+        );
+        let providers = crate::api::call(
+            &mut rt,
+            "java/util/ServiceLoader.iterator.()Ljava/util/Iterator;",
+            &[loader],
+        );
+        let made = crate::jutil::elements(&rt, providers);
+        assert!(rt.thrown.is_none());
+        assert_eq!(
+            made.iter().map(|p| rt.class_of(*p)).collect::<Vec<_>>(),
+            ["m/StaticPhysics"]
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))

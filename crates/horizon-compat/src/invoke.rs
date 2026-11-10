@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn method_types_change_as_javas_do() {
-        let mut rt = Rt::default();
+        let mut rt = Rt::new();
         let int = rt.class_literal("int");
         let object = rt.class_literal("java/lang/Object");
         let string = rt.class_literal("java/lang/String");
@@ -596,7 +596,7 @@ mod tests {
     /// its target invoked with the handle; the `Function` and `BiConsumer` then read and write it.
     #[test]
     fn a_hand_made_metafactory_lambda_reads_and_writes_a_field() {
-        let mut rt = Rt::default();
+        let mut rt = Rt::new();
         rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
         let lookup = c(&mut rt, "java/lang/invoke/MethodHandles.lookup.()Ljava/lang/invoke/MethodHandles$Lookup;", &[]);
         // An object of the game's whose field the runtime keeps (`Data::Fields`).
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn bound_and_constant_handles_answer_as_javas() {
-        let mut rt = Rt::default();
+        let mut rt = Rt::new();
         let string = rt.class_literal("java/lang/String");
         let hello = rt.string("hello");
         let k = c(&mut rt, "java/lang/invoke/MethodHandles.constant.(Ljava/lang/Class;Ljava/lang/Object;)Ljava/lang/invoke/MethodHandle;", &[string, hello]);

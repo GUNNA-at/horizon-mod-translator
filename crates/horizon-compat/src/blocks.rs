@@ -2308,6 +2308,51 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             Some(crate::attributes::weapon(rt, f64::from(damage + bonus), f64::from(a(2).f())))
         }
         (WOOD_TYPE, "name") => Some(rt.get_field(a(0), "$name")),
+        // `new WoodType(name, setType)`: wood's sounds for the rest; the canonical constructor
+        // names all six.
+        (WOOD_TYPE, "<init>")
+            if desc
+                == "(Ljava/lang/String;Lnet/minecraft/world/level/block/state/properties/BlockSetType;)V" =>
+        {
+            fill_wood_type(rt, a(0), a(1), a(2), None);
+            Some(V::Void)
+        }
+        (WOOD_TYPE, "<init>") if args.len() == 7 => {
+            for (i, field) in [
+                "name",
+                "setType",
+                "soundType",
+                "hangingSignSoundType",
+                "fenceGateClose",
+                "fenceGateOpen",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                rt.put_field(a(0), field, a(i + 1));
+            }
+            rt.put_field(a(0), "$name", a(1));
+            Some(V::Void)
+        }
+        // `register(type)`: kept by its name for `values()`, vanilla's first, and given back.
+        (WOOD_TYPE, "register") => {
+            let all = wood_types(rt);
+            let name = rt.str_of(rt.get_field(a(0), "$name")).map(str::to_owned);
+            let held = jutil::elements(rt, all);
+            let at = held
+                .iter()
+                .position(|w| rt.str_of(rt.get_field(*w, "$name")).map(str::to_owned) == name);
+            match (at, rt.heap.get_mut(all.r() as usize).map(|o| &mut o.data)) {
+                (Some(i), Some(Data::List(l))) => l[i] = a(0),
+                _ => jutil::list_add(rt, all, a(0)),
+            }
+            Some(a(0))
+        }
+        (WOOD_TYPE, "values") if desc == "()Ljava/util/stream/Stream;" => {
+            let all = wood_types(rt);
+            let items = jutil::elements(rt, all);
+            Some(rt.alloc("java/util/stream/Stream", Data::Stream(items)))
+        }
         // `SignBlock.getWoodType(block)`: a sign's own wood, else oak; `sign.type()`.
         ("net/minecraft/world/level/block/SignBlock", "getWoodType") => {
             let w = rt.get_field(a(0), "type");
@@ -2604,6 +2649,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         WOOD_TYPE => {
             let (_, name) = WOOD_TYPES.iter().find(|(f, _)| *f == field)?;
+            wood_types(rt);
             Some(named(rt, WOOD_TYPE, name))
         }
         RARITY => {
@@ -2636,6 +2682,83 @@ const WOOD_TYPES: [(&str, &str); 12] = [
     ("MANGROVE", "mangrove"),
     ("BAMBOO", "bamboo"),
 ];
+
+/// The wood types whose sounds aren't wood's: the `SoundType`, the hanging sign's, and the stem
+/// of the fence gate's two sound events.
+const WOOD_SOUNDS: [(&str, [&str; 3]); 4] = [
+    (
+        "cherry",
+        ["CHERRY_WOOD", "CHERRY_WOOD_HANGING_SIGN", "CHERRY_WOOD_"],
+    ),
+    (
+        "crimson",
+        ["NETHER_WOOD", "NETHER_WOOD_HANGING_SIGN", "NETHER_WOOD_"],
+    ),
+    (
+        "warped",
+        ["NETHER_WOOD", "NETHER_WOOD_HANGING_SIGN", "NETHER_WOOD_"],
+    ),
+    (
+        "bamboo",
+        ["BAMBOO_WOOD", "BAMBOO_WOOD_HANGING_SIGN", "BAMBOO_WOOD_"],
+    ),
+];
+
+/// Sets record `w`'s components as `WoodType(name, setType)` does, with wood's sounds, or with
+/// `sounds` ([`WOOD_SOUNDS`]). The name is also kept as `$name`, where a sign's block reads it.
+fn fill_wood_type(rt: &mut Rt, w: V, name: V, set: V, sounds: Option<[&str; 3]>) {
+    let [sound, hanging, gate] = sounds.unwrap_or(["WOOD", "HANGING_SIGN", ""]);
+    rt.put_field(w, "$name", name);
+    rt.put_field(w, "name", name);
+    rt.put_field(w, "setType", set);
+    for (field, constant) in [("soundType", sound), ("hangingSignSoundType", hanging)] {
+        let v = get_static(rt, SOUND_TYPE, constant).unwrap_or(V::NULL);
+        rt.put_field(w, field, v);
+    }
+    for (field, event) in [
+        ("fenceGateClose", "FENCE_GATE_CLOSE"),
+        ("fenceGateOpen", "FENCE_GATE_OPEN"),
+    ] {
+        let v = crate::sounds::get_static(
+            rt,
+            "net/minecraft/sounds/SoundEvents",
+            &format!("{gate}{event}"),
+        )
+        .unwrap_or(V::NULL);
+        rt.put_field(w, field, v);
+    }
+}
+
+/// `WoodType.TYPES`' values: vanilla's, made once in their order (each the value of its static
+/// field, with the block set type of its name), then those mods registered.
+fn wood_types(rt: &mut Rt) -> V {
+    if let Some(&all) = rt.interned.get("compat:wood-types") {
+        return all;
+    }
+    let all = jutil::new_list(rt, Vec::new());
+    rt.interned.insert("compat:wood-types".into(), all);
+    block_set_types(rt);
+    for (field, name) in WOOD_TYPES {
+        let w = named(rt, WOOD_TYPE, name);
+        let n = rt.string(name);
+        // A wood newer than the sets modelled takes oak's.
+        let set = [field, "OAK"]
+            .iter()
+            .find_map(|f| {
+                rt.interned
+                    .get(&format!("const/{BLOCK_SET_TYPE}.{f}"))
+                    .copied()
+            })
+            .unwrap_or(V::NULL);
+        let sounds = WOOD_SOUNDS
+            .iter()
+            .find(|(w, _)| *w == name)
+            .map(|(_, s)| *s);
+        fill_wood_type(rt, w, n, set, sounds);
+        jutil::list_add(rt, all, w);
+    }
+    all
+}
 
 /// One object per named constant of a class that isn't an enum (`SoundType.METAL`).
 fn named(rt: &mut Rt, class: &'static str, name: &'static str) -> V {
@@ -3597,6 +3720,114 @@ mod tests {
         assert_eq!(field(&mut rt, p, "hasCollision", "Z"), V::I(0));
         assert_eq!(field(&mut rt, p, "canOcclude", "Z"), V::I(0), "no collision takes occlusion with it");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A mod's own wood type (Biomes O' Plenty's `fir`): made with a name and a block set type,
+    /// with wood's sounds for the rest, then registered, which gives it back and lists it.
+    #[test]
+    fn a_mod_registers_its_wood_type() {
+        const W: &str = "net/minecraft/world/level/block/state/properties/WoodType";
+        const S: &str = "Lnet/minecraft/world/level/block/state/properties/BlockSetType;";
+        let mut rt = Rt::new();
+        let set = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/BlockSetType.OAK",
+        );
+        let fir = rt.new_object(W);
+        let n = rt.string("biomesoplenty:fir");
+        api::call(
+            &mut rt,
+            Box::leak(format!("{W}.<init>.(Ljava/lang/String;{S})V").into_boxed_str()),
+            &[fir, n, set],
+        );
+        let name = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/WoodType.name.()Ljava/lang/String;",
+            &[fir],
+        );
+        assert_eq!(rt.str_of(name), Some("biomesoplenty:fir"));
+        assert_eq!(
+            api::call(
+                &mut rt,
+                Box::leak(format!("{W}.setType.(){S}").into_boxed_str()),
+                &[fir]
+            ),
+            set
+        );
+        let wood = api::get_static(&mut rt, "net/minecraft/world/level/block/SoundType.WOOD");
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "net/minecraft/world/level/block/state/properties/WoodType.soundType.()Lnet/minecraft/world/level/block/SoundType;",
+                &[fir]
+            ),
+            wood
+        );
+        let registered = api::call(
+            &mut rt,
+            Box::leak(format!("{W}.register.(L{W};)L{W};").into_boxed_str()),
+            &[fir],
+        );
+        assert_eq!(registered, fir);
+        let all = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/WoodType.values.()Ljava/util/stream/Stream;",
+            &[],
+        );
+        let all = crate::jutil::elements(&rt, all);
+        assert_eq!(all.len(), 13, "vanilla's twelve, then the mod's");
+        assert_eq!(all.last(), Some(&fir));
+        let oak = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/WoodType.OAK",
+        );
+        assert_eq!(all.first(), Some(&oak));
+        let oak_set = api::call(
+            &mut rt,
+            Box::leak(format!("{W}.setType.(){S}").into_boxed_str()),
+            &[oak],
+        );
+        assert_eq!(oak_set, set, "oak's set type is the oak set");
+        // The signs' materials are kept by wood type, and the mod adds its own (GlitchCore's
+        // `SheetHelper.addWoodType` puts into the map itself).
+        let signs = api::get_static(
+            &mut rt,
+            "net/minecraft/client/renderer/Sheets.SIGN_MATERIALS",
+        );
+        assert_eq!(
+            api::call(&mut rt, "java/util/Map.size.()I", &[signs]),
+            V::I(13),
+            "every wood registered by then has its sign"
+        );
+        let own = api::call(
+            &mut rt,
+            "net/minecraft/client/renderer/Sheets.getSignMaterial.(Lnet/minecraft/world/level/block/state/properties/WoodType;)Lnet/minecraft/client/resources/model/Material;",
+            &[fir],
+        );
+        api::call(
+            &mut rt,
+            "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[signs, fir, own],
+        );
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[signs, fir]
+            ),
+            own
+        );
+        let texture = api::call(
+            &mut rt,
+            "net/minecraft/client/resources/model/Material.texture.()Lnet/minecraft/resources/ResourceLocation;",
+            &[own],
+        );
+        let texture = api::call(
+            &mut rt,
+            "net/minecraft/resources/ResourceLocation.toString.()Ljava/lang/String;",
+            &[texture],
+        );
+        assert_eq!(rt.str_of(texture), Some("biomesoplenty:entity/signs/fir"));
     }
 
     /// Create names its windows `woodType.name() + "_window"`: each wood type keeps its own name,

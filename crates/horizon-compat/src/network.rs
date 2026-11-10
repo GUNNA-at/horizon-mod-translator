@@ -1170,6 +1170,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "net/minecraft/network/VarInt"
             | "net/minecraft/network/VarLong"
             | "io/netty/buffer/Unpooled"
+            | "io/netty/buffer/ByteBufUtil"
             | "net/minecraft/network/codec/StreamCodec"
             | "net/minecraft/network/codec/StreamEncoder"
             | "net/minecraft/network/codec/StreamDecoder"
@@ -1408,6 +1409,40 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let b = byte_array(rt, a(0));
                 buffer_with(rt, b)
             }
+            _ => return None,
+        }),
+        // `ByteBufUtil`: a buffer's bytes as an array (what is left to read, or a stretch of
+        // it by index; the buffer stays as it was), and text written as UTF-8, which answers
+        // how many bytes that was (a mod checks the count against the length it wrote first).
+        "io/netty/buffer/ByteBufUtil" => Some(match name {
+            "getBytes" => {
+                let (all, at) =
+                    bytes_mut(rt, a(0)).map_or((Vec::new(), 0), |(v, at)| (v.clone(), *at));
+                let (start, len) = match desc.starts_with("(Lio/netty/buffer/ByteBuf;II") {
+                    true => (a(1).i(), a(2).i()),
+                    false => (at as i32, (all.len() - at.min(all.len())) as i32),
+                };
+                match all.get(
+                    start.max(0) as usize
+                        ..(start.max(0) as usize).saturating_add(len.max(0) as usize),
+                ) {
+                    Some(part) if start >= 0 && len >= 0 => new_byte_array(rt, part),
+                    _ => crate::jlang::throw_with(
+                        rt,
+                        "java/lang/IndexOutOfBoundsException",
+                        &format!(
+                            "index: {start}, length: {len} (expected: range(0, {}))",
+                            all.len()
+                        ),
+                    ),
+                }
+            }
+            "writeUtf8" | "writeAscii" if desc.ends_with("Ljava/lang/CharSequence;)I") => {
+                let s = crate::jlang::text(rt, a(1));
+                put(rt, a(0), s.as_bytes());
+                V::I(s.len() as i32)
+            }
+            "utf8Bytes" => V::I(crate::jlang::text(rt, a(0)).len() as i32),
             _ => return None,
         }),
         "net/minecraft/network/codec/StreamCodec"
@@ -2283,6 +2318,55 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(native(&rt, rt.get_field(items[1], "pos"))[..3], [2, 64, -2]);
         assert_eq!(rt.get_field(items[1], "speed"), V::F(-16.0));
+    }
+
+    /// `ByteBufUtil`: text goes in as UTF-8 and the count of its bytes comes back (a mod writes
+    /// the length first and checks the two agree); a buffer's bytes come out as an array, those
+    /// left to read or a stretch by index, with the buffer left where it was.
+    #[test]
+    fn a_buffers_bytes_and_text_through_netty_s_helper() {
+        let mut rt = Rt::new();
+        let buf = new_buffer(&mut rt);
+        let text = rt.string("d\u{e9}j\u{e0} vu");
+        let wrote = call(
+            &mut rt,
+            "io/netty/buffer/ByteBufUtil.writeUtf8.(Lio/netty/buffer/ByteBuf;Ljava/lang/CharSequence;)I",
+            &[buf, text],
+        );
+        assert_eq!(
+            wrote,
+            Some(V::I(9)),
+            "two of the seven characters take two bytes"
+        );
+        call(&mut rt, "io/netty/buffer/ByteBuf.readByte.()B", &[buf]);
+        let rest = call(
+            &mut rt,
+            "io/netty/buffer/ByteBufUtil.getBytes.(Lio/netty/buffer/ByteBuf;)[B",
+            &[buf],
+        )
+        .unwrap();
+        assert_eq!(byte_array(&rt, rest), "\u{e9}j\u{e0} vu".as_bytes());
+        let part = call(
+            &mut rt,
+            "io/netty/buffer/ByteBufUtil.getBytes.(Lio/netty/buffer/ByteBuf;II)[B",
+            &[buf, V::I(0), V::I(3)],
+        )
+        .unwrap();
+        assert_eq!(byte_array(&rt, part), "d\u{e9}".as_bytes());
+        assert_eq!(
+            call(&mut rt, "io/netty/buffer/ByteBuf.readableBytes.()I", &[buf]),
+            Some(V::I(8)),
+            "reading its bytes moved nothing"
+        );
+        call(
+            &mut rt,
+            "io/netty/buffer/ByteBufUtil.getBytes.(Lio/netty/buffer/ByteBuf;II)[B",
+            &[buf, V::I(5), V::I(9)],
+        );
+        assert_eq!(
+            rt.thrown.map(|e| rt.class_of(e)),
+            Some("java/lang/IndexOutOfBoundsException")
+        );
     }
 
     #[test]
