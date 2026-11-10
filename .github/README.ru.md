@@ -14,7 +14,7 @@ Java Edition. JVM не запускается ни на одном шаге. Б�
 для любого мода, а не для списка поддерживаемых. Create и аддоны к нему служат проверкой.
 
 <!-- progress:headline -->
-Rust отвечает на **91,0 %** методов Minecraft и NeoForge, которые вызывают 367 джаров пака, это **95,6 %** мест вызова. Библиотеки Java: **95,1 %** вызовов. Create: **98,0 %** его вызовов. Прогон 53, 10 ноября 2026.
+Rust отвечает на **91,1 %** методов Minecraft и NeoForge, которые вызывают 367 джаров пака, это **95,6 %** мест вызова. Библиотеки Java: **96,0 %** вызовов. Create: **98,0 %** его вызовов. Прогон 54, 10 ноября 2026.
 <!-- /progress -->
 
 | Если вам это показали | Если вы работаете над Horizon |
@@ -40,13 +40,13 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 у игрока.</sub>
 
 <!-- progress:table -->
-| Прогон 53, 367 джаров | Отвечено методов | Отвечено вызовов |
+| Прогон 54, 367 джаров | Отвечено методов | Отвечено вызовов |
 |---|---:|---:|
-| API Minecraft и NeoForge | **91,0 %**<br><sub>120 424 из 132 302</sub> | **95,6 %**<br><sub>360 141 из 376 860</sub> |
-| …из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub> | **6,0 %**<br><sub>7 962 из 132 302</sub> | **2,9 %**<br><sub>11 107 из 376 860</sub> |
-| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **85,5 %**<br><sub>65 557 из 76 713</sub> | **95,1 %**<br><sub>354 933 из 373 410</sub> |
-| Create 6.0.10, вызовы API | **89,8 %**<br><sub>3 570 из 3 976</sub> | **98,0 %**<br><sub>24 731 из 25 245</sub> |
-| Create 6.0.10, вызовы библиотек | **83,5 %**<br><sub>1 338 из 1 602</sub> | **97,6 %**<br><sub>14 066 из 14 416</sub> |
+| API Minecraft и NeoForge | **91,1 %**<br><sub>120 505 из 132 302</sub> | **95,6 %**<br><sub>360 241 из 376 860</sub> |
+| …из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub> | **6,0 %**<br><sub>7 959 из 132 302</sub> | **2,9 %**<br><sub>11 105 из 376 860</sub> |
+| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **88,1 %**<br><sub>67 575 из 76 713</sub> | **96,0 %**<br><sub>358 525 из 373 410</sub> |
+| Create 6.0.10, вызовы API | **89,8 %**<br><sub>3 571 из 3 976</sub> | **98,0 %**<br><sub>24 732 из 25 245</sub> |
+| Create 6.0.10, вызовы библиотек | **84,4 %**<br><sub>1 352 из 1 602</sub> | **97,7 %**<br><sub>14 081 из 14 416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -64,6 +64,7 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 <!-- progress:history -->
 | Прогон | Дата | Методы API | Вызовы | Create, вызовы |
 |---:|---|---:|---:|---:|
+| 54 | 2026-11-10 | 91,1 % | 95,6 % | 98,0 % |
 | 53 | 2026-11-10 | 91,0 % | 95,6 % | 98,0 % |
 | 51 | 2026-11-09 | 91,1 % | 95,6 % | 98,0 % |
 | 50 | 2026-11-09 | 90,0 % | 95,2 % | 97,8 % |
@@ -294,13 +295,13 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 | Метод библиотеки, которого нет | Джаров | Вызовов |
 |---|---:|---:|
 | `Method.invoke(Object, Object[])` | 59 | 140 |
-| `Class.getDeclaredFields()` | 46 | 90 |
 | `Field.getType()` | 44 | 99 |
-| `Gson.fromJson(Reader, Class)` | 40 | 55 |
-| `Array.newInstance(Class, int)` | 36 | 76 |
-| `Gson.fromJson(String, Class)` | 35 | 68 |
-| `new FileWriter(File)` | 34 | 47 |
-| `Field.getModifiers()` | 32 | 75 |
+| `Matrix4fStack.popMatrix()` | 24 | 37 |
+| `Matrix4fStack.pushMatrix()` | 24 | 37 |
+| `ByteBuffer.allocate(int)` | 19 | 66 |
+| `new Vector2f(float, float)` | 19 | 44 |
+| `Field.getGenericType()` | 18 | 29 |
+| `Vector2f.set(float, float)` | 18 | 22 |
 <!-- /progress -->
 
 </details>

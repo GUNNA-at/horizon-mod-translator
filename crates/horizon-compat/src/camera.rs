@@ -1002,7 +1002,7 @@ mod tests {
     fn client(feet: [f64; 3], yaw: f32, pitch: f32) -> (Rt, MemoryHost) {
         crate::install();
         let mut rt = Rt::new();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let host = MemoryHost { place: Some((feet, yaw, pitch)), gui: [320, 180], ..MemoryHost::default() };
         (rt, host)
     }
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn out_of_a_world_the_camera_is_not_set_up() {
         let (mut rt, mut host) = client([0.0, 64.0, 0.0], 0.0, 0.0);
-        rt.interned.remove("compat:client");
+        rt.interned.remove("side:client");
         rt.with_host(&mut host, |rt| {
             let cam = main_camera(rt);
             assert_eq!(crate::api::call(rt, key(CAMERA, "isInitialized.()Z"), &[cam]).i(), 0);

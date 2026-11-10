@@ -221,6 +221,7 @@ pub(crate) fn post_as(rt: &mut Rt, class: &str, event: V, only: Option<&str>) {
             std::mem::take(&mut rt.hook_misses),
             rt.hook_first_miss.take(),
         );
+        crate::api::new_piece();
         let started = profile.then(std::time::Instant::now);
         rt.call_functional(ACCEPT, l, &[event]);
         if let Some(t) = started {
@@ -1246,7 +1247,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             register(rt, &reg, &n, a(2));
             V::Void
         }
-        // ResourceLocation: its `namespace:path` string.
+        // ResourceLocation: its `namespace:path` string. One made by its constructor (private in
+        // 1.21.1; a mod's access transformer opens it) becomes that string where it stands: left
+        // an object of two fields, nothing read its text, and it printed as `ResourceLocation@1a`.
+        ("net/minecraft/resources/ResourceLocation", "<init>") if desc == "(Ljava/lang/String;Ljava/lang/String;)V" => {
+            let s = format!("{}:{}", rt.str_of(a(1)).unwrap_or("minecraft"), rt.str_of(a(2)).unwrap_or(""));
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.data = Data::Str(s);
+            }
+            V::Void
+        }
         ("net/minecraft/resources/ResourceLocation", "fromNamespaceAndPath") => {
             let s = format!("{}:{}", rt.str_of(a(0)).unwrap_or("minecraft"), rt.str_of(a(1)).unwrap_or(""));
             rt.string(&s)
@@ -2260,10 +2270,15 @@ pub fn fire_common_setup(rt: &mut Rt) {
 /// .RegisterLayerDefinitions` and `.RegisterRenderers`, and `FMLClientSetupEvent` (Registrate
 /// registers block entity renderers there).
 pub fn fire_client_setup(rt: &mut Rt) {
-    if rt.interned.contains_key("compat:client") {
+    // From here on this runtime is the client's ([`is_client`]). A copy made of it is not, until
+    // a client's hook comes to it too: the mark is one `Rt::fork` leaves behind. The setup itself
+    // ran once for the runtime and its copies: the mods' renderers, layers and key mappings are
+    // in each.
+    rt.interned.insert("side:client".into(), V::I(1));
+    if rt.interned.contains_key("compat:client-setup") {
         return;
     }
-    rt.interned.insert("compat:client".into(), V::I(1));
+    rt.interned.insert("compat:client-setup".into(), V::I(1));
     // The mods' client extensions (how their fluids, items, blocks and effects look), as the
     // client is made, before its resources load.
     crate::client_extensions::init(rt);
@@ -2299,9 +2314,12 @@ pub fn fire_client_setup(rt: &mut Rt) {
     post(rt, crate::render::ATLAS_STITCHED, ev);
 }
 
-/// Whether this runtime is the client's (its setup has fired): its level is a client level.
+/// Whether this runtime is the client's (a client's hook has come to it, and its setup has
+/// fired): its level is a client level. The server thread's runtime is a copy of the one the
+/// mods were loaded in, which the game's first questions made a client's: taking the mark with
+/// it, the server answered as a client (`isClientSide` true, no current server).
 pub fn is_client(rt: &Rt) -> bool {
-    rt.interned.contains_key("compat:client")
+    rt.interned.contains_key("side:client")
 }
 
 const MOD_CONFIG: &str = "net/neoforged/fml/config/ModConfig";
@@ -2619,7 +2637,7 @@ mod tests {
         let overworld = crate::api::call(&mut rt, "net/minecraft/server/MinecraftServer.overworld.()Lnet/minecraft/server/level/ServerLevel;", &[server]);
         assert_eq!(overworld, level);
         let mut client = Rt::new();
-        client.interned.insert("compat:client".into(), V::I(1));
+        client.interned.insert("side:client".into(), V::I(1));
         crate::glue::level(&mut client);
         assert_eq!(crate::api::call(&mut client, CURRENT, &[]), V::NULL);
     }
@@ -2636,7 +2654,7 @@ mod tests {
         const IS_SERVER: &str = "net/neoforged/fml/LogicalSide.isServer.()Z";
         let side = c(&mut rt, GET, &[]);
         assert_eq!(c(&mut rt, IS_SERVER, &[side]).i(), 1);
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let side = c(&mut rt, GET, &[]);
         assert_eq!(c(&mut rt, IS_SERVER, &[side]).i(), 0);
         assert_eq!(c(&mut rt, "net/neoforged/fml/LogicalSide.isClient.()Z", &[side]).i(), 1);
@@ -2926,6 +2944,65 @@ mod tests {
         }
         post_started(&mut rt);
         assert_eq!(list_mut(&mut rt, log)[4..], [two]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The runtime the mods are loaded in is made a client's by the game's first questions, and
+    /// each thread's runtime is a copy of it: the copy is no client (the server's thread: its
+    /// level is a server's, `ServerLifecycleHooks.getCurrentServer()` answers), and when a
+    /// client's hook comes to a copy, it is a client without the setup's events posted again.
+    #[test]
+    fn a_copy_of_the_clients_runtime_is_not_a_client_until_asked() {
+        fn heard(rt: &mut Rt, _id: u32, _args: &[V]) -> Option<V> {
+            let n = rt.interned.get("test:heard").map_or(0, |v| v.i());
+            rt.interned.insert("test:heard".into(), V::I(n + 1));
+            Some(V::Void)
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let listener = rt.lambda_id("java/util/function/Consumer", 1, vec![]);
+        rt.listeners.push((CLIENT_SETUP.to_owned(), listener));
+        fire_client_setup(&mut rt);
+        assert!(is_client(&rt));
+        assert_eq!(rt.interned["test:heard"], V::I(1));
+        let mut server = rt.fork();
+        assert!(!is_client(&server), "the server thread's copy");
+        let mut client = rt.fork();
+        fire_client_setup(&mut client);
+        assert!(is_client(&client) && !is_client(&server));
+        assert_eq!(client.interned["test:heard"], V::I(1), "the setup's events were heard once");
+        // The server's copy has a current server once it runs; the client's has none.
+        server.interned.insert(SERVER_RUNNING.into(), V::I(1));
+        client.interned.insert(SERVER_RUNNING.into(), V::I(1));
+        const CURRENT: &str = "net/neoforged/neoforge/server/ServerLifecycleHooks.getCurrentServer.()Lnet/minecraft/server/MinecraftServer;";
+        assert_ne!(crate::api::call(&mut server, CURRENT, &[]).r(), 0);
+        assert_eq!(crate::api::call(&mut client, CURRENT, &[]).r(), 0);
+    }
+
+    /// A `ResourceLocation` made by its constructor (private in 1.21.1, opened by a mod's
+    /// access transformer) is the location any other way gives: its text, its parts, equal to
+    /// it, and written into a string as `namespace:path` (MineColonies builds loot table ids as
+    /// `ResourceLocation.parse(FISHERMAN_ID + "/fish")`).
+    #[test]
+    fn a_constructed_location_is_its_text() {
+        crate::install();
+        let mut rt = Rt::new();
+        let made = rt.new_object("net/minecraft/resources/ResourceLocation");
+        let (ns, path) = (rt.string("minecolonies"), rt.string("fisherman"));
+        crate::api::call(&mut rt, "net/minecraft/resources/ResourceLocation.<init>.(Ljava/lang/String;Ljava/lang/String;)V", &[made, ns, path]);
+        assert_eq!(rt.str_of(made), Some("minecolonies:fisherman"));
+        let part = crate::api::call(&mut rt, "net/minecraft/resources/ResourceLocation.getPath.()Ljava/lang/String;", &[made]);
+        assert_eq!(rt.str_of(part), Some("fisherman"));
+        let same = crate::api::call(
+            &mut rt,
+            "net/minecraft/resources/ResourceLocation.fromNamespaceAndPath.(Ljava/lang/String;Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;",
+            &[ns, path],
+        );
+        assert_eq!(crate::api::call(&mut rt, "java/lang/Object.equals.(Ljava/lang/Object;)Z", &[made, same]), V::I(1));
+        let written = crate::linked::java_string(&mut rt, made);
+        let id = rt.concat("\u{1}/fish", "L", &[written], &[]);
+        assert_eq!(rt.str_of(id), Some("minecolonies:fisherman/fish"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

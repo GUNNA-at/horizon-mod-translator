@@ -2318,7 +2318,7 @@ mod tests {
     fn a_payload_sent_on_the_clients_connection_goes_to_the_server() {
         let mut rt = Rt::new();
         register(&mut rt);
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let packet = rt.new_object("test/Packet");
         let pos = crate::api::block_pos(&mut rt, 1, 2, 3);
         rt.put_field(packet, "pos", pos);

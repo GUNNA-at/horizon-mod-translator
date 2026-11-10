@@ -10,6 +10,26 @@ fn from16(u: &[u16]) -> String {
     String::from_utf16_lossy(u)
 }
 
+const STACK_FRAME: &str = "java/lang/StackTraceElement";
+
+/// What `Thread.getStackTrace()` and `Throwable.getStackTrace()` answer: the runtime keeps no
+/// record of who called whom, so a few frames of which nothing is known (`Unknown.unknown`).
+/// Enough of them that code which takes "the frame two above me" has one to name, and few
+/// enough that a search through them for a class ends at their end.
+pub(crate) fn stack_frames(rt: &mut Rt) -> V {
+    let (class, method) = (rt.string("Unknown"), rt.string("unknown"));
+    let frames = (0..8)
+        .map(|_| {
+            let frame = rt.new_object(STACK_FRAME);
+            rt.put_field(frame, "declaringClass", class);
+            rt.put_field(frame, "methodName", method);
+            rt.put_field(frame, "lineNumber", V::I(-1));
+            frame
+        })
+        .collect();
+    rt.alloc("[Ljava/lang/StackTraceElement;", Data::Array(frames))
+}
+
 pub(crate) fn text(rt: &Rt, v: V) -> String {
     rt.str_of(v).map(str::to_owned).unwrap_or_else(|| rt.to_java_string(v, 'L'))
 }
@@ -1045,6 +1065,41 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getProperty" if ks.len() == 2 => a(1),
             "getProperty" | "getenv" => V::NULL,
             "lineSeparator" => rt.string("\n"),
+            _ => return None,
+        }),
+        // A frame of a stack trace: what it was made with (`new StackTraceElement(class, method,
+        // file, line)`), or one of the runtime's own, of which nothing is known ([`stack_frames`]).
+        STACK_FRAME => Some(match name {
+            "<init>" => {
+                // (declaringClass, methodName, fileName, lineNumber), the last four of any form.
+                let from = args.len().saturating_sub(4).max(1);
+                for (field, v) in ["declaringClass", "methodName", "fileName", "lineNumber"].into_iter().zip(&args[from..]) {
+                    rt.put_field(a(0), field, *v);
+                }
+                V::Void
+            }
+            "getClassName" => rt.get_field(a(0), "declaringClass"),
+            "getMethodName" => rt.get_field(a(0), "methodName"),
+            "getFileName" => match rt.get_field(a(0), "fileName") {
+                V::Void => V::NULL,
+                v => v,
+            },
+            "getLineNumber" => match rt.get_field(a(0), "lineNumber") {
+                V::Void => V::I(-1),
+                v => v,
+            },
+            "isNativeMethod" => V::I((rt.get_field(a(0), "lineNumber").i() == -2) as i32),
+            "getModuleName" | "getModuleVersion" | "getClassLoaderName" => V::NULL,
+            "toString" => {
+                let (class, method) = (text(rt, rt.get_field(a(0), "declaringClass")), text(rt, rt.get_field(a(0), "methodName")));
+                let line = rt.get_field(a(0), "lineNumber").i();
+                let place = match rt.str_of(rt.get_field(a(0), "fileName")) {
+                    Some(file) if line >= 0 => format!("{file}:{line}"),
+                    Some(file) => file.to_owned(),
+                    None => "Unknown Source".to_owned(),
+                };
+                new_str(rt, format!("{class}.{method}({place})"))
+            }
             _ => return None,
         }),
         "java/lang/Enum" => Some(match name {
@@ -3293,7 +3348,7 @@ mod tests {
         assert_eq!(server.str_of(n), Some("Server thread"));
         let mut client = Rt::new();
         let marker = client.new_object("java/lang/Object");
-        client.interned.insert("compat:client".into(), marker);
+        client.interned.insert("side:client".into(), marker);
         let t = c(&mut client, current, &[]);
         let n = c(&mut client, name, &[t]);
         assert_eq!(client.str_of(n), Some("Render thread"));
@@ -4642,6 +4697,31 @@ mod tests {
         assert_eq!(on(rt, "java/lang/String.lastIndexOf.(II)I", &[aaa, V::I('a' as i32), V::I(-5)]), -1);
         assert_eq!(on(rt, "java/lang/String.indexOf.(Ljava/lang/String;I)I", &[abc, empty, V::I(7)]), 3);
         assert_eq!(on(rt, "java/lang/String.lastIndexOf.(Ljava/lang/String;I)I", &[abab, ab, V::I(0)]), 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A stack trace has a few frames of which nothing is known: the frame "two above me" has a
+    /// class to name, and a search through them ends. A frame a mod makes prints as Java's.
+    #[test]
+    fn a_stack_trace_has_frames_and_a_made_frame_prints_as_javas() {
+        crate::install();
+        let mut rt = Rt::new();
+        let thread = c(&mut rt, "java/lang/Thread.currentThread.()Ljava/lang/Thread;", &[]);
+        let frames = c(&mut rt, "java/lang/Thread.getStackTrace.()[Ljava/lang/StackTraceElement;", &[thread]);
+        assert_eq!(rt.array_len(frames), 8);
+        let above = rt.array_get(frames, 2);
+        let class = c(&mut rt, "java/lang/StackTraceElement.getClassName.()Ljava/lang/String;", &[above]);
+        assert_eq!(rt.str_of(class), Some("Unknown"));
+        assert_eq!(c(&mut rt, "java/lang/StackTraceElement.getLineNumber.()I", &[above]), V::I(-1));
+        let frame = rt.new_object("java/lang/StackTraceElement");
+        let (class, method, file) = (rt.string("a.B"), rt.string("run"), rt.string("B.java"));
+        c(
+            &mut rt,
+            "java/lang/StackTraceElement.<init>.(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V",
+            &[frame, class, method, file, V::I(12)],
+        );
+        let shown = c(&mut rt, "java/lang/StackTraceElement.toString.()Ljava/lang/String;", &[frame]);
+        assert_eq!(rt.str_of(shown), Some("a.B.run(B.java:12)"));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

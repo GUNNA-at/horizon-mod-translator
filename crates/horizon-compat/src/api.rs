@@ -118,6 +118,10 @@ const MAX_DEPTH: u32 = 512;
 /// `api::game_field` whether it links the core or carries this runtime inlined, where the core's
 /// entry points are left out: so this is the runtime's own, not a call into the core.
 pub fn game_field(rt: &mut Rt, o: V, name: &'static str, own: &'static str, key: &'static str) -> V {
+    // A field of `null`: the JVM's exception, as for a call on it.
+    if crate::linked::null_throws(o) {
+        return crate::linked::null_receiver(rt, key);
+    }
     match rt.get_field(o, name) {
         V::Void if o.r() != 0 => match rt.get_field(o, own) {
             V::Void => call(rt, key, &[o]),
@@ -373,6 +377,15 @@ impl Run {
 
 thread_local! {
     static LOADING: std::cell::RefCell<Run> = std::cell::RefCell::new(Run::default());
+}
+
+/// A new piece of the mods' code begins where no hook bounds it (a listener of an event while
+/// the mods load, the game's question about one block): the unmapped calls of the piece before
+/// are not its loop. The game asks how each of a pack's block states draws, one after another,
+/// and a method nothing mapped that a thousand of them call was taken for one loop: every block
+/// after the millionth call was answered an error.
+pub(crate) fn new_piece() {
+    LOADING.with(|run| *run.borrow_mut() = Run::default());
 }
 
 /// What an unmapped method returning its own class gives back, so a builder chain
@@ -1066,7 +1079,7 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             V::Void
         }
         k if exception_class(k) && k.contains(".fillInStackTrace.") => a(0),
-        k if exception_class(k) && k.contains(".getStackTrace.") => rt.alloc("[Ljava/lang/StackTraceElement;", Data::Array(Vec::new())),
+        k if exception_class(k) && k.contains(".getStackTrace.") => crate::jlang::stack_frames(rt),
         k if exception_class(k) && k.contains(".setStackTrace.") => V::Void,
         // `array.clone()` (an enum's `values()`): a shallow copy.
         k if k.starts_with('[') && k.contains(".clone.") => {
@@ -2651,6 +2664,14 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "shouldRenderFace") if o.starts_with("net/minecraft/world/level/block/") && desc == crate::faces::SHOULD_RENDER_FACE => {
             V::I(i32::from(crate::faces::should_render_face(rt, [a(0), a(1), a(2), a(3), a(4)])))
         }
+        // `super.getRenderShape(state)` to a vanilla block class: that class's own (a block with
+        // an entity is invisible unless it says otherwise, a chest is drawn by its block entity,
+        // the rest are models).
+        (o, "getRenderShape") if o.starts_with("net/minecraft/world/level/block/") && GET_RENDER_SHAPE.ends_with(desc) => {
+            let ordinal = crate::vanilla_shapes::CLASSES.binary_search_by(|(c, _)| (*c).cmp(o)).map_or(2, |i| crate::vanilla_shapes::CLASSES[i].1);
+            let ordinal = usize::from(ordinal).min(2);
+            api_enum(rt, "net/minecraft/world/level/block/RenderShape", RENDER_SHAPES[ordinal], ordinal as i32)
+        }
         // `super.skipRendering(state, neighbour, face)` to a vanilla block class: that class's rule.
         (o, "skipRendering") if o.starts_with("net/minecraft/world/level/block/") && desc == crate::faces::SKIP_RENDERING => {
             V::I(i32::from(crate::faces::class_skips(rt, o, a(1), a(2), a(3))))
@@ -3486,10 +3507,13 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
                     let inherited = rt.static_key(&format!("{declaring}.{field}"));
                     get_static(rt, inherited)
                 }
+                // Nothing known of it: not Java's `null`, which a call on throws for
+                // (`linked::dispatch`), but what the code goes on with, as with an unmapped
+                // call's answer.
                 None => {
                     crate::miss(rt, key);
                     trace_unmapped(rt, key, &[]);
-                    V::NULL
+                    V::Void
                 }
             },
         },
@@ -3974,7 +3998,7 @@ mod tests {
         assert_eq!(call(&mut rt, is, &[st, held]), V::I(1));
         assert_eq!(call(&mut rt, is, &[st, other]), V::I(0));
 
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let level = crate::glue::level(&mut rt);
         assert_eq!(call(&mut rt, "net/minecraft/world/level/Level.isClientSide.()Z", &[level]), V::I(1));
     }
@@ -4367,6 +4391,17 @@ mod tests {
         assert_eq!(name(&rt, sign), "INVISIBLE");
         let air = shape(&mut rt, "minecraft:air");
         assert_eq!(name(&rt, air), "INVISIBLE");
+        // A mod's block asks its vanilla class (`super.getRenderShape(state)`): a block with an
+        // entity is invisible there, a plain block a model.
+        let bell = rt.new_object("test/WindBell");
+        let planks = state(&mut rt, "minecraft:oak_planks");
+        for (class, expected) in [("BaseEntityBlock", "INVISIBLE"), ("Block", "MODEL"), ("ChestBlock", "ENTITYBLOCK_ANIMATED")] {
+            let key = rt.static_key(&format!(
+                "net/minecraft/world/level/block/{class}.getRenderShape.(Lnet/minecraft/world/level/block/state/BlockState;)Lnet/minecraft/world/level/block/RenderShape;"
+            ));
+            let shape = call(&mut rt, key, &[bell, planks]);
+            assert_eq!(name(&rt, shape), expected, "{class}");
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

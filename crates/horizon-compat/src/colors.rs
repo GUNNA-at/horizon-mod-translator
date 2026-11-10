@@ -705,7 +705,7 @@ mod tests {
         let mut rt = Rt::new();
         rt.vcall = Some(handler_code);
         // The client is set up: probing doesn't fire its setup again.
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         rt
     }
 

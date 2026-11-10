@@ -10257,6 +10257,46 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     without one of its components for another module's, and the coverage probe's bare objects
     with them (516 accessors counted missing in a measurement of Part 167).
   - Tests: 796 compat, 16 compat-core, 33 translator.
+- [x] 2026-11-10 Part 169: what launch 12's world showed, in the runtime's core (every crate is
+  built again for it).
+  - The server's thread was a client. Since Part 161 each thread's runtime is a copy of the one
+    the mods are loaded in, and the game's first questions (how each block draws) make that one
+    the client's: the copy for the server's thread took the mark with it, so its level was a
+    client's (`isClientSide` true) and `ServerLifecycleHooks.getCurrentServer()` answered null
+    (Mekanism: "Current server is null"). Which side a runtime is on is now its own: a copy has
+    none until a client's hook comes to it, and the client's setup is not posted again in it.
+  - The JVM's own exceptions. A call the translated code makes on `null` throws
+    `NullPointerException`, and so does reading one of the game's fields of it; an array that
+    is null or an index outside it throws on a load or a store (`ArrayIndexOutOfBoundsException`
+    with the JVM's message). Code counts on them: Structurize asks every block
+    `canSurvive(null, null)` and takes the exception for "no", and Kotlin's null checks look
+    through a stack trace for their caller. Answered with stand-ins, one such loop made 21.7
+    million unmapped calls before it was stopped, and was started again at every level tick.
+    What nothing maps still answers a stand-in the code goes on with, and an unmapped constant
+    is such a stand-in now, not `null`. `HORIZON_COMPAT_NULL_CALLS=stand-in` and
+    `HORIZON_COMPAT_ARRAY_BOUNDS=stand-in` give the old answers. The differential test has a
+    case for them, compared with the JVM.
+  - An object written into a string is asked its own `toString()`: a formatting code is its
+    control sequence (`"" + ChatFormatting.DARK_RED` printed `DARK_RED`: a mod's line on the
+    HUD read `DARK_RED0RESET`), a string builder what it holds, and each element of a list or
+    a map is written the same way. A lambda is not asked: it has no class the API knows.
+  - A stack trace has eight frames of which nothing is known, and `StackTraceElement` answers.
+  - `super.getRenderShape(state)` to one of the game's block classes is that class's own answer
+    (a block with an entity is invisible unless it says otherwise).
+  - The stop for a hook looping on unmapped calls counts each piece of the mods' code apart: a
+    listener of an event while the mods load, the game's question about one block. The game
+    asks how every block state of a pack draws, one after another, and a method nothing maps
+    that a thousand of them call was taken for one loop.
+  - A `ResourceLocation` made by its constructor (opened by an access transformer) is the
+    location's text: MineColonies' loot table ids were `minecraft:...ResourceLocation@17b04b/fish`.
+  - Every kind of block item has its block, wherever the block stands among the constructor's
+    arguments (`SignItem(Properties, standing, wall)`).
+  - A reader and a stream go back to a mark (`mark`, `reset`): a JSON5 library looks at the next
+    character so and lost every second one. Alone, Lithostitched is constructed now.
+  - `Map.Entry.comparingByKey` and `comparingByValue`.
+  - Coverage run 54 (Part 168): 120,505 of 132,302 API methods (91.1%), 95.6% of call sites,
+    5,134 keys missing; of the libraries' 76,713 methods 88.1% (85.5% at run 53).
+  - Tests: 800 compat, 16 compat-core, 33 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

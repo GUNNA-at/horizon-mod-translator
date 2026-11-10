@@ -2471,9 +2471,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 rt.put_field(a(0), "backgroundColor", a(2));
                 rt.put_field(a(0), "highlightColor", a(3));
             }
-            // `BlockItem(Block, Properties)` and its kinds: the block it places (`Block.asItem()` finds it).
-            if desc.starts_with("(Lnet/minecraft/world/level/block/Block;") {
-                rt.put_field(a(0), "$block", a(1));
+            // `BlockItem(Block, Properties)` and its kinds: the block it places (`Block.asItem()`
+            // finds it), the first block among its arguments wherever it stands
+            // (`SignItem(Properties, standing, wall)` has its properties first: a mod's signs had
+            // no block), and the one for a wall after it, under vanilla's name.
+            let blocks: Vec<usize> = crate::neo::desc_params(desc)
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.as_str() == "Lnet/minecraft/world/level/block/Block;")
+                .map(|(i, _)| i + 1)
+                .collect();
+            if let Some(&first) = blocks.first() {
+                rt.put_field(a(0), "$block", a(first));
+            }
+            if let Some(&wall) = blocks.get(1) {
+                rt.put_field(a(0), "wallBlock", a(wall));
             }
             // `ArmorItem(material, type, properties)`: vanilla's fields `material` and `type`.
             if o == ARMOR_ITEM && desc.starts_with("(Lnet/minecraft/core/Holder;Lnet/minecraft/world/item/ArmorItem$Type;") {
@@ -4802,6 +4814,17 @@ mod tests {
             api::block_name(rt, b)
         };
         assert_eq!(by_item(&mut rt, slab_item), "ruby:slab");
+        // A sign's item names its properties first, then its two blocks.
+        let sign = rt.new_object("net/minecraft/world/item/SignItem");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/SignItem.<init>.(Lnet/minecraft/world/item/Item$Properties;Lnet/minecraft/world/level/block/Block;Lnet/minecraft/world/level/block/Block;)V",
+            &[sign, item_props, slab, V::NULL],
+        );
+        assert_eq!(
+            api::call(&mut rt, "net/minecraft/world/item/BlockItem.getBlock.()Lnet/minecraft/world/level/block/Block;", &[sign]),
+            slab
+        );
         let carrot = api_common::item(&mut rt, "minecraft:carrot");
         assert_eq!(
             by_item(&mut rt, carrot),

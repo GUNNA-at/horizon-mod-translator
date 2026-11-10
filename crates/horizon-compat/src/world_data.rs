@@ -946,7 +946,7 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
 
         let mut client = Rt::new();
-        client.interned.insert("compat:client".into(), V::I(1));
+        client.interned.insert("side:client".into(), V::I(1));
         client.with_host(&mut here, |rt| {
             let server = crate::neo::server(rt);
             let root = resource(rt, "ROOT");

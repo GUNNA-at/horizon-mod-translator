@@ -224,7 +224,7 @@ mod tests {
             key(rt, "key.keyboard.g", PRESS, 0);
             assert!(crate::jutil::elements(rt, list).is_empty(), "before the client's setup");
         });
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         rt.with_host(&mut h, |rt| {
             key(rt, "key.keyboard.g", PRESS, 1);
             key(rt, "key.keyboard.g", REPEAT, 1);

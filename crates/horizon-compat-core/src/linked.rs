@@ -6,7 +6,7 @@
 //! The tables live beside the code they name, so an engine is as big as the list of its crates,
 //! however many mods it holds: a whole-group dispatcher per method grew with every class of
 //! every mod translated together, and Create's engine crate was 13 MB of them.
-use crate::{HashMap, LAMBDA, Rt, V};
+use crate::{Data, HashMap, LAMBDA, Rt, V};
 use std::collections::{BTreeSet, HashSet, VecDeque};
 
 /// A translated method: `(rt, args)`, the receiver first for an instance method.
@@ -352,12 +352,62 @@ pub fn dispatch(
     owner_key: &'static str,
     args: &[V],
 ) -> V {
+    if on_null(args) {
+        return null_receiver(rt, owner_key);
+    }
+    dispatch_any(rt, cid, kh, key, owner_key, args)
+}
+
+/// [`dispatch`] for a receiver the caller answers for: the runtime's own calls into the code
+/// ([`vcall`]), which may call what is null and take no answer for one.
+fn dispatch_any(
+    rt: &mut Rt,
+    cid: u32,
+    kh: u64,
+    key: &'static str,
+    owner_key: &'static str,
+    args: &[V],
+) -> V {
     if diagnosing() {
         return observed(rt, "virtual", owner_key, args, |rt| {
             dispatch_unobserved(rt, cid, kh, key, owner_key, args)
         });
     }
     dispatch_unobserved(rt, cid, kh, key, owner_key, args)
+}
+
+/// Whether a call the translated code makes on an object is one on Java's `null`: the JVM
+/// throws `NullPointerException` there, and code counts on it (a mod asks every block
+/// `canSurvive(null, null)` and takes the exception for "no": answered with stand-ins instead,
+/// one block's loop never ended and the question was asked again every tick). What an unmapped
+/// call answered (`V::Void`) is not null: the code goes on with it, as before.
+/// `HORIZON_COMPAT_NULL_CALLS=stand-in` gives a call on null a stand-in answer again.
+fn on_null(args: &[V]) -> bool {
+    static THROWS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    args.first() == Some(&V::NULL)
+        && *THROWS.get_or_init(|| {
+            std::env::var("HORIZON_COMPAT_NULL_CALLS").map_or(true, |v| v != "stand-in")
+        })
+}
+
+/// Whether reading a field of Java's `null` throws, as a call on it does ([`on_null`]): for the
+/// API mapping's reads of the game's fields.
+pub fn null_throws(object: V) -> bool {
+    on_null(&[object])
+}
+
+/// Throws the `NullPointerException` of a call of `owner_key` (`owner.name.desc`) on `null`, with
+/// the JVM's message for it.
+pub fn null_receiver(rt: &mut Rt, owner_key: &str) -> V {
+    let method = owner_key.split_once(".(").map_or(owner_key, |(m, _)| m);
+    let e = rt.new_object("java/lang/NullPointerException");
+    let message = rt.string(&format!(
+        "Cannot invoke \"{}()\" because the object is null",
+        method.replace('/', ".")
+    ));
+    rt.put_field(e, "message", message);
+    rt.thrown = Some(e);
+    V::Void
 }
 
 fn dispatch_unobserved(
@@ -402,6 +452,9 @@ pub fn vcall_miss(
     key: &'static str,
     args: &[V],
 ) -> V {
+    if on_null(args) {
+        return null_receiver(rt, owner_key);
+    }
     if diagnosing() {
         return observed(rt, "virtual", owner_key, args, |rt| {
             miss(rt, cid, owner_key, key, args)
@@ -643,7 +696,7 @@ fn kept_hash(key: &'static str) -> u64 {
 /// Virtual dispatch by key (`name.desc`): the API's calls back into the code.
 pub fn vcall(rt: &mut Rt, owner_key: &'static str, key: &'static str, args: &[V]) -> V {
     let cid = rt.recv_cid(args);
-    dispatch(rt, cid, kept_hash(key), key, owner_key, args)
+    dispatch_any(rt, cid, kept_hash(key), key, owner_key, args)
 }
 
 /// Reflection over the translated classes ([`Rt::reflect`]).
@@ -677,9 +730,16 @@ pub fn reflect(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {
 
 const TO_STRING: u64 = key_hash("toString.()Ljava/lang/String;");
 
-/// `String.valueOf(v)` for an object: its translated class's own `toString()`, an enum constant's
-/// name, or `v` itself (strings, boxes and the game's objects, which the runtime prints).
+/// `String.valueOf(v)` for an object: its translated class's own `toString()`; else the API's
+/// for its class, where that is more than `Object`'s (a formatting code is its control sequence,
+/// a JSON element its text, a string builder what it holds); else an enum constant's name, or
+/// `v` itself (strings, boxes and collections, which the runtime prints).
 pub fn java_string(rt: &mut Rt, v: V) -> V {
+    string_at(rt, v, 0)
+}
+
+/// [`java_string`] of an object `depth` collections down.
+fn string_at(rt: &mut Rt, v: V, depth: u32) -> V {
     if !matches!(v, V::R(_)) || v.r() == 0 || rt.str_of(v).is_some() {
         return v;
     }
@@ -687,8 +747,80 @@ pub fn java_string(rt: &mut Rt, v: V) -> V {
     if let Some(f) = rt.linked.and_then(|l| l.resolve(cid, TO_STRING)) {
         return f(rt, &[v]);
     }
+    if depth < 16
+        && let Some(text) = collection_string(rt, v, depth)
+    {
+        return rt.alloc("java/lang/String", Data::Str(text));
+    }
+    // (A lambda has no class the API knows: it prints as an object of its own.)
+    if cid & LAMBDA == 0 && !rt.prints(v) && !rt.class_of(v).contains('.') {
+        let class = rt.class_of(v);
+        let key = rt.static_key(&format!("{class}.toString.()Ljava/lang/String;"));
+        let thrown = rt.thrown.take();
+        let text = crate::api::call(rt, key, &[v]);
+        // An exception of the question is not the code's.
+        rt.thrown = thrown;
+        let plain = format!("{}@{:x}", class.replace('/', "."), v.r());
+        if rt.str_of(text).is_some_and(|t| t != plain) {
+            return text;
+        }
+    }
     let name = rt.get_field(v, "$name");
     if rt.str_of(name).is_some() { name } else { v }
+}
+
+/// A collection, a map or a map's entry of Java's own as `AbstractCollection.toString` and
+/// `AbstractMap.toString` write them: each element as [`java_string`] writes it, so one of the
+/// code's own classes or of the API's prints by its `toString()` there too (one that holds
+/// itself says so). None for another object.
+fn collection_string(rt: &mut Rt, v: V, depth: u32) -> Option<String> {
+    let class = rt.class_of(v);
+    let entry = matches!(
+        class,
+        "java/util/Map$Entry"
+            | "java/util/AbstractMap$SimpleEntry"
+            | "java/util/AbstractMap$SimpleImmutableEntry"
+    );
+    let (pairs, items): (Option<Vec<(V, V)>>, Vec<V>) =
+        match rt.heap.get(v.r() as usize).map(|o| &o.data)? {
+            Data::List(kv) if entry && kv.len() == 2 => (Some(vec![(kv[0], kv[1])]), Vec::new()),
+            Data::List(items) if rt.is_a(class, "java/util/Collection") => (None, items.clone()),
+            Data::Table(t) if rt.is_a(class, "java/util/Map") => {
+                (Some(t.entries.clone()), Vec::new())
+            }
+            Data::Table(t) if rt.is_a(class, "java/util/Collection") => {
+                (None, t.entries.iter().map(|&(k, _)| k).collect())
+            }
+            _ => return None,
+        };
+    let shown = |rt: &mut Rt, e: V, this: &str| {
+        if e == v {
+            return this.to_owned();
+        }
+        let text = string_at(rt, e, depth + 1);
+        rt.to_java_string(text, 'L')
+    };
+    Some(match pairs {
+        Some(pairs) => {
+            let mut parts = Vec::with_capacity(pairs.len());
+            for (k, e) in pairs {
+                let (k, e) = (shown(rt, k, "(this Map)"), shown(rt, e, "(this Map)"));
+                parts.push(format!("{k}={e}"));
+            }
+            if entry {
+                parts.concat()
+            } else {
+                format!("{{{}}}", parts.join(", "))
+            }
+        }
+        None => {
+            let mut parts = Vec::with_capacity(items.len());
+            for e in items {
+                parts.push(shown(rt, e, "(this Collection)"));
+            }
+            format!("[{}]", parts.join(", "))
+        }
+    })
 }
 
 /// Every key (`name.desc`) of an instance method some translated class has, sorted: what
@@ -709,7 +841,7 @@ mod tests {
             get_static: |_, _| V::Void,
             constructor_arg: |_, _| V::Void,
             fire_registrations: |_| {},
-            api_is_a: |_, _| false,
+            api_is_a: |class, of| class == "java/util/ArrayList" && of == "java/util/Collection",
             vanilla_class: |_, _, _| None,
         });
     }
@@ -1022,5 +1154,53 @@ mod tests {
         let name = rt.string("NORTH");
         rt.put_field(constant, "$name", name);
         assert_eq!(java_string(&mut rt, constant), name);
+        // In a collection each element is written the same way: the class's own `toString()`.
+        let list = rt.alloc(
+            "java/util/ArrayList",
+            Data::List(vec![child, V::I(5), constant]),
+        );
+        let text = java_string(&mut rt, list);
+        assert_eq!(rt.str_of(text), Some("[machine, 5, NORTH]"));
+        // A call the code makes on `null` throws, as the JVM does; the runtime's own call of
+        // what may be null (`vcall`) takes the API's answer as before.
+        assert_eq!(
+            vcall(&mut rt, "m/Base.power.()I", POWER, &[V::NULL]),
+            V::I(-1)
+        );
+        assert!(rt.thrown.is_none());
+        dispatch(
+            &mut rt,
+            0,
+            kept_hash(POWER),
+            POWER,
+            "m/Base.power.()I",
+            &[V::NULL],
+        );
+        let thrown = rt.thrown.take().expect("a call on null throws");
+        assert_eq!(rt.class_of(thrown), "java/lang/NullPointerException");
+        assert_eq!(
+            rt.str_of(rt.get_field(thrown, "message")),
+            Some("Cannot invoke \"m.Base.power()\" because the object is null")
+        );
+        // A lambda is not asked of the API: it has no class there.
+        let key = "m/Base.lambda$tick$0.()Ljava/util/function/Supplier;";
+        for lambda in [rt.lambda_id(key, 3, Vec::new()), rt.lambda(key, Vec::new())] {
+            let asked = rt.unmapped.len();
+            assert_eq!(java_string(&mut rt, lambda), lambda);
+            assert_eq!(rt.unmapped.len(), asked);
+        }
+        // What an unmapped call answered is not null.
+        assert_eq!(
+            dispatch(
+                &mut rt,
+                0,
+                kept_hash(POWER),
+                POWER,
+                "m/Base.power.()I",
+                &[V::Void]
+            ),
+            V::I(-1)
+        );
+        assert!(rt.thrown.is_none());
     }
 }

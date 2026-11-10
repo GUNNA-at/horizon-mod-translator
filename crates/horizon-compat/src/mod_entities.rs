@@ -2628,7 +2628,7 @@ mod tests {
         assert_eq!(id, V::I(57));
 
         let (mut rt, _) = runtime();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let mut client = MemoryHost { client: true, client_player_id: Some(57), ..MemoryHost::default() };
         rt.with_host(&mut client, |rt| {
             let level = crate::glue::level(rt);

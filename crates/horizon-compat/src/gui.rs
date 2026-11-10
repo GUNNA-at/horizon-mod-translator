@@ -1124,6 +1124,13 @@ fn text_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> O
             let n = formatting_name(rt, a(0));
             V::I((color_named(&n).is_none() && n != "RESET") as i32)
         }
+        // `toString()`: the code as text writes it, the section sign and the format's letter
+        // (what a mod puts into a string by `"" + ChatFormatting.RED`).
+        (FORMATTING, "toString") => {
+            let n = formatting_name(rt, a(0));
+            let code = FORMATS.iter().find(|f| f.0 == n).map_or('r', |f| f.1);
+            rt.string(&format!("\u{a7}{code}"))
+        }
         (FORMATTING, "getChar") => {
             let n = formatting_name(rt, a(0));
             V::I(FORMATS.iter().find(|f| f.0 == n).map_or(0, |f| f.1 as i32))
@@ -2781,6 +2788,30 @@ mod tests {
             runs(&mut rt, s),
             vec![run("a", None, false), run("b", Some(0xFF5555), false), run("c", Some(0xFF5555), true), run("d", Some(0x55FF55), false), run("e", None, false)]
         );
+    }
+
+    /// A formatting code written into a string is its control sequence, as
+    /// `ChatFormatting.toString()` gives it: `"" + ChatFormatting.DARK_RED + 0` is `§40`. (The
+    /// constant's name was written: a mod's line on the HUD read `DARK_RED0RESET`.)
+    #[test]
+    fn a_formatting_code_in_a_string_is_its_control_sequence() {
+        crate::install();
+        let mut rt = Rt::new();
+        let red = crate::api::get_static(&mut rt, "net/minecraft/ChatFormatting.DARK_RED");
+        let reset = crate::api::get_static(&mut rt, "net/minecraft/ChatFormatting.RESET");
+        let shown = crate::api::call(&mut rt, "net/minecraft/ChatFormatting.toString.()Ljava/lang/String;", &[red]);
+        assert_eq!(rt.str_of(shown), Some("\u{a7}4"));
+        // As the translated code's string concatenation asks it.
+        let (a, b) = (crate::linked::java_string(&mut rt, red), crate::linked::java_string(&mut rt, reset));
+        let line = rt.concat("\u{1}0\u{1}", "LL", &[a, b], &[]);
+        assert_eq!(rt.str_of(line), Some("\u{a7}40\u{a7}r"));
+        // Its name is still its name.
+        let name = crate::api::call(&mut rt, "net/minecraft/ChatFormatting.name.()Ljava/lang/String;", &[red]);
+        assert_eq!(rt.str_of(name), Some("DARK_RED"));
+        // And an object of the API's with no `toString` of its own is written by its class.
+        let plain = rt.new_object("net/minecraft/world/level/Level");
+        let written = crate::linked::java_string(&mut rt, plain);
+        assert_eq!(written, plain);
     }
 
     #[test]

@@ -1190,6 +1190,7 @@ const GET_RENDER_SHAPE_KEY: &str =
 pub fn render_shape(rt: &mut Rt, state: &str) -> Option<&'static str> {
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
+    crate::api::new_piece();
     let (b, class) = mod_block(rt, state)?;
     let vc = rt.vcall?;
     if rt.overrides.is_some_and(|o| o(class, GET_RENDER_SHAPE)) {
@@ -2665,7 +2666,7 @@ mod tests {
         let mut rt = Rt::new();
         rt.overrides = Some(overrides);
         rt.vcall = Some(vcall);
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let mut host = MemoryHost::default();
         let (depot, lever, crate_box, stone) = ([0, 64, 0], [1, 64, 0], [2, 64, 0], [3, 64, 0]);
         for (class, id, pos) in [(DEPOT, "test:depot", depot), (LEVER, "test:lever", lever), ("test/Crate", "test:crate", crate_box)] {

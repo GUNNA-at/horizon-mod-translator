@@ -195,6 +195,39 @@ public class Fixture {
         return r + (o instanceof RuntimeException ? 1 : 0) + (o instanceof Boom ? 10 : 0);
     }
 
+    // What the JVM throws for itself: a call on null, an array that is null, an index outside
+    // an array. Code counts on them: a question asked with nulls and answered by the exception,
+    // a loop through an array that ends at its end.
+    static int lengthOf(String s) { return s.length(); }
+    static int firstOf(int[] a) { return a[0]; }
+    public static int jvmThrows(int k) {
+        String[] names = { "ab", "cd", "ef" };
+        int[] cells = new int[3];
+        Object nothing = null;
+        try {
+            switch (k) {
+                case 0: return nothing.hashCode();
+                case 1: return lengthOf(null);
+                case 2: return names[3].length();
+                case 3: cells[-1] = 5; return cells[0];
+                case 4: return firstOf(null);
+                case 5: {
+                    int i = 0;
+                    try { while (!names[i].equals("zz")) i++; }
+                    catch (ArrayIndexOutOfBoundsException e) { return 500 + i + e.getMessage().length(); }
+                    return -5;
+                }
+                default: return names[k % 3].length() + cells[k % 3];
+            }
+        } catch (NullPointerException e) {
+            return -1 - k;
+        } catch (IndexOutOfBoundsException e) {
+            return -100 - k - e.getMessage().length();
+        } catch (Exception e) {
+            return -1000;
+        }
+    }
+
     // Pattern switches (Java 21): by type with a guard, and over an enum with a pattern case.
     static int kind(Object o) {
         return switch (o) {

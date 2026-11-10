@@ -845,7 +845,7 @@ mod tests {
         assert_eq!(heard(&mut rt), ["tick Pre player true", "tick Post player true"]);
 
         let mut rt = listening(&[(PLAYER_TICK, 3), (NETWORK_EVENT, 4), (LEVEL_UNLOAD, 5)]);
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let mut client = MemoryHost { client: true, ..Default::default() };
         rt.with_host(&mut client, |rt| {
             client_player_tick(rt);

@@ -532,6 +532,14 @@ fn compare_built(rt: &mut Rt, c: V, x: V, y: V) -> i32 {
             let (kx, ky) = (rt.call_functional(APPLY, f, &[x]), rt.call_functional(APPLY, f, &[y]));
             compare(rt, g, kx, ky)
         }
+        // `Map.Entry.comparingByKey` and `comparingByValue`: each entry's own half (an entry of
+        // a mod's own map class answers for itself).
+        "entry" => {
+            let half = rt.str_of(f).unwrap_or("").to_owned();
+            let half: &'static str = rt.static_key(&half);
+            let (kx, ky) = (rt.call_functional(half, x, &[]), rt.call_functional(half, y, &[]));
+            compare(rt, g, kx, ky)
+        }
         "int" => {
             let k = "java/util/function/ToIntFunction.applyAsInt.(Ljava/lang/Object;)I";
             let (kx, ky) = (rt.call_functional(k, f, &[x]).i(), rt.call_functional(k, f, &[y]).i());
@@ -2643,6 +2651,20 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         ("java/util/stream/Stream", "of") => {
             let items = varargs(rt);
             rt.alloc("java/util/stream/Stream", Data::Stream(items))
+        }
+        // `Map.Entry.comparingByKey()` and `comparingByValue()`, in the natural order or by a
+        // comparator: a comparator of entries by that half.
+        ("java/util/Map$Entry", "comparingByKey" | "comparingByValue") => {
+            let half = if name == "comparingByKey" {
+                "java/util/Map$Entry.getKey.()Ljava/lang/Object;"
+            } else {
+                "java/util/Map$Entry.getValue.()Ljava/lang/Object;"
+            };
+            let (c, how, half) = (rt.new_object("java/util/Comparator"), rt.string("entry"), rt.string(half));
+            rt.put_field(c, "$how", how);
+            rt.put_field(c, "$x", half);
+            rt.put_field(c, "$y", a(0));
+            c
         }
         // `Stream.ofNullable(x)`: of `x`, or of nothing for null.
         ("java/util/stream/Stream", "ofNullable") => {
@@ -5543,6 +5565,8 @@ mod tests {
         crate::install();
         let mut rt = Rt::new();
         rt.lambda_call = Some(fns);
+        // The runtime's own functions are called as the linked code calls them.
+        rt.vcall = Some(|rt, key, _, args| crate::api::call(rt, key, args));
         let names = rt.new_array(3, V::NULL);
         let name = rt.lambda_id("java/util/function/IntFunction", 1, vec![]);
         c(
@@ -5577,6 +5601,27 @@ mod tests {
         );
         let values: Vec<V> = table_pairs(&rt, m).into_iter().map(|(_, v)| v).collect();
         assert_eq!(values, [V::I(5), V::I(24)]);
+
+        // The map's entries by their keys, and by their values the other way round.
+        let by_key = c(&mut rt, "java/util/Map$Entry.comparingByKey.()Ljava/util/Comparator;", &[]);
+        let entries = c(&mut rt, "java/util/Map.entrySet.()Ljava/util/Set;", &[m]);
+        let list = new_list(&mut rt, Vec::new());
+        c(&mut rt, "java/util/List.addAll.(Ljava/util/Collection;)Z", &[list, entries]);
+        c(&mut rt, "java/util/List.sort.(Ljava/util/Comparator;)V", &[list, by_key]);
+        let keys = |rt: &mut Rt, list: V| -> Vec<String> {
+            elements(rt, list)
+                .into_iter()
+                .map(|e| {
+                    let k = c(rt, "java/util/Map$Entry.getKey.()Ljava/lang/Object;", &[e]);
+                    rt.str_of(k).unwrap_or("?").to_owned()
+                })
+                .collect()
+        };
+        assert_eq!(keys(&mut rt, list), ["gold", "iron"]);
+        let natural = c(&mut rt, "java/util/Comparator.naturalOrder.()Ljava/util/Comparator;", &[]);
+        let by_value = c(&mut rt, "java/util/Map$Entry.comparingByValue.(Ljava/util/Comparator;)Ljava/util/Comparator;", &[natural]);
+        c(&mut rt, "java/util/List.sort.(Ljava/util/Comparator;)V", &[list, by_value]);
+        assert_eq!(keys(&mut rt, list), ["iron", "gold"], "5 before 24");
 
         let none = c(
             &mut rt,

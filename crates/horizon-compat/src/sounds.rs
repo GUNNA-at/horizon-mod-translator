@@ -550,7 +550,7 @@ mod tests {
             }
         }
         let mut rt = Rt::new();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         rt.vcall = Some(hum);
         rt.supers.insert("test/Hum", ABSTRACT_TICKABLE);
         let event = sound_event(&mut rt, "create:steam", None);

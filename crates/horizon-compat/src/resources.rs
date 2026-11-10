@@ -926,10 +926,63 @@ pub(crate) fn stream_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Op
                 _ => 0,
             })
         }
-        ("markSupported", _) => V::I(0),
-        ("close" | "mark" | "reset", _) => V::Void,
+        // `ByteArrayInputStream` and `BufferedInputStream` go back to a place they marked (the
+        // first to its start, never marked); the others have no mark.
+        ("markSupported", _) => V::I(marks(rt.class_of(this)) as i32),
+        ("mark", _) => {
+            mark(rt, this);
+            V::Void
+        }
+        ("reset", _) => reset(rt, this),
+        ("close", _) => V::Void,
         _ => return None,
     })
+}
+
+/// Whether a stream or a reader of `class` goes back to a mark, as the JDK's does: the buffered
+/// ones and those over an array or a string.
+fn marks(class: &str) -> bool {
+    matches!(
+        class,
+        BUFFERED_READER
+            | STRING_READER
+            | BUFFERED_IN
+            | BYTES_IN
+            | "java/io/CharArrayReader"
+            | "java/io/LineNumberReader"
+    )
+}
+
+/// `mark(limit)`: where the reader or the stream at `this` is now, kept beside it.
+fn mark(rt: &mut Rt, this: V) {
+    if let Some(Data::Bytes(_, at)) = rt.heap.get(this.r() as usize).map(|o| &o.data) {
+        let at = *at as i32;
+        rt.put_field(this, "$mark", V::I(at));
+    }
+}
+
+/// `reset()`: back to the mark. Without one, a reader over a string or an array and a stream
+/// over an array go back to their start, and a buffered one throws, as the JDK's
+/// (`IOException`: "Stream not marked", "Resetting to invalid mark").
+fn reset(rt: &mut Rt, this: V) -> V {
+    let class = rt.class_of(this);
+    let to = match rt.get_field(this, "$mark") {
+        V::I(at) => Some(at.max(0) as usize),
+        _ if matches!(class, STRING_READER | BYTES_IN | "java/io/CharArrayReader") => Some(0),
+        _ => None,
+    };
+    match to {
+        Some(to) if marks(class) => {
+            if let Some(Data::Bytes(b, at)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data) {
+                *at = to.min(b.len());
+            }
+            V::Void
+        }
+        _ => {
+            let message = if class == BUFFERED_IN { "Resetting to invalid mark" } else if marks(class) { "Stream not marked" } else { "mark/reset not supported" };
+            crate::files::throw(rt, "java/io/IOException", message)
+        }
+    }
 }
 
 fn reader_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
@@ -994,8 +1047,15 @@ fn reader_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
             Some(Data::Bytes(b, at)) => (*at < b.len()) as i32,
             _ => 0,
         }),
-        ("markSupported", _) => V::I(0),
-        ("close" | "mark" | "reset", _) => V::Void,
+        // A buffered reader and one over a string go back to a place they marked (a JSON5 reader
+        // looks at the next character so: with no mark kept, it lost every second one).
+        ("markSupported", _) => V::I(marks(rt.class_of(this)) as i32),
+        ("mark", _) => {
+            mark(rt, this);
+            V::Void
+        }
+        ("reset", _) => reset(rt, this),
+        ("close", _) => V::Void,
         _ => return None,
     })
 }
@@ -1352,6 +1412,30 @@ mod tests {
             let line = crate::api::call(rt, "java/io/BufferedReader.readLine.()Ljava/lang/String;", &[reader]);
             assert_eq!(rt.str_of(line), Some("second line"));
             assert_eq!(crate::api::call(rt, "java/io/BufferedReader.readLine.()Ljava/lang/String;", &[reader]), V::NULL);
+
+            // A look at the next character and back (`mark(1)`, `read()`, `reset()`), as a
+            // JSON5 reader looks ahead: the character is read again after it.
+            let text = rt.string("{ab");
+            let string_reader = rt.new_object("java/io/StringReader");
+            crate::api::call(rt, "java/io/StringReader.<init>.(Ljava/lang/String;)V", &[string_reader, text]);
+            let buffered = rt.new_object("java/io/BufferedReader");
+            crate::api::call(rt, "java/io/BufferedReader.<init>.(Ljava/io/Reader;)V", &[buffered, string_reader]);
+            assert_eq!(crate::api::call(rt, "java/io/Reader.markSupported.()Z", &[buffered]), V::I(1));
+            let mut read = Vec::new();
+            for _ in 0..3 {
+                crate::api::call(rt, "java/io/Reader.mark.(I)V", &[buffered, V::I(1)]);
+                let ahead = crate::api::call(rt, "java/io/Reader.read.()I", &[buffered]);
+                crate::api::call(rt, "java/io/Reader.reset.()V", &[buffered]);
+                let again = crate::api::call(rt, "java/io/Reader.read.()I", &[buffered]);
+                read.push((ahead.i(), again.i()));
+            }
+            assert_eq!(read, [(123, 123), (97, 97), (98, 98)]);
+            // A buffered reader that marked nothing has nowhere to go back to.
+            let other = rt.new_object("java/io/BufferedReader");
+            crate::api::call(rt, "java/io/BufferedReader.<init>.(Ljava/io/Reader;)V", &[other, buffered]);
+            crate::api::call(rt, "java/io/Reader.reset.()V", &[other]);
+            let thrown = rt.thrown.take().expect("no mark");
+            assert_eq!(rt.class_of(thrown), "java/io/IOException");
 
             // A filter for `.json` files, as GeckoLib's.
             let json_only = rt.new_object("test/JsonOnly");

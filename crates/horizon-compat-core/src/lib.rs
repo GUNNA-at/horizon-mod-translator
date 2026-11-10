@@ -410,6 +410,9 @@ impl Rt {
         rt.thrown = None;
         rt.unwinding.clear();
         (rt.hook_misses, rt.hook_first_miss) = (0, None);
+        // Which side of the game a runtime is on (`side:...` among what it keeps by name) is its
+        // own to find: the copy for the server's thread is not the client the first was made.
+        rt.interned.retain(|k, _| !k.starts_with("side:"));
         rt
     }
 
@@ -760,6 +763,76 @@ impl Rt {
         {
             *slot = x;
         }
+    }
+
+    /// `array[i]` as the translated code reads it: the element, or None with the JVM's exception
+    /// thrown: `NullPointerException` for an array that is `null`, and
+    /// `ArrayIndexOutOfBoundsException` for an index outside it. Code counts on both: a loop that
+    /// looks through an array for what isn't there ends at the array's end (Kotlin's null checks
+    /// look through a stack trace so: answered a stand-in past the end, it never ended). What an
+    /// unmapped call answered in place of an array reads as nothing, as before.
+    /// `HORIZON_COMPAT_ARRAY_BOUNDS=stand-in` reads nothing past an array's end again.
+    #[inline]
+    pub fn array_load(&mut self, a: V, i: i32) -> Option<V> {
+        match self.heap.get(a.r() as usize).map(|o| &o.data) {
+            Some(Data::Array(v)) if a.r() != 0 => match v.get(i as usize) {
+                Some(x) => Some(*x),
+                None => self.out_of_bounds(i, v.len()),
+            },
+            _ => self.no_array(a),
+        }
+    }
+
+    /// `array[i] = x` as the translated code writes it: whether it was written; else the JVM's
+    /// exception is thrown ([`Rt::array_load`]).
+    #[inline]
+    pub fn array_store(&mut self, a: V, i: i32, x: V) -> bool {
+        match self.heap.get_mut(a.r() as usize).map(|o| &mut o.data) {
+            Some(Data::Array(v)) if a.r() != 0 => match v.get_mut(i as usize) {
+                Some(slot) => {
+                    *slot = x;
+                    true
+                }
+                None => {
+                    let len = v.len();
+                    self.out_of_bounds(i, len).is_some()
+                }
+            },
+            _ => self.no_array(a).is_some(),
+        }
+    }
+
+    /// An index outside an array: thrown (None), unless the switch asks for a stand-in.
+    #[cold]
+    fn out_of_bounds(&mut self, i: i32, len: usize) -> Option<V> {
+        static THROWS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*THROWS.get_or_init(|| {
+            std::env::var("HORIZON_COMPAT_ARRAY_BOUNDS").map_or(true, |v| v != "stand-in")
+        }) {
+            return Some(V::Void);
+        }
+        let e = self.new_object("java/lang/ArrayIndexOutOfBoundsException");
+        let message = self.alloc(
+            "java/lang/String",
+            Data::Str(format!("Index {i} out of bounds for length {len}")),
+        );
+        self.put_field(e, "message", message);
+        self.thrown = Some(e);
+        None
+    }
+
+    /// What is read as an array and is none: `null` throws as a call on it does
+    /// ([`linked::null_throws`]); anything else (an unmapped call's answer) reads as nothing.
+    #[cold]
+    fn no_array(&mut self, a: V) -> Option<V> {
+        if !linked::null_throws(a) {
+            return Some(V::Void);
+        }
+        let e = self.new_object("java/lang/NullPointerException");
+        let message = self.string("Cannot load from or store to an array because it is null");
+        self.put_field(e, "message", message);
+        self.thrown = Some(e);
+        None
     }
 }
 
@@ -1131,6 +1204,28 @@ impl Rt {
             'D' => java_double(v.d(), false),
             'L' => self.object_string(v, 0),
             _ => v.i().to_string(),
+        }
+    }
+
+    /// Whether `String.valueOf` of object `v` is the runtime's own to write ([`Rt::to_java_string`]):
+    /// a box, a collection, a map or a map's entry, a position, a direction. Any other object is
+    /// printed as `Class@hash` there, and its class is asked first.
+    pub fn prints(&self, v: V) -> bool {
+        let class = self.class_of(v);
+        match self.heap.get(v.r() as usize).map(|o| &o.data) {
+            Some(Data::List(_) | Data::Table(_)) => {
+                self.is_a(class, "java/util/Collection")
+                    || self.is_a(class, "java/util/Map")
+                    || class.ends_with("Entry")
+            }
+            Some(Data::Fields(f)) => {
+                (f.contains_key("value") && class.starts_with("java/lang/"))
+                    || class == "net/minecraft/world/phys/Vec3"
+            }
+            Some(Data::Native(kind, _)) => {
+                matches!(*kind, "BlockPos" | "Direction" | "Axis" | "AxisDirection" | "Plane")
+            }
+            _ => false,
         }
     }
 
@@ -1646,8 +1741,13 @@ mod tests {
         rt.put_field(machine, "speed", V::I(16));
         rt.statics.insert("m/Machine.INSTANCE", machine);
         rt.initialized.insert("m/Machine");
+        rt.interned.insert("side:client".into(), V::I(1));
+        rt.interned.insert("compat:kept".into(), machine);
         rt.throw_new("java/lang/IllegalStateException");
         let mut copy = rt.fork();
+        // What the one keeps by name the copy keeps, but which side of the game it is on.
+        assert!(copy.interned.contains_key("compat:kept") && !copy.interned.contains_key("side:client"));
+        assert!(rt.interned.contains_key("side:client"));
         assert!(
             copy.thrown.is_none(),
             "what the one is throwing is not the copy's to catch"

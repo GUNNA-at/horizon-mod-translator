@@ -36,6 +36,7 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("interfaces", "(I)I", &["0", "1"]),
     ("concat", "(I)I", &["0", "7", "123", "-4"]),
     ("exceptions", "(I)I", &["0", "1", "2", "3", "4"]),
+    ("jvmThrows", "(I)I", &["0", "1", "2", "3", "4", "5", "6", "7"]),
     ("records", "(I)I", &["0", "5", "-12"]),
     ("patterns", "(I)I", &["0", "1", "2"]),
     ("grid", "(I)I", &["0", "1", "6"]),
@@ -199,7 +200,6 @@ fn translated_fixture_matches_the_jvm() {
             "java/util/Arrays.binarySearch",
             "java/util/Arrays.toString",
             "java/lang/Long.rotateLeft",
-            "java/lang/Character.isISOControl",
         ] {
             assert!(
                 stood.iter().any(|s| s == want),

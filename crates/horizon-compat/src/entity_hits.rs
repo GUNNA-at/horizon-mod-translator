@@ -340,7 +340,7 @@ mod tests {
         assert_eq!(host.held, Some(("minecraft:cod".to_owned(), 1)));
         // The window's client predicts a grown one's: the click is used there, the server decides.
         let (mut client, ty) = runtime();
-        client.interned.insert("compat:client".into(), V::I(1));
+        client.interned.insert("side:client".into(), V::I(1));
         let mut host = world(Some(("minecraft:cod", 2)));
         client.with_host(&mut host, |rt| {
             let (e, id) = penguin(rt, ty, [0.5, 1.0, 1.5]);

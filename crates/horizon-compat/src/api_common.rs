@@ -6420,7 +6420,7 @@ mod tests {
         };
         let mut rt = Rt::new();
         crate::install();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let mut host = crate::host::MemoryHost {
             place: Some(([0.5, 64.0, 0.5], 10.0, 0.0)),
             client: true,
@@ -6503,7 +6503,7 @@ mod tests {
         };
         let mut rt = Rt::new();
         crate::install();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let mut host = crate::host::MemoryHost {
             place: Some(([0.5, 64.0, 0.5], 10.0, 0.0)),
             client: true,

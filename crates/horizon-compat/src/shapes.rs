@@ -1413,7 +1413,7 @@ mod tests {
             .push([1.8125, 64.0, -0.1875, 3.1875, 64.5625, 1.1875]);
         let mut rt = Rt::new();
         crate::install();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         rt.with_host(&mut h, |rt| {
             let me = crate::network::local_player(rt);
             let level = crate::glue::level(rt);

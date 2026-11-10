@@ -2276,12 +2276,19 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             // loads
             0x15..=0x19 => format!("s.push(l[{idx}]); {go}"),
             0x1a..=0x2d => format!("s.push(l[{}]); {go}", (i.op - 0x1a) % 4),
-            // array loads
-            0x2e..=0x35 => format!("let ix = {pop}.i(); let a = {pop}; s.push(rt.array_get(a, ix)); {go}"),
+            // array loads: the element, or the JVM's exception for a null array or an index
+            // outside it (`Rt::array_load` throws it and answers none).
+            0x2e..=0x35 => format!(
+                "let ix = {pop}.i(); let a = {pop}; match rt.array_load(a, ix) {{ Some(v) => s.push(v), None => {{ thrown_at = {}; pc = {THROW}; continue; }} }} {go}",
+                i.at
+            ),
             // stores
             0x36..=0x3a => format!("l[{idx}] = {pop}; {go}"),
             0x3b..=0x4e => format!("l[{}] = {pop}; {go}", (i.op - 0x3b) % 4),
-            0x4f..=0x56 => format!("let v = {pop}; let ix = {pop}.i(); let a = {pop}; rt.array_set(a, ix, v); {go}"),
+            0x4f..=0x56 => format!(
+                "let v = {pop}; let ix = {pop}.i(); let a = {pop}; if !rt.array_store(a, ix, v) {{ thrown_at = {}; pc = {THROW}; continue; }} {go}",
+                i.at
+            ),
             0x57 => format!("s.p(); {go}"),
             0x58 => format!("if matches!(s.p(), V::J(_) | V::D(_)) {{}} else {{ s.p(); }} {go}"),
             0x59 => format!("let v = s.top(); s.push(v); {go}"),

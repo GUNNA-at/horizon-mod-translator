@@ -249,7 +249,7 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         "isInterrupted" | "interrupted" => V::I(in_started_thread() as i32),
         "sleep" => wait(rt),
         "holdsLock" => V::I(1),
-        "getStackTrace" => rt.new_array(0, V::NULL),
+        "getStackTrace" => crate::jlang::stack_frames(rt),
         "getThreadGroup" => rt.intern("compat:thread-group".into(), |rt| rt.new_object("java/lang/ThreadGroup")),
         "getContextClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
         "join" | "interrupt" | "yield" | "onSpinWait" | "setPriority" | "setUncaughtExceptionHandler" | "setDefaultUncaughtExceptionHandler" | "setContextClassLoader" | "checkAccess" => {

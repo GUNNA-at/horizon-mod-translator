@@ -3608,7 +3608,7 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
 
         let mut rt = runtime();
-        rt.interned.insert("compat:client".into(), V::I(1));
+        rt.interned.insert("side:client".into(), V::I(1));
         let mut client = MemoryHost { client: true, player_id: Some(PLAYER), place: Some(([0.5, 64.0, 0.5], 0.0, 0.0)), ..MemoryHost::default() };
         rt.with_host(&mut client, |rt| {
             let p = server_player(rt, PLAYER);

@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**91.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.6%** of their call sites. Java's libraries: **95.1%** of the calls. Create alone: **98.0%** of its call sites. Run 53, 10 November 2026.
+**91.1%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.6%** of their call sites. Java's libraries: **96.0%** of the calls. Create alone: **98.0%** of its call sites. Run 54, 10 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -39,13 +39,13 @@ game's own code: a method the runtime doesn't have counts when the game's own me
 player's NeoForge install, can answer it.</sub>
 
 <!-- progress:table -->
-| Run 53, 367 jars | Methods answered | Call sites answered |
+| Run 54, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **91.0%**<br><sub>120,424 of 132,302</sub> | **95.6%**<br><sub>360,141 of 376,860</sub> |
-| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.0%**<br><sub>7,962 of 132,302</sub> | **2.9%**<br><sub>11,107 of 376,860</sub> |
-| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **85.5%**<br><sub>65,557 of 76,713</sub> | **95.1%**<br><sub>354,933 of 373,410</sub> |
-| Create 6.0.10, its API calls | **89.8%**<br><sub>3,570 of 3,976</sub> | **98.0%**<br><sub>24,731 of 25,245</sub> |
-| Create 6.0.10, its library calls | **83.5%**<br><sub>1,338 of 1,602</sub> | **97.6%**<br><sub>14,066 of 14,416</sub> |
+| Minecraft and NeoForge API | **91.1%**<br><sub>120,505 of 132,302</sub> | **95.6%**<br><sub>360,241 of 376,860</sub> |
+| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.0%**<br><sub>7,959 of 132,302</sub> | **2.9%**<br><sub>11,105 of 376,860</sub> |
+| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **88.1%**<br><sub>67,575 of 76,713</sub> | **96.0%**<br><sub>358,525 of 373,410</sub> |
+| Create 6.0.10, its API calls | **89.8%**<br><sub>3,571 of 3,976</sub> | **98.0%**<br><sub>24,732 of 25,245</sub> |
+| Create 6.0.10, its library calls | **84.4%**<br><sub>1,352 of 1,602</sub> | **97.7%**<br><sub>14,081 of 14,416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -63,6 +63,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 54 | 2026-11-10 | 91.1% | 95.6% | 98.0% |
 | 53 | 2026-11-10 | 91.0% | 95.6% | 98.0% |
 | 51 | 2026-11-09 | 91.1% | 95.6% | 98.0% |
 | 50 | 2026-11-09 | 90.0% | 95.2% | 97.8% |
@@ -295,13 +296,13 @@ The API methods the most jars still miss, from the latest run:
 | Missing library method | Jars | Call sites |
 |---|---:|---:|
 | `Method.invoke(Object, Object[])` | 59 | 140 |
-| `Class.getDeclaredFields()` | 46 | 90 |
 | `Field.getType()` | 44 | 99 |
-| `Gson.fromJson(Reader, Class)` | 40 | 55 |
-| `Array.newInstance(Class, int)` | 36 | 76 |
-| `Gson.fromJson(String, Class)` | 35 | 68 |
-| `new FileWriter(File)` | 34 | 47 |
-| `Field.getModifiers()` | 32 | 75 |
+| `Matrix4fStack.popMatrix()` | 24 | 37 |
+| `Matrix4fStack.pushMatrix()` | 24 | 37 |
+| `ByteBuffer.allocate(int)` | 19 | 66 |
+| `new Vector2f(float, float)` | 19 | 44 |
+| `Field.getGenericType()` | 18 | 29 |
+| `Vector2f.set(float, float)` | 18 | 22 |
 <!-- /progress -->
 
 </details>
