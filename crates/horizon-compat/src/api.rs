@@ -108,6 +108,25 @@ fn over_time() -> Option<u64> {
     (ran >= PIECE_TIME).then_some(ran.as_secs())
 }
 
+/// A point in the runtime's own code between two pieces of the mods' code it runs one after
+/// another (two reload listeners): garbage is collected there when enough was made. Only where
+/// none of the mods' code is running below, which is where no API call is in progress on this
+/// thread (every call from their code into the runtime is one), and only from a caller whose
+/// own callers hold no value of their own: a collection frees what nothing reachable names,
+/// and a value a caller keeps in a local of its own is named by nothing. `keep` are the values
+/// the caller itself still holds. The collector otherwise runs between hooks alone, so one
+/// hook that runs many listeners (the client's first resource load) kept every listener's
+/// garbage until its last.
+pub(crate) fn between(rt: &mut Rt, keep: &[V]) {
+    if DEPTH.with(|d| d.get()) != 0 {
+        return;
+    }
+    let pinned = rt.pinned.len();
+    rt.pinned.extend_from_slice(keep);
+    rt.maybe_collect();
+    rt.pinned.truncate(pinned);
+}
+
 /// API calls nested deeper than this are a loop (a handler calling a functional object that
 /// leads back to the same handler): the call throws `StackOverflowError`, as the JVM would at its
 /// stack's end, instead of overflowing the game's.
@@ -454,10 +473,10 @@ fn chained(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 const STAND_IN: &str = "$standIn";
 
 /// The class above the game's or the loader's class `class` ("" for none) and the interfaces it
-/// declares, as their class files have them ([`crate::vanilla_classes`]); None for a class
+/// declares, as their class files have them ([`crate::game_classes`]); None for a class
 /// that is not one of theirs.
 fn game_parents(class: &str) -> Option<(&'static str, &'static [&'static str])> {
-    let all = &crate::vanilla_classes::CLASSES;
+    let all = &crate::game_classes::CLASSES;
     all.binary_search_by(|e| e.0.cmp(class))
         .ok()
         .map(|i| (all[i].1, all[i].2))
@@ -472,13 +491,13 @@ fn method_hash(rest: &str) -> u32 {
 }
 
 /// Whether the game's or the loader's class `class` declares the method of hash `hash` itself
-/// ([`crate::vanilla_classes::DECLARED`]); None for a class that is not one of theirs.
+/// ([`crate::game_classes::DECLARED`]); None for a class that is not one of theirs.
 fn declares(class: &str, hash: u32) -> Option<bool> {
-    let i = crate::vanilla_classes::CLASSES
+    let i = crate::game_classes::CLASSES
         .binary_search_by(|e| e.0.cmp(class))
         .ok()?;
     Some(
-        crate::vanilla_classes::DECLARED[i]
+        crate::game_classes::DECLARED[i]
             .binary_search(&hash)
             .is_ok(),
     )
@@ -3158,9 +3177,36 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let name = block_name(rt, b);
                     state(rt, &name)
                 }
+                // One list for a block, as the game's definition keeps one (an
+                // `ImmutableList`): a mod asks for it again for each thing it looks up among
+                // the states (Resourceful Lib, for every variant of every highlight it loads),
+                // and a list of every state made anew each time was gigabytes within one
+                // reload. Made again should the block's properties have changed since (a block
+                // asked while it is being constructed).
                 "getPossibleStates" => {
-                    let states = possible_states(rt, b);
-                    crate::jutil::new_list(rt, states)
+                    let declared = match rt.heap.get(b.r() as usize).map(|o| &o.data) {
+                        Some(Data::Fields(_)) => {
+                            let props = rt.get_field(b, "$state-props");
+                            match rt.heap.get(props.r() as usize).map(|o| &o.data) {
+                                Some(Data::List(l)) => l.len(),
+                                _ => 0,
+                            }
+                        }
+                        _ => 0,
+                    };
+                    let key = format!("possible-states/{}/{declared}", b.r());
+                    match rt.interned.get(&key) {
+                        Some(&list) => list,
+                        None => {
+                            let states = possible_states(rt, b);
+                            let list = rt.alloc(
+                                "com/google/common/collect/ImmutableList",
+                                Data::List(states),
+                            );
+                            rt.interned.insert(key, list);
+                            list
+                        }
+                    }
                 }
                 "getProperties" => {
                     let props = definition_properties(rt, b);

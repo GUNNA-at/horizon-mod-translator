@@ -114,7 +114,7 @@ pub fn api_is_a(c: &str, class: &str) -> bool {
 /// Whether 1.21.1's block or item class `c` is `class` or a subtype of it, by the generated table
 /// of those classes' superclasses and interfaces; false for a class the table doesn't have.
 pub(crate) fn vanilla_is_a(c: &str, class: &str) -> bool {
-    use crate::vanilla_classes::CLASSES;
+    use crate::game_classes::CLASSES;
     let entry = |k: &str| CLASSES.binary_search_by(|e| e.0.cmp(k)).ok().map(|i| &CLASSES[i]);
     if entry(c).is_none() {
         return false;
@@ -7448,14 +7448,23 @@ mod tests {
 
     #[test]
     fn the_vanilla_class_tables_are_sorted_for_their_searches() {
-        use crate::vanilla_classes::{BLOCKS, CLASSES, DECLARED, ITEMS};
+        use crate::vanilla_classes::{BLOCKS, CLASSES, ITEMS};
         assert!(BLOCKS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(ITEMS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(CLASSES.windows(2).all(|w| w[0].0 < w[1].0));
+        // Every class of the game's, and the methods each declares.
+        use crate::game_classes::{CLASSES as ALL, DECLARED};
+        assert!(ALL.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(
             DECLARED
                 .iter()
                 .all(|methods| methods.windows(2).all(|w| w[0] < w[1]))
+        );
+        // The blocks' and items' classes are in both tables, the same in each.
+        assert!(
+            CLASSES
+                .iter()
+                .all(|c| ALL.binary_search_by(|e| e.0.cmp(c.0)).is_ok_and(|i| ALL[i] == *c))
         );
     }
 

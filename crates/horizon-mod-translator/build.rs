@@ -22,6 +22,10 @@ fn main() {
 /// modelled there, or its objects may come from there. Any other class of the game is code like
 /// a library's (`horizon_mod_translator::runtime_names`).
 fn named_classes() {
+    /// The runtime's generated table of every class of the game's with what is above it: a
+    /// name there is no model of the class (read for names, it made each of them the
+    /// runtime's, and none of the game's own code was carried).
+    const EVERY_CLASS: &str = "game_classes.rs";
     let Ok(here) = std::env::var("CARGO_MANIFEST_DIR") else {
         return;
     };
@@ -35,7 +39,7 @@ fn named_classes() {
                 let p = e.path();
                 if p.is_dir() {
                     todo.push(p);
-                } else if p.extension().is_some_and(|x| x == "rs") {
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with(EVERY_CLASS) {
                     names_in(&std::fs::read_to_string(&p).unwrap_or_default(), &mut names);
                 }
             }

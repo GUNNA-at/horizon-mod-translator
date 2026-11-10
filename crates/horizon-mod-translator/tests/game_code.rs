@@ -247,6 +247,19 @@ fn a_method_stands_where_its_code_asks_only_what_is_mapped() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The runtime's table of every class of the game's (`game_classes.rs`) names each of them and
+/// models none: a class only that table names is the game's own code, which the translator
+/// carries. (Read for names like the rest of the runtime's source, the table made every class
+/// the runtime's, and a bundle carried none of the game's own.)
+#[test]
+fn a_class_only_the_table_of_every_class_names_is_the_games_own_code() {
+    let class = "net/minecraft/util/profiling/jfr/JfrProfiler";
+    let table = include_str!("../../horizon-compat/src/game_classes.rs");
+    assert!(table.contains(&format!("\"{class}\"")));
+    assert!(!horizon_mod_translator::runtime_names(class));
+    assert!(horizon_mod_translator::game_code(class));
+}
+
 /// A field of the game's that a mod's own code reads, which nothing answers and a mapped method
 /// only returns, is read through that method, by the class the mod's reference names:
 /// `lower.open`, a field `BlockPos` declares, read through `Lower`. A field the runtime answers

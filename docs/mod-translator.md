@@ -10485,6 +10485,34 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     whatever is in a level (a player: 19 jars). An equipment slot's index, kind, filter flag
     and name, `EquipmentSlotGroup.bySlot`. A player's block coordinates.
   - Tests: 825 compat, 16 compat-core, 36 translator; the differential and weave tests.
+- [x] 2026-11-10 Part 174: what launch 16 showed, and a mistake of Part 172 undone.
+  - Part 172's table of every class of the game's sat in the runtime's source, and the
+    translator takes each class that source names for one the runtime models: the classes it
+    counts so went from 4,050 to 9,840, and round 16's bundle carried none of the game's own
+    code but two classes (four code crates fewer, the executable 21 MB smaller). The table is
+    in a file of its own now (`game_classes.rs`), which that list does not read; 4,057 classes
+    are named. A test holds a class only the table names to be the game's own code.
+  - Launch 16 (the build of Part 172: 1,970 s, 440 crates, 1.977 GB) loaded the pack's mods
+    (two constructors fail: Indigo's second render plug-in, and GuideME's, further on than
+    before, at a `ByteBuffer` the runtime had none of until Part 173) and reached the world.
+    What mixins inject into the game's own methods runs: Immersive Portals' two null calls on
+    every server tick (2 × 2,001 in launch 13) and Better Chunk Loading's (1,945) are gone,
+    their constructor handlers having run. Of the 490 uncaught exceptions, 468 are one:
+    Sable's handler at the head of `ServerLevel.tick`, which runs now, on a container its
+    physics never made (`RapierPhysicsPipelineProvider`: a native library through JNI).
+  - It was killed 324 s in, holding 43 GB (50 GB at its peak; the machine has 24 GB and the
+    swap had 7 GB of disk left). The sample has the client in its first resource load, in one
+    listener: Resourceful Lib asks a block for `getPossibleStates()` for every variant of
+    every highlight it loads, and the runtime made that list anew each time, of every
+    combination of the block's properties. The game's definition keeps one list; so does the
+    runtime now. And the collector, which ran between hooks alone, runs between one reload
+    listener and the next too: a pack's listeners all run in the client's first hook.
+    A single listener's own garbage still waits for its end: collecting while a mod's code
+    runs needs its frames' values known, which the generated code does not tell yet.
+  - The first try of launch 16 was killed by the memory watch written for launch 15 (past
+    9 GB), 204 s in: the game is larger than that by itself there (launch 13: 10.7 GB by
+    220 s). The watch samples at that size and kills only for the swap or the disk.
+  - Tests: 825 compat, 16 compat-core, 36 translator; the differential and weave tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

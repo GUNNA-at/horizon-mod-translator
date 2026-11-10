@@ -624,7 +624,7 @@ mod tests {
                 // (The generated tables name classes without modelling them: the data classes'
                 // own, and every class of the game's with what is above it.)
                 let generated =
-                    path.ends_with("vanilla_records.rs") || path.ends_with("vanilla_classes.rs");
+                    path.ends_with("vanilla_records.rs") || path.ends_with("game_classes.rs");
                 if path.extension().is_some_and(|x| x == "rs")
                     && !generated
                     && !path.ends_with("records.rs")

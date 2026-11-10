@@ -843,6 +843,8 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
     let barrier = rt.intern("compat:reload-barrier".into(), |rt| rt.new_object(BARRIER));
     let profiler = profiler(rt);
     let executor = rt.intern("compat:direct-executor".into(), |rt| rt.new_object(DIRECT_EXECUTOR));
+    let mut held = all.clone();
+    held.extend([m, barrier, profiler, executor]);
     for l in all {
         // A mod's own listener or a lambda dispatches (to its `reload`, else to vanilla's base's,
         // which comes back here as `reload_one`).
@@ -852,6 +854,9 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
             reload_one(rt, l, barrier, m, profiler);
         }
         rt.report_thrown("resource reload listener");
+        // What one listener left behind goes before the next begins: a pack's listeners
+        // together make far more garbage than fits (those who run this hold nothing more).
+        crate::api::between(rt, &held);
     }
 }
 
