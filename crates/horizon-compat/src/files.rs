@@ -466,6 +466,27 @@ fn file_method(rt: &mut Rt, name: &str, f: &str, args: &[V]) -> Option<V> {
 /// `Files`' static methods.
 fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // `Files.copy(in, target, options...)`: what is left of the stream into the file (a mod's
+    // default config out of its jar); how many bytes that was.
+    if name == "copy" && desc.starts_with("(Ljava/io/InputStream;") {
+        let to = text(rt, a(1))?;
+        let dest = on_disk(rt, &to);
+        if dest.exists() && !has_option(rt, a(2), "REPLACE_EXISTING") {
+            return Some(throw(rt, "java/nio/file/FileAlreadyExistsException", &to));
+        }
+        // What it replaces is deleted first, as the JDK's does: an empty folder of that name too
+        // (a mod that made one of its file's own path, then copied the file over it).
+        if dest.is_dir()
+            && let Err(e) = std::fs::remove_dir(&dest)
+        {
+            return Some(throw_io(rt, &e, &to));
+        }
+        let bytes = crate::resources::take(rt, a(0))?;
+        return Some(match std::fs::write(&dest, &bytes) {
+            Ok(()) => V::J(bytes.len() as i64),
+            Err(e) => throw_io(rt, &e, &to),
+        });
+    }
     let p = text(rt, a(0))?;
     let disk = on_disk(rt, &p);
     Some(match name {
@@ -806,6 +827,49 @@ mod tests {
         assert_eq!(made(&mut rt, Some("/"), "/etc"), "/etc");
         assert_eq!(made(&mut rt, Some("relative"), "//x//y/"), "relative/x/y");
         assert_eq!(made(&mut rt, None, "/alone"), "/alone");
+    }
+
+    /// `Files.copy(stream, path)` writes what is left of the stream and says how much; a file
+    /// already there is `FileAlreadyExistsException` unless the copy may replace it.
+    #[test]
+    fn a_stream_is_copied_into_a_file() {
+        let mut rt = Rt::new();
+        let dir = game(&mut rt, "copy-stream");
+        let copy = "java/nio/file/Files.copy.(Ljava/io/InputStream;Ljava/nio/file/Path;[Ljava/nio/file/CopyOption;)J";
+        let target = new_path(&mut rt, "defaults.json5");
+        let stream =
+            |rt: &mut Rt, text: &str| crate::resources::input_stream(rt, text.as_bytes().to_vec());
+        let none = rt.alloc("[Ljava/nio/file/CopyOption;", Data::Array(Vec::new()));
+        let first = stream(&mut rt, "{ a: 1 }");
+        assert_eq!(c(&mut rt, copy, &[first, target, none]), V::J(8));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("defaults.json5")).unwrap(),
+            "{ a: 1 }"
+        );
+        let again = stream(&mut rt, "{}");
+        c(&mut rt, copy, &[again, target, none]);
+        let e = rt.thrown.take().expect("it is there already");
+        assert_eq!(rt.class_of(e), "java/nio/file/FileAlreadyExistsException");
+        let replace =
+            crate::api::get_static(&mut rt, "java/nio/file/StandardCopyOption.REPLACE_EXISTING");
+        let options = rt.alloc("[Ljava/nio/file/CopyOption;", Data::Array(vec![replace]));
+        let third = stream(&mut rt, "{}");
+        assert_eq!(c(&mut rt, copy, &[third, target, options]), V::J(2));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("defaults.json5")).unwrap(),
+            "{}"
+        );
+        // Replacing deletes what is there first: an empty folder of the file's name gives way.
+        std::fs::create_dir_all(dir.join("made/as/folder.json5")).unwrap();
+        let over = new_path(&mut rt, "made/as/folder.json5");
+        let fourth = stream(&mut rt, "[]");
+        assert_eq!(c(&mut rt, copy, &[fourth, over, options]), V::J(2));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("made/as/folder.json5")).unwrap(),
+            "[]"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// commons-io's `FileUtils`, which mods keep small files of their own with: a write makes the

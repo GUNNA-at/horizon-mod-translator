@@ -1189,8 +1189,10 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
                     return Some(V::NULL);
                 } else {
                     let text = source_text(rt, a(1))?;
-                    let lenient = rt.get_field(this, "$lenient") == V::I(1);
-                    match parse(rt, &text, lenient) {
+                    // `Gson.fromJson` reads leniently whatever the builder said (Gson 2.10's
+                    // `fromJson(JsonReader, Type)` sets its reader lenient): a mod's config file
+                    // with comments in it is read.
+                    match parse(rt, &text, true) {
                         Err(e) => return Some(throw(rt, SYNTAX, &e)),
                         Ok(None) => return Some(V::NULL),
                         Ok(Some((v, _))) => v,
@@ -1215,8 +1217,7 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
                 return Some(V::NULL);
             }
             let text = source_text(rt, a(1))?;
-            let lenient = rt.get_field(this, "$lenient") == V::I(1);
-            read_as(rt, &text, &class, lenient).unwrap_or(V::NULL)
+            read_as(rt, &text, &class, true).unwrap_or(V::NULL)
         }
         _ => return None,
     })
@@ -2056,5 +2057,16 @@ mod tests {
         assert!(parse(&mut rt, "   ", true).unwrap().is_none());
         let (v, _) = parse(&mut rt, r#""aé😀\n""#, false).unwrap().unwrap();
         assert_eq!(rt.str_of(rt.get_field(v, "value")), Some("aé😀\n"));
+        // `Gson.fromJson` reads so whatever its builder was told (a mod's JSON5 config file).
+        let gson = rt.new_object(GSON);
+        let file = text(&mut rt, "{\n  // how far apart\n  \"spread\": 2\n}");
+        let class = rt.class_literal(OBJECT);
+        let o = call(
+            &mut rt,
+            "com/google/gson/Gson.fromJson.(Ljava/lang/String;Ljava/lang/Class;)Ljava/lang/Object;",
+            &[gson, file, class],
+        );
+        assert!(rt.thrown.is_none());
+        assert_eq!(write(&rt, o, TO_STRING), r#"{"spread":2}"#);
     }
 }

@@ -356,9 +356,36 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 24] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 30] = [
     // The side a game runs on: a `switch` over it builds its table from `values()`.
     ("net/neoforged/api/distmarker/Dist", &["CLIENT", "DEDICATED_SERVER"]),
+    // How a file is opened, copied and walked: the file calls read these by name.
+    (
+        "java/nio/file/StandardOpenOption",
+        &[
+            "READ",
+            "WRITE",
+            "APPEND",
+            "TRUNCATE_EXISTING",
+            "CREATE",
+            "CREATE_NEW",
+            "DELETE_ON_CLOSE",
+            "SPARSE",
+            "SYNC",
+            "DSYNC",
+        ],
+    ),
+    (
+        "java/nio/file/StandardCopyOption",
+        &["REPLACE_EXISTING", "COPY_ATTRIBUTES", "ATOMIC_MOVE"],
+    ),
+    ("java/nio/file/LinkOption", &["NOFOLLOW_LINKS"]),
+    ("java/nio/file/FileVisitOption", &["FOLLOW_LINKS"]),
+    (
+        "java/nio/file/FileVisitResult",
+        &["CONTINUE", "TERMINATE", "SKIP_SUBTREE", "SKIP_SIBLINGS"],
+    ),
+    ("java/nio/file/AccessMode", &["READ", "WRITE", "EXECUTE"]),
     (MONTH, &["JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER"]),
     // FML's config files, in its order: what `ModConfig.Type.values()` and an enum codec give.
     ("net/neoforged/fml/config/ModConfig$Type", &["COMMON", "CLIENT", "SERVER", "STARTUP"]),

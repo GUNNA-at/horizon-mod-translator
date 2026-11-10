@@ -10030,6 +10030,18 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     cut into sublists, hashed, compared both ways with the runtime's, printed, copied; the 18 results
     match the JVM's.
   - Tests: 777 compat, 15 compat-core, 31 translator; the differential tests.
+- [x] 2026-11-10 Part 159: a default config copied out of the jar and read. Sparse Structures
+  alone stopped in its constructor with "config file is malformed"; three things were in the way.
+  - `Files.copy(InputStream, Path, CopyOption...)`: the stream's bytes written to the file, the
+    number returned; a file already there is `FileAlreadyExistsException` unless `REPLACE_EXISTING`
+    is given (an empty folder there is removed first, as the JDK does).
+  - The option enums of `java.nio.file` are plain enums of the runtime's: `StandardCopyOption`,
+    `StandardOpenOption`, `LinkOption`, `FileVisitOption`, `FileVisitResult`, `AccessMode`.
+  - `Gson.fromJson` reads leniently whatever its builder was told: Gson 2.10's
+    `fromJson(JsonReader, Type)` sets its reader lenient, so a JSON5 config with comments is read. A
+    trailing comma in an object is still an error, as it is there.
+  - Checked alone (`modcheck.sh`): the mod is constructed, nothing unmapped.
+  - Tests: 778 compat, 15 compat-core, 31 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
