@@ -156,6 +156,31 @@ pub fn vanilla_class(rt: &Rt, v: V, c: &'static str) -> Option<&'static str> {
     table.binary_search_by(|(i, _)| (*i).cmp(id)).ok().map(|i| table[i].1)
 }
 
+/// The charset of canonical name `name` (`UTF-8`): one object each, as the JDK's are.
+pub(crate) fn charset(rt: &mut Rt, name: &str) -> V {
+    rt.intern(format!("compat:charset/{name}"), |rt| {
+        let c = rt.new_object("java/nio/charset/Charset");
+        let n = rt.string(name);
+        rt.put_field(c, "$name", n);
+        c
+    })
+}
+
+/// The canonical name of the charset a mod asks for by any of its names (`Charset.forName`),
+/// among those every Java runtime has; names are read without regard to case.
+pub(crate) fn charset_name(asked: &str) -> Option<&'static str> {
+    Some(match asked.to_ascii_uppercase().as_str() {
+        "UTF-8" | "UTF8" | "UNICODE-1-1-UTF-8" => "UTF-8",
+        "US-ASCII" | "ASCII" | "ISO646-US" | "ANSI_X3.4-1968" | "CP367" | "646" => "US-ASCII",
+        "ISO-8859-1" | "ISO8859_1" | "ISO_8859_1" | "ISO_8859-1" | "LATIN1" | "L1" | "CP819"
+        | "8859_1" => "ISO-8859-1",
+        "UTF-16" | "UTF16" | "UTF_16" | "UNICODE" => "UTF-16",
+        "UTF-16BE" | "UTF_16BE" | "X-UTF-16BE" | "UNICODEBIGUNMARKED" => "UTF-16BE",
+        "UTF-16LE" | "UTF_16LE" | "X-UTF-16LE" | "UNICODELITTLEUNMARKED" => "UTF-16LE",
+        _ => return None,
+    })
+}
+
 const NETTY_CODEC_EXCEPTION: &str = "io/netty/handler/codec/CodecException";
 
 /// Java's own class families, for the runtime's objects (a `new HashMap<>()` is a `Map`, a
@@ -6087,12 +6112,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 (STANDARD, "UTF_16LE") => "UTF-16LE",
                 _ => return None,
             };
-            rt.intern(format!("compat:charset/{name}"), |rt| {
-                let c = rt.new_object("java/nio/charset/Charset");
-                let n = rt.string(name);
-                rt.put_field(c, "$name", n);
-                c
-            })
+            charset(rt, name)
         }
         o if PLAIN_ENUMS.iter().any(|(c, _)| *c == o) => plain_enum(rt, o, field)?,
         "net/minecraft/util/Mth" if field == "SQRT_OF_TWO" => V::F(std::f32::consts::SQRT_2),
@@ -6166,6 +6186,29 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/world/item/Items" => item(rt, &crate::api::field_id(field)),
         // What a villager eats and picks up (1.21.1's `Villager.FOOD_POINTS` and `WANTED_ITEMS`, read
         // from its initialiser): FarmersDelight adds its crops to them.
+        // No registries of its own: the game's, which is what a mod reads through it.
+        "net/minecraft/core/RegistryAccess" if field == "EMPTY" => crate::api::call(
+            rt,
+            "net/minecraft/server/MinecraftServer.registryAccess.()Lnet/minecraft/core/RegistryAccess;",
+            &[V::NULL],
+        ),
+        "net/minecraft/world/entity/npc/Villager" if field == "FOOD_POINTS" => {
+            rt.intern("compat:villager-food-points".into(), |rt| {
+                let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
+                for (id, points) in [("bread", 4), ("potato", 1), ("carrot", 1), ("beetroot", 1)] {
+                    let (it, n) = (
+                        item(rt, id),
+                        crate::api::call(
+                            rt,
+                            "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;",
+                            &[V::I(points)],
+                        ),
+                    );
+                    crate::jutil::table_put(rt, m, it, n);
+                }
+                m
+            })
+        }
         "net/minecraft/world/entity/npc/Villager" if field == "FOOD_POINTS" => rt.intern("compat:villager-food-points".into(), |rt| {
             let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Default::default()));
             for (id, points) in [("bread", 4), ("potato", 1), ("carrot", 1), ("beetroot", 1)] {

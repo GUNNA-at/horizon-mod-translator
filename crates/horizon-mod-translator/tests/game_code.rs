@@ -289,3 +289,130 @@ fn a_game_enum_is_carried_with_its_constants() {
     assert!(classes[0].methods.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An enum of the Java runtime outside its core packages that the program names
+/// (`HttpClient.Version`) is read from the runtime's image and carried with its constants as the
+/// game's enums are; a class there that is no enum, and an enum the program does not name, stay
+/// unread.
+#[test]
+fn a_java_runtimes_enum_the_program_names_is_carried() {
+    let Some(image) = horizon_mod_translator::find_java_image() else {
+        eprintln!(
+            "skipped: no Java {} runtime",
+            horizon_mod_translator::JAVA_VERSION
+        );
+        return;
+    };
+    let named: std::collections::HashSet<String> = [
+        "java/net/http/HttpClient$Version",
+        "java/net/http/HttpClient",
+    ]
+    .iter()
+    .map(|n| (*n).to_owned())
+    .collect();
+    let game = Game::open_naming(&[&image], &named).unwrap();
+    assert!(game.class("java/net/http/HttpClient$Version").is_some());
+    assert!(
+        game.class("java/net/http/HttpClient").is_none(),
+        "no enum: its code is not the translator's to take"
+    );
+    assert!(
+        game.class("java/net/http/HttpClient$Redirect").is_none(),
+        "not named"
+    );
+    let mapped = Mapped {
+        method: &|_, _| false,
+        field: &|_, _, _| false,
+        constant: &|_| false,
+        translated: &|_| false,
+    };
+    let mut deriver = Deriver::new(&game, mapped);
+    deriver
+        .enums
+        .insert("java/net/http/HttpClient$Version".to_owned());
+    let classes = deriver.classes();
+    assert_eq!(
+        classes.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["hz/derived/java/net/http/HttpClient$Version"]
+    );
+    let constants: Vec<&str> = classes[0]
+        .fields
+        .iter()
+        .filter(|f| f.access & 0x4000 != 0)
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(constants, ["HTTP_1_1", "HTTP_2"]);
+}
+
+/// A class's method wins over an interface's default, as the JVM resolves a call: a mod's class
+/// that extends a class of the game's and implements an interface with a default method of the same
+/// name takes the game's (TFMG's cable block entity, `IElectric.getBlockPos()` and
+/// `BlockEntity.getBlockPos()`). Its code then holds that method as its own, asking the class
+/// above; a class with no such class above keeps the default, and one that declares the method
+/// itself needs nothing.
+#[test]
+fn a_games_method_wins_over_an_interfaces_default() {
+    if !has("javac") {
+        eprintln!("skipped: no javac");
+        return;
+    }
+    let dir = scratch("inherited");
+    let game_sources = [(
+        "net/minecraft/hztest/Thing.java",
+        "package net.minecraft.hztest; public class Thing { public int place() { return 7; } public int other() { return 1; } }",
+    )];
+    let (game_jar, game_classes) = jar(&dir, "game", &game_sources, None);
+    let mod_sources = [
+        (
+            "t/Placed.java",
+            "package t; public interface Placed { int code(); default int place() { return code() * 100; } }",
+        ),
+        (
+            "t/Machine.java",
+            "package t; public class Machine extends net.minecraft.hztest.Thing implements Placed { public int code() { return place(); } }",
+        ),
+        (
+            "t/Deeper.java",
+            "package t; public class Deeper extends Machine { }",
+        ),
+        (
+            "t/Own.java",
+            "package t; public class Own extends net.minecraft.hztest.Thing implements Placed { public int code() { return 1; } public int place() { return 2; } }",
+        ),
+        (
+            "t/Plain.java",
+            "package t; public class Plain implements Placed { public int code() { return 3; } }",
+        ),
+    ];
+    let (mod_jar, _) = jar(&dir, "mod", &mod_sources, Some(&game_classes));
+    // The game's class is the runtime's to answer here, not code to translate: the program is the mod's.
+    let program = horizon_mod_translator::classes(&mod_jar).unwrap();
+    let game = Game::open(&[&game_jar]).unwrap();
+    let taken = horizon_mod_translator::derive::inherited_over_defaults(&program, &game);
+    assert_eq!(
+        taken.into_iter().collect::<Vec<_>>(),
+        [(
+            "t/Machine".to_owned(),
+            vec![("place".to_owned(), "()I".to_owned())]
+        )]
+    );
+    // And as the code is written: the class's own entry for the method, asking the class above.
+    horizon_mod_translator::codegen::set_inherited(
+        horizon_mod_translator::derive::inherited_over_defaults(&program, &game),
+    );
+    let module = horizon_mod_translator::codegen::Program::new(&program).emit();
+    horizon_mod_translator::codegen::set_inherited(Default::default());
+    let stands = format!(
+        "{}__above",
+        horizon_mod_translator::codegen::fn_name("t/Machine", "place", "()I")
+    );
+    assert!(
+        module.contains(&format!("(\"place.()I\", {stands}, false)")),
+        "the class's table has no entry for it"
+    );
+    assert!(
+        module.contains("api::call(rt, \"net/minecraft/hztest/Thing.place.()I\", args)"),
+        "nothing asks the class above"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

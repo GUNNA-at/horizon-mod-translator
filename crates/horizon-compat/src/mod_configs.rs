@@ -2448,6 +2448,18 @@ fn from_value(rt: &mut Rt, v: V) -> Result<toml::Value, String> {
             }
             T::Array(out)
         }
+        // A list of another make (a library's own, a mod's class: Kotlin's `emptyList()`): its
+        // elements as it gives them, which is how Night Config's writer walks any `List`.
+        _ if rt.instance_of(v, "java/util/List") => {
+            let size = rt.call_functional("java/util/List.size.()I", v, &[]).i();
+            let mut out = Vec::new();
+            for i in 0..size.max(0) {
+                let e =
+                    rt.call_functional("java/util/List.get.(I)Ljava/lang/Object;", v, &[V::I(i)]);
+                out.push(from_value(rt, e)?);
+            }
+            T::Array(out)
+        }
         _ => {
             let class = rt.class_of(v);
             let raw = rt.get_field(v, "value");
@@ -4567,6 +4579,41 @@ mod tests {
     /// TOML as Night Config writes it: values before tables, a tab per level, a level holding only
     /// tables left out (unless it has a comment), arrays of tables, strings escaped (a multi-line
     /// one in triple quotes), Java's doubles, `nan` and `inf`, an empty table inline.
+    /// A list that is no `ArrayList` of the runtime's (a mod's own class implementing `List`:
+    /// Kotlin's `emptyList()`, a library's immutable list) is written by its elements, as Night
+    /// Config's writer walks any `List`.
+    #[test]
+    fn a_list_of_a_mods_own_class_is_written_by_its_elements() {
+        /// The mod's list: three numbers, by `size()` and `get(i)`.
+        fn list(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            match key {
+                "java/util/List.size.()I" => V::I(3),
+                "java/util/List.get.(I)Ljava/lang/Object;" => {
+                    let i = args[1].i();
+                    crate::api::call(
+                        rt,
+                        "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;",
+                        &[V::I(10 * (i + 1))],
+                    )
+                }
+                _ => V::Void,
+            }
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(list);
+        rt.supers.insert("t/Triple", "java/lang/Object");
+        rt.interfaces.insert("t/Triple", &["java/util/List"]);
+        let made = rt.new_object("t/Triple");
+        assert_eq!(
+            from_value(&mut rt, made),
+            Ok(toml::Value::Array(vec![
+                toml::Value::Int(10),
+                toml::Value::Int(20),
+                toml::Value::Int(30)
+            ]))
+        );
+    }
+
     #[test]
     fn toml_writes_as_night_config_writes_it() {
         use toml::{Table, Value as T};

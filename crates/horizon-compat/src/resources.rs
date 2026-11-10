@@ -53,6 +53,7 @@ const READER: &str = "java/io/Reader";
 const STREAM_READER: &str = "java/io/InputStreamReader";
 const BUFFERED_READER: &str = "java/io/BufferedReader";
 const STRING_READER: &str = "java/io/StringReader";
+const FILE_READER: &str = "java/io/FileReader";
 
 const RELOAD: &str = "net/minecraft/server/packs/resources/PreparableReloadListener.reload.(Lnet/minecraft/server/packs/resources/PreparableReloadListener$PreparationBarrier;Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;Lnet/minecraft/util/profiling/ProfilerFiller;Ljava/util/concurrent/Executor;Ljava/util/concurrent/Executor;)Ljava/util/concurrent/CompletableFuture;";
 const PREPARE: &str = "net/minecraft/server/packs/resources/SimplePreparableReloadListener.prepare.(Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;)Ljava/lang/Object;";
@@ -67,7 +68,10 @@ fn stream_class(c: &str) -> bool {
 }
 
 fn reader_class(c: &str) -> bool {
-    matches!(c, READER | STREAM_READER | BUFFERED_READER | STRING_READER)
+    matches!(
+        c,
+        READER | STREAM_READER | BUFFERED_READER | STRING_READER | FILE_READER
+    )
 }
 
 pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
@@ -874,6 +878,22 @@ fn reader_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
             let text = rt.str_of(a(1)).unwrap_or("").as_bytes().to_vec();
             become_bytes(rt, this, text);
             V::Void
+        }
+        // `new FileReader(file | name[, charset])`: the file's text as it is now; one that is not
+        // there is `FileNotFoundException`, as the JDK's.
+        ("<init>", _) if owner == FILE_READER => {
+            let path = rt.str_of(a(1)).unwrap_or("").to_owned();
+            match std::fs::read(crate::files::on_disk(rt, &path)) {
+                Ok(bytes) => {
+                    become_bytes(rt, this, bytes);
+                    V::Void
+                }
+                Err(_) => crate::files::throw(
+                    rt,
+                    "java/io/FileNotFoundException",
+                    &format!("{path} (No such file or directory)"),
+                ),
+            }
         }
         ("<init>", _) => {
             let bytes = take(rt, a(1)).unwrap_or_default();

@@ -1752,7 +1752,14 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
         return;
     }};
     let mine = |id: &str| id.split_once(':').is_some_and(|(n, _)| n == ns);
-    let (blocks, items, tabs, effects) = {krate}::with_probe_runtime(|rt| ({c}::blocks::block_declarations(rt), {c}::blocks::item_declarations(rt), {c}::creative::tabs(rt), {c}::mob_effects::effect_declarations(rt)));
+    // What the engine's mods register, worked out once: each of their content mods takes its
+    // namespace's from it (a pack's hundreds would each work all of it out again, every creative
+    // tab filled and every listener for its contents heard each time).
+    type Declared = (Vec<(String, String)>, Vec<(String, String)>, Vec<{c}::creative::Tab>, Vec<(String, String, u32)>);
+    static DECLARED: std::sync::OnceLock<Declared> = std::sync::OnceLock::new();
+    let (blocks, items, tabs, effects) = DECLARED.get_or_init(|| {{
+        {krate}::with_probe_runtime(|rt| ({c}::blocks::block_declarations(rt), {c}::blocks::item_declarations(rt), {c}::creative::tabs(rt), {c}::mob_effects::effect_declarations(rt)))
+    }});
     let (mut declared, mut refused) = (0usize, 0usize);
     for (id, json) in blocks.iter().filter(|(id, _)| mine(id)) {{
         match content.declare_block(id, json) {{
@@ -1786,7 +1793,7 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
         }}
     }}
     // Its creative tabs, as its own `displayItems` code fills them.
-    let tabs: Vec<_> = tabs.into_iter().filter(|t| mine(&t.id)).collect();
+    let tabs: Vec<_> = tabs.iter().filter(|t| mine(&t.id)).cloned().collect();
     let tab_count = tabs.len();
     for tab in tabs {{
         let tab = horizon_mods::content::CreativeTab {{ id: tab.id, title: tab.title, icon: tab.icon, items: tab.items }};

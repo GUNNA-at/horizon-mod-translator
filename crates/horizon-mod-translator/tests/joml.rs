@@ -521,5 +521,10 @@ fn translated_joml_matches_the_jvm() {
     assert_eq!(actual.lines().last(), Some("native m31 = 5"), "{notes}");
     assert!(!notes.contains("unmapped"), "{notes}");
     assert!(program.unsupported.is_empty(), "{:?}", program.unsupported);
-    fs::remove_dir_all(&root).unwrap();
+    // `HZ_KEEP` leaves the generated crate where it is, for a look at it.
+    if std::env::var_os("HZ_KEEP").is_some() {
+        eprintln!("kept: {}", root.display());
+    } else {
+        fs::remove_dir_all(&root).unwrap();
+    }
 }

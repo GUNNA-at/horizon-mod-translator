@@ -70,6 +70,42 @@ fn native(rt: &Rt, v: V) -> [i64; 4] {
 thread_local! {
     /// How many API calls are running on this thread, one inside another.
     static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// How many API calls this thread has answered.
+    static CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// When the piece of a mod's code that runs on this thread started ([`timed`]).
+    static PIECE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// How long one piece of a mod's code may run while the game loads (a mod's constructor, one
+/// listener hearing one event) before it is stopped: on a JVM none takes a second, and one that
+/// loops here without end (or a hundred times slower than there) would hold every other mod up.
+/// The API call it is in then throws `java.lang.Error`, which unwinds the piece as an exception of
+/// its own would; the game goes on to the next.
+const PIECE_TIME: std::time::Duration = std::time::Duration::from_secs(90);
+/// The clock is read once in this many API calls.
+const PIECE_CHECK: u64 = 1 << 20;
+
+/// Starts the clock of a piece of a mod's code ([`PIECE_TIME`]); gives back the one that ran, for
+/// [`timed_end`] when this piece is done.
+pub(crate) fn timed_start() -> Option<std::time::Instant> {
+    PIECE.replace(Some(std::time::Instant::now()))
+}
+
+/// The piece [`timed_start`] began is done: the one around it goes on.
+pub(crate) fn timed_end(outer: Option<std::time::Instant>) {
+    PIECE.set(outer);
+}
+
+/// Counts an API call; whether the piece of code it is in has run past its time (read once in
+/// [`PIECE_CHECK`] calls).
+fn over_time() -> Option<u64> {
+    let n = CALLS.get().wrapping_add(1);
+    CALLS.set(n);
+    if !n.is_multiple_of(PIECE_CHECK) {
+        return None;
+    }
+    let ran = PIECE.get()?.elapsed();
+    (ran >= PIECE_TIME).then_some(ran.as_secs())
 }
 
 /// API calls nested deeper than this are a loop (a handler calling a functional object that
@@ -109,6 +145,15 @@ fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     });
     let r = if depth > MAX_DEPTH {
         rt.throw_new("java/lang/StackOverflowError");
+        V::Void
+    } else if let Some(secs) = over_time().filter(|_| rt.thrown.is_none()) {
+        crate::jlang::throw_with(
+            rt,
+            "java/lang/Error",
+            &format!(
+                "horizon-compat: this part of the mod ran for {secs} s without coming back to the game and was stopped (in {key})"
+            ),
+        );
         V::Void
     } else {
         call_nested(rt, key, args)
@@ -2161,7 +2206,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
             let id = rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned();
             if rt.registered.keys().all(|(_, n)| *n != id) {
-                crate::neo::resolve(rt);
+                crate::neo::resolve_named(rt, &id);
             }
             rt.registered.iter().find(|((_, n), _)| *n == id).map(|(_, v)| *v).unwrap_or(V::NULL)
         }
@@ -4408,6 +4453,44 @@ mod tests {
         call(&mut rt, "net/minecraft/Nope.x.()V", &[]);
         call(&mut rt, "net/minecraft/Nope.x.()V", &[]);
         assert_eq!(rt.unmapped["net/minecraft/Nope.x.()V"], 2);
+    }
+
+    /// One piece of a mod's loading code (a constructor, a listener hearing an event) that has run
+    /// past its time is stopped at an API call: the call throws `Error` instead of answering. A
+    /// piece within its time, and code outside any piece (the game's hooks), go on; the clock is
+    /// read once in [`PIECE_CHECK`] calls, and a piece done gives the clock back to the one around.
+    #[test]
+    fn a_piece_of_loading_code_past_its_time_is_stopped() {
+        let key = "java/lang/Math.abs.(I)I";
+        let mut rt = Rt::new();
+        let next_checks = || CALLS.set(PIECE_CHECK - 1);
+        let long_ago = std::time::Instant::now()
+            .checked_sub(PIECE_TIME)
+            .expect("a clock older than the limit");
+        // No piece runs: nothing is timed.
+        PIECE.set(None);
+        next_checks();
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::I(3));
+        // A piece within its time.
+        let outer = timed_start();
+        next_checks();
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::I(3));
+        // The same piece, started long ago: between checks it goes on, at one it is stopped.
+        PIECE.set(Some(long_ago));
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::I(3));
+        next_checks();
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::Void);
+        let e = rt.thrown.take().expect("stopped");
+        assert_eq!(rt.class_of(e), "java/lang/Error");
+        assert!(
+            rt.str_of(rt.get_field(e, "message"))
+                .is_some_and(|m| m.contains("was stopped"))
+        );
+        // Done: the clock is the outer piece's again (none here).
+        timed_end(outer);
+        next_checks();
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::I(3));
+        assert!(rt.thrown.is_none());
     }
 
     /// A hook stuck in a loop on a call nothing maps (its stand-in answer never ends the loop) is

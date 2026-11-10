@@ -16,6 +16,20 @@ pub(crate) fn constant(rt: &mut Rt, v: V) -> V {
     combinator(rt, "compat:fn/constant", vec![v])
 }
 
+/// `Pattern.asPredicate()` (a text the pattern is found in) or, `whole`, `asMatchPredicate()` (a
+/// text the pattern matches all of).
+pub(crate) fn regex_predicate(rt: &mut Rt, pattern: V, whole: bool) -> V {
+    combinator(
+        rt,
+        if whole {
+            "compat:fn/regex-matches"
+        } else {
+            "compat:fn/regex-find"
+        },
+        vec![pattern],
+    )
+}
+
 /// What DFU's `getList`/`getMapEntries` answer: a consumer of a consumer, which hands it each of
 /// `items` (a list): each element, or each pair's two halves to a `BiConsumer`.
 pub(crate) fn feed(rt: &mut Rt, items: V, pairs: bool) -> V {
@@ -145,6 +159,20 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             truth(all)
         }
         "compat:fn/not" => truth(rt.call_functional(key, part(0), args).i() == 0),
+        "compat:fn/regex-find" | "compat:fn/regex-matches" => {
+            let text = args.first().copied().unwrap_or_default();
+            let m = crate::api::call(
+                rt,
+                "java/util/regex/Pattern.matcher.(Ljava/lang/CharSequence;)Ljava/util/regex/Matcher;",
+                &[part(0), text],
+            );
+            let how = if kind == "compat:fn/regex-find" {
+                "java/util/regex/Matcher.find.()Z"
+            } else {
+                "java/util/regex/Matcher.matches.()Z"
+            };
+            truth(crate::api::call(rt, how, &[m]).i() != 0)
+        }
         "compat:fn/equal" => truth(rt.java_equals(part(0), args.first().copied().unwrap_or_default())),
         "compat:fn/null" => truth(args.first().is_none_or(|v| v.r() == 0)),
         "compat:fn/true" => truth(true),

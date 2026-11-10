@@ -25,7 +25,8 @@ const WAITS: u32 = 3;
 /// only to the modules that claim it ([`crate::api`]'s chain). `Thread`'s and the calendar's come
 /// through the modules of their packages ([`thread`], [`calendar`]).
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    owner.starts_with("java/net/http/")
+    owner == CHARSET
+        || owner.starts_with("java/net/http/")
         || owner.starts_with(LOCKS)
         || matches!(
             owner,
@@ -423,8 +424,62 @@ pub(crate) fn calendar(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &
 /// request is built as the mod builds it and then fails as one does offline (an `IOException`
 /// where it is sent and waited for, a 503 where it is sent to be answered later), so an update
 /// check or a statistics ping ends in the mod's own handling of that.
+const CHARSET: &str = "java/nio/charset/Charset";
+
+/// `Charset`: the default one (UTF-8, as every Java since 18 has it), one by any of its names,
+/// and its name. A name no charset here has is `UnsupportedCharsetException`, as the JDK's.
+fn charsets(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match name {
+        "defaultCharset" => crate::api_common::charset(rt, "UTF-8"),
+        "forName" | "isSupported" => {
+            let asked = rt.str_of(a(0)).unwrap_or("").to_owned();
+            match (crate::api_common::charset_name(&asked), name) {
+                (found, "isSupported") => V::I(found.is_some() as i32),
+                (Some(canonical), _) => crate::api_common::charset(rt, canonical),
+                (None, _) => {
+                    rt.supers.insert(
+                        "java/nio/charset/UnsupportedCharsetException",
+                        "java/lang/IllegalArgumentException",
+                    );
+                    crate::jlang::throw_with(
+                        rt,
+                        "java/nio/charset/UnsupportedCharsetException",
+                        &asked,
+                    )
+                }
+            }
+        }
+        "name" | "displayName" | "toString" => rt.get_field(a(0), "$name"),
+        "canEncode" | "isRegistered" => V::I(1),
+        "equals" => V::I((a(0) == a(1)) as i32),
+        "hashCode" => {
+            let n = rt
+                .str_of(rt.get_field(a(0), "$name"))
+                .unwrap_or("")
+                .to_owned();
+            V::I(
+                n.encode_utf16()
+                    .fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(i32::from(c))),
+            )
+        }
+        "compareTo" => {
+            let n = |rt: &Rt, v: V| {
+                rt.str_of(rt.get_field(v, "$name"))
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            };
+            V::I(n(rt, a(0)).cmp(&n(rt, a(1))) as i32)
+        }
+        _ => return None,
+    })
+}
+
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    if owner == CHARSET {
+        return charsets(rt, name, args);
+    }
     if owner.starts_with(LOCKS) || matches!(owner, LATCH | "java/util/concurrent/Semaphore") {
         return locks(rt, owner, name, desc, args);
     }
@@ -536,6 +591,60 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+
+    /// `Charset.defaultCharset()` is UTF-8 (every Java since 18), `forName` finds a charset by
+    /// any of its names whatever their case, and one no Java runtime need have is
+    /// `UnsupportedCharsetException`.
+    #[test]
+    fn charsets_are_found_by_name() {
+        let mut rt = Rt::new();
+        let utf8 = crate::api::get_static(&mut rt, "java/nio/charset/StandardCharsets.UTF_8");
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/nio/charset/Charset.defaultCharset.()Ljava/nio/charset/Charset;",
+                &[]
+            ),
+            utf8
+        );
+        let for_name =
+            "java/nio/charset/Charset.forName.(Ljava/lang/String;)Ljava/nio/charset/Charset;";
+        for (asked, canonical) in [
+            ("utf8", "UTF-8"),
+            ("UTF-8", "UTF-8"),
+            ("latin1", "ISO-8859-1"),
+            ("ascii", "US-ASCII"),
+            ("UTF-16le", "UTF-16LE"),
+        ] {
+            let n = rt.string(asked);
+            let c = crate::api::call(&mut rt, for_name, &[n]);
+            let name = crate::api::call(
+                &mut rt,
+                "java/nio/charset/Charset.name.()Ljava/lang/String;",
+                &[c],
+            );
+            assert_eq!(rt.str_of(name), Some(canonical), "{asked}");
+        }
+        let n = rt.string("utf8");
+        assert_eq!(
+            crate::api::call(&mut rt, for_name, &[n]),
+            utf8,
+            "one object per charset"
+        );
+        let odd = rt.string("x-klingon");
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/nio/charset/Charset.isSupported.(Ljava/lang/String;)Z",
+                &[odd]
+            ),
+            V::I(0)
+        );
+        crate::api::call(&mut rt, for_name, &[odd]);
+        let e = rt.thrown.take().expect("no such charset");
+        assert!(rt.instance_of(e, "java/lang/IllegalArgumentException"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
     use super::*;
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {

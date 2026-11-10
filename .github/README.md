@@ -169,7 +169,7 @@ result comes from a scene set up by command, read back from the world's data and
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
   played both mods in one world.
 
-Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in 87 minutes, but does not load into a world yet: at its second launch all 365 mods were constructed (321 without an error) and set up, then one mod's loop took the machine's memory.
+Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in about 40 minutes, but does not load into a world yet: at its latest launch every mod was constructed (7 with an error), their registries and setup ran and 13,095 blocks and items were declared, then two methods of one mod called each other without end.
 
 ## Try it
 

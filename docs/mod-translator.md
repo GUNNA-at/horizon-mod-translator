@@ -9979,6 +9979,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     outliner takes 42% off the largest (13.0 to 7.6 MB) but the JOML fixture ran 1.57 times slower with
     it, `opt-level = "z"` 60% off and 3.6 times slower, `"s"` 5% off.
   - Tests: 766 compat, 15 compat-core, 31 translator; the differential tests (the fixture, JOML).
+- [x] 2026-11-10 Part 157: the pack's next launch (the build of Parts 155 and 156) went through the
+  loading: every mod class was constructed, 7 with an error (two of kinds set aside: a second renderer,
+  Lucene), the registries fired and setup ran, and 13,095 blocks and items of 188 namespaces were
+  declared to the game. Then the game died of a stack overflow. What it showed:
+  - A class's method wins over an interface's default, as the JVM resolves a call, also where the class
+    is the game's. TFMG's `CopycatCableBlockEntity` implements `IElectric`, whose default
+    `getBlockPos()` asks `getPos()`, which the class answers from `BlockEntity.getBlockPos()`; the
+    runtime found the default first, and the two called each other until the stack ended. The
+    translator now finds, with the game's classes from the install, each such method a class takes
+    from the game's class above it, and gives the class an entry of its own for it that asks the class
+    above (`derive::inherited_over_defaults`).
+  - The entries of the mods' `DeferredRegister`s were all made at once after every registry had fired, and
+    one supplier's exception stayed pending and ended every supplier after it. 65 namespaces whose
+    assets have item or block models had nothing declared (Chipped with 6,993, ten of Macaw's mods,
+    Biomes O' Plenty, Farmer's Delight, Storage Drawers) and 21 more under half; alone, each registers
+    everything (Farmer's Delight 132 blocks and 94 items, Macaw's Furniture 652 blocks, Storage Drawers
+    143 and 59). Now each registry's entries are made when it fires, so an item's supplier finds its
+    block; one read before that is made then, alone; and a supplier that throws loses its own entry
+    and is reported.
+  - What the mods register was worked out again for each of the pack's 302 content mods (every creative
+    tab filled, every listener for its contents heard: five minutes, and 10,400 exceptions from one
+    listener). It is worked out once.
+  - Each piece of a mod's loading code (a constructor, a listener hearing an event) is on a clock: past
+    90 s it is stopped at its next call into the game, with an `Error` that unwinds it, and the next
+    mod goes on. Generated code tells the runtime of the loading's steps through calls any build of it
+    can make (`hz/loading`).
+  - `new File(parent, "/child")` is under the parent, as the JDK's `File` resolves it (it was the
+    child alone, as `Path.resolve` has it: FancyMenu made its folders at the disk's root). `FileReader`,
+    commons-io's `FileUtils` for a file's text, `Charset.forName` and `defaultCharset`,
+    `WordUtils.capitalize`, `LongAdder`, `Pattern.asPredicate`, `ExtraCodecs.VECTOR3F` and `QUATERNIONF`
+    (the quaternion to the bit as JOML makes it), `VillagerType`'s constants, `RegistryAccess.EMPTY`;
+    any `List` as a config value (Kotlin's `emptyList()`); and the Java runtime's enums a program names
+    (`HttpClient.Version`) carried with their constants as the game's are.
+  - A mod alone is checked in half a minute (a scratch harness: its bundle built against the repo's
+    runtime, loaded without the game, its registrations counted), where a round on the pack takes forty.
+  - Tests: 777 compat, 15 compat-core, 31 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -122,9 +122,53 @@ pub(crate) fn enum_names(class: &str) -> Option<(&'static str, Vec<&'static str>
 /// one object per constant, with its name and ordinal ([`crate::api::api_enum`]).
 pub(crate) fn enum_constant(rt: &mut Rt, key: &str) -> Option<V> {
     let (owner, field) = key.rsplit_once('.')?;
+    if let Some(&(class, registry, names, map)) = NAMED_CONSTANTS.iter().find(|c| c.0 == owner) {
+        return named_constant(rt, class, registry, names, map, field);
+    }
     let (class, names) = constants(owner)?;
     let (ordinal, name) = names.split(',').enumerate().find(|(_, n)| *n == field)?;
     Some(crate::api::api_enum(rt, class, name, ordinal as i32))
+}
+
+/// The constants of the table's data classes that vanilla makes from a name and registers under
+/// it (`VillagerType.PLAINS = register("plains")`): the class, its registry, the constants, and a
+/// map of the class's that mods add to (`VillagerType.BY_BIOME`).
+const NAMED_CONSTANTS: [(&str, &str, &str, &str); 1] = [(
+    "net/minecraft/world/entity/npc/VillagerType",
+    "villager_type",
+    "DESERT,JUNGLE,PLAINS,SAVANNA,SNOW,SWAMP,TAIGA",
+    "BY_BIOME",
+)];
+
+/// Constant `field` of [`NAMED_CONSTANTS`]' `class`: one object each, built as a mod's `new` would
+/// build it and held by the registry under its id; or the class's map.
+fn named_constant(
+    rt: &mut Rt,
+    class: &'static str,
+    registry: &str,
+    names: &str,
+    map: &str,
+    field: &str,
+) -> Option<V> {
+    if field == map {
+        return Some(
+            rt.intern(format!("compat:constants/{class}.{field}"), |rt| {
+                rt.alloc("java/util/HashMap", crate::Data::Table(Default::default()))
+            }),
+        );
+    }
+    if !names.split(',').any(|n| n == field) {
+        return None;
+    }
+    let name = field.to_ascii_lowercase();
+    let made = rt.intern(format!("compat:constants/{class}.{field}"), |rt| {
+        let text = rt.string(&name);
+        make_data(rt, class, "(Ljava/lang/String;)V", &[text])
+    });
+    rt.registered
+        .entry((registry.to_owned(), format!("minecraft:{name}")))
+        .or_insert(made);
+    Some(made)
 }
 
 /// A plain data class's members, as [`DATA_CLASSES`] lists them.
@@ -474,6 +518,56 @@ mod tests {
         let name = call(&mut rt, format!("{INSTRUMENT}.name.()Ljava/lang/String;"), &[bass]);
         assert_eq!(rt.str_of(name), Some("BASS"));
         assert_eq!(call(&mut rt, format!("{INSTRUMENT}.compareTo.(Ljava/lang/Enum;)I"), &[harp, bass]), V::I(-4));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `VillagerType.PLAINS` and its kin: one object each, as the table builds a villager type
+    /// (`toString()` is its name), held by the registry under its id; `BY_BIOME` is a map mods add
+    /// their biomes to (Biomes O' Plenty).
+    #[test]
+    fn villager_types_are_the_tables_objects_under_their_ids() {
+        let mut rt = Rt::new();
+        let ty = "net/minecraft/world/entity/npc/VillagerType";
+        let snow =
+            crate::api::get_static(&mut rt, "net/minecraft/world/entity/npc/VillagerType.SNOW");
+        assert_eq!(rt.class_of(snow), ty);
+        let name = crate::api::call(
+            &mut rt,
+            "net/minecraft/world/entity/npc/VillagerType.toString.()Ljava/lang/String;",
+            &[snow],
+        );
+        assert_eq!(rt.str_of(name), Some("snow"));
+        assert_eq!(
+            crate::api::get_static(&mut rt, "net/minecraft/world/entity/npc/VillagerType.SNOW"),
+            snow,
+            "one object"
+        );
+        assert_eq!(
+            crate::neo::registry_get(&mut rt, "villager_type", "minecraft:snow"),
+            snow
+        );
+        let by_biome = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/world/entity/npc/VillagerType.BY_BIOME",
+        );
+        let biome = rt.string("minecraft:worldgen/biome#t:tundra");
+        crate::api::call(
+            &mut rt,
+            "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[by_biome, biome, snow],
+        );
+        let again = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/world/entity/npc/VillagerType.BY_BIOME",
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[again, biome]
+            ),
+            snow
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

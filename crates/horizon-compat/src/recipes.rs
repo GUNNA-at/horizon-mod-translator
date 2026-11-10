@@ -1564,6 +1564,80 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
                 _ => Err(format!("Input is not a list of 3 elements: {j}")),
             }
         }
+        // `ExtraCodecs.VECTOR3F`: a list of three floats.
+        "vector3f" => {
+            let xyz: Vec<f64> = j
+                .as_array()
+                .map(|a| a.iter().filter_map(Json::as_f64).collect())
+                .unwrap_or_default();
+            match xyz[..] {
+                [x, y, z] => {
+                    let v = rt.new_object("org/joml/Vector3f");
+                    for (field, n) in [("x", x), ("y", y), ("z", z)] {
+                        rt.put_field(v, field, V::F(n as f32));
+                    }
+                    Ok(v)
+                }
+                _ => Err(format!("Input is not a list of 3 elements: {j}")),
+            }
+        }
+        // `ExtraCodecs.QUATERNIONF`: four floats `[x, y, z, w]`, normalized as vanilla's codec
+        // does, or `{angle, axis: [x, y, z]}`, a turn of `angle` radians about the axis: both as
+        // JOML computes them (`Quaternionf.normalize`, `Quaternionf(AxisAngle4f)`), to the bit.
+        "quaternionf" => {
+            use std::f64::consts::PI;
+            if let Some(o) = j.as_object() {
+                let angle =
+                    o.get("angle")
+                        .and_then(Json::as_f64)
+                        .ok_or_else(|| format!("No key angle in {j}"))? as f32;
+                let axis: Vec<f64> = o
+                    .get("axis")
+                    .and_then(Json::as_array)
+                    .map(|a| a.iter().filter_map(Json::as_f64).collect())
+                    .unwrap_or_default();
+                let [x, y, z] = axis[..] else {
+                    return Err(format!("Input is not a list of 3 elements: {j}"));
+                };
+                // `AxisAngle4f` keeps its angle within a turn; the quaternion's sine is of half
+                // of it, and its cosine is taken from that sine with the quadrant's sign.
+                let (turn, given) = (PI + PI, f64::from(angle));
+                let kept = ((if given < 0.0 {
+                    turn + given % turn
+                } else {
+                    given
+                }) % turn) as f32;
+                let half = kept * 0.5;
+                let sin = crate::jmath::sin(f64::from(half)) as f32;
+                let cos = (1.0 - sin * sin).sqrt();
+                let (quarter, whole) = ((PI * 0.5) as f32, (PI * 2.0) as f32);
+                let ahead = half + quarter;
+                let mut within = ahead - ((ahead / whole) as i32) as f32 * whole;
+                if within < 0.0 {
+                    within += whole;
+                }
+                let cos = if within >= PI as f32 { -cos } else { cos };
+                return Ok(crate::render::new_quat(
+                    rt,
+                    [x as f32 * sin, y as f32 * sin, z as f32 * sin, cos],
+                ));
+            }
+            let q: Vec<f64> = j
+                .as_array()
+                .map(|a| a.iter().filter_map(Json::as_f64).collect())
+                .unwrap_or_default();
+            match q[..] {
+                [x, y, z, w] => {
+                    let (x, y, z, w) = (x as f32, y as f32, z as f32, w as f32);
+                    let inv = 1.0 / (x * x + (y * y + (z * z + w * w))).sqrt();
+                    Ok(crate::render::new_quat(
+                        rt,
+                        [x * inv, y * inv, z * inv, w * inv],
+                    ))
+                }
+                _ => Err(format!("Input is not a list of 4 elements: {j}")),
+            }
+        }
         "spawner_data" => crate::spawning::decode_spawner(rt, j),
         "uuid" => {
             let ints: Vec<i64> = j.as_array().map(|a| a.iter().filter_map(Json::as_i64).collect()).unwrap_or_default();

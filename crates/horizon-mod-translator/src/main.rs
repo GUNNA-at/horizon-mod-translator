@@ -958,8 +958,20 @@ fn derived_classes(
     game: &[&Path],
 ) -> Result<Vec<horizon_mod_translator::class::ClassFile>, String> {
     horizon_compat::install();
-    let game = horizon_mod_translator::derive::Game::open(game)?;
     let own: std::collections::HashSet<&str> = program.iter().map(|c| c.name.as_str()).collect();
+    // The classes the program names, for the Java runtime's enums among them.
+    let mut named = std::collections::HashSet::new();
+    for c in program {
+        for i in 0..c.pool.len() as u16 {
+            if let Ok(name) = c.class_name(i)
+                && horizon_mod_translator::derive::is_jdk(&name)
+                && !own.contains(name.as_str())
+            {
+                named.insert(name);
+            }
+        }
+    }
+    let game = horizon_mod_translator::derive::Game::open_naming(game, &named)?;
     let all: Vec<&horizon_mod_translator::class::ClassFile> = program.iter().collect();
     // What the program calls of the API, and the static methods it calls of the Java runtime's
     // classes (`Arrays.binarySearch`, `Math.nextUp`): where the runtime has no answer, the JDK's
@@ -1007,7 +1019,8 @@ fn derived_classes(
     for c in program {
         for i in 0..c.pool.len() as u16 {
             if let Ok(name) = c.class_name(i)
-                && horizon_mod_translator::is_api(&name)
+                && (horizon_mod_translator::is_api(&name)
+                    || horizon_mod_translator::derive::is_jdk(&name))
                 && !own.contains(name.as_str())
                 && game.class(&name).is_some_and(|g| g.access & 0x4000 != 0)
             {
@@ -1016,6 +1029,9 @@ fn derived_classes(
         }
     }
     horizon_mod_translator::codegen::set_accessors(deriver.accessors.clone());
+    horizon_mod_translator::codegen::set_inherited(
+        horizon_mod_translator::derive::inherited_over_defaults(program, &game),
+    );
     Ok(deriver.classes())
 }
 

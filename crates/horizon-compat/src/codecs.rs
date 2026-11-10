@@ -142,6 +142,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             "POSITIVE_FLOAT" => range(rt, "float", f64::from(f32::MIN_POSITIVE), f32::MAX as f64),
             "NON_NEGATIVE_FLOAT" => range(rt, "float", 0.0, f32::MAX as f64),
             "NON_EMPTY_STRING" => prim(rt, "string"),
+            // JOML's values as lists of floats: three for a vector, four for a quaternion (which
+            // may also be an angle about an axis).
+            "VECTOR3F" => native(rt, "vector3f"),
+            "QUATERNIONF" => native(rt, "quaternionf"),
             _ => return None,
         },
         ("net/minecraft/nbt/NbtOps", "INSTANCE") => crate::ops::nbt_ops(rt),
@@ -1032,6 +1036,17 @@ pub(crate) fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String>
             let xyz = ["x", "y", "z"].map(|f| Nbt::Double(rt.get_field(v, f).d()));
             Nbt::List(xyz.to_vec())
         }
+        // `[x, y, z]` and `[x, y, z, w]` as floats (`ExtraCodecs.VECTOR3F`, `QUATERNIONF`).
+        "vector3f" => Nbt::List(
+            ["x", "y", "z"]
+                .map(|f| Nbt::Float(rt.get_field(v, f).f()))
+                .to_vec(),
+        ),
+        "quaternionf" => Nbt::List(
+            ["x", "y", "z", "w"]
+                .map(|f| Nbt::Float(rt.get_field(v, f).f()))
+                .to_vec(),
+        ),
         // Four ints, most significant first (`UUIDUtil.CODEC`), or the dashed text.
         "uuid" => {
             let (msb, lsb) = crate::tags::uuid_bits(rt, v);
@@ -1975,6 +1990,64 @@ mod tests {
         want.insert("pos".to_owned(), Nbt::IntArray(vec![4, 64, -7]));
         assert_eq!(written, Nbt::Compound(want));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `ExtraCodecs.VECTOR3F` and `QUATERNIONF`: lists of floats, a quaternion normalized as it
+    /// is read, or given as an angle about an axis. The bits are what a JVM with JOML 1.10.5 gives
+    /// for `new Quaternionf(.1f, .2f, .3f, .4f).normalize()` and `new Quaternionf(new
+    /// AxisAngle4f(angle, new Vector3f(0, .6f, .8f)))`.
+    #[test]
+    fn jomls_vectors_and_quaternions_read_and_write_as_vanillas_codecs() {
+        let mut rt = Rt::new();
+        let bits = |rt: &Rt, v: V, fields: &[&'static str]| -> Vec<u32> {
+            fields
+                .iter()
+                .map(|f| rt.get_field(v, f).f().to_bits())
+                .collect()
+        };
+        let vector = get_static(&mut rt, "net/minecraft/util/ExtraCodecs", "VECTOR3F").unwrap();
+        let v = decode(&mut rt, vector, &serde_json::json!([1.5, -2.0, 0.25])).unwrap();
+        assert_eq!(rt.class_of(v), "org/joml/Vector3f");
+        assert_eq!(
+            bits(&rt, v, &["x", "y", "z"]),
+            [1.5f32.to_bits(), (-2.0f32).to_bits(), 0.25f32.to_bits()]
+        );
+        assert_eq!(
+            encode(&mut rt, vector, v),
+            Ok(Nbt::List(vec![
+                Nbt::Float(1.5),
+                Nbt::Float(-2.0),
+                Nbt::Float(0.25)
+            ]))
+        );
+        assert!(decode(&mut rt, vector, &serde_json::json!([1.0, 2.0])).is_err());
+        let quaternion =
+            get_static(&mut rt, "net/minecraft/util/ExtraCodecs", "QUATERNIONF").unwrap();
+        let q = decode(
+            &mut rt,
+            quaternion,
+            &serde_json::json!([0.1, 0.2, 0.3, 0.4]),
+        )
+        .unwrap();
+        assert_eq!(
+            bits(&rt, q, &["x", "y", "z", "w"]),
+            [1044051131, 1052439739, 1057765261, 1060828347]
+        );
+        for (angle, expected) in [
+            (1.25, [0, 1051966956, 1055893477, 1062181704]),
+            (-0.5, [0, 1041760580, 1045081179, (-1082651995i32) as u32]),
+            (7.0, [0, 1045923183, 1049603658, 1064287136]),
+        ] {
+            let q = decode(
+                &mut rt,
+                quaternion,
+                &serde_json::json!({"angle": angle, "axis": [0.0, 0.6, 0.8]}),
+            )
+            .unwrap();
+            assert_eq!(bits(&rt, q, &["x", "y", "z", "w"]), expected, "{angle}");
+        }
+        let written = encode(&mut rt, quaternion, q).unwrap();
+        assert!(matches!(written, Nbt::List(ref l) if l.len() == 4));
     }
 
     #[test]

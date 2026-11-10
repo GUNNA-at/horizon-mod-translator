@@ -687,6 +687,7 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     owner.starts_with("java/lang/")
         || owner.starts_with("java/text/")
         || owner.starts_with("org/apache/commons/lang3/")
+        || owner == "org/apache/commons/text/WordUtils"
         || owner.ends_with("Pair")
         || owner.ends_with("Triple")
         || matches!(
@@ -906,8 +907,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/lang/Math" | "java/lang/StrictMath" => integer_math(rt, name, desc, args).or_else(|| math(name, &ks, args)),
         "java/lang/Object" => Some(match name {
             // A vanilla block's or item's is its 1.21.1 class (`IceBlock`), as `instanceof` answers.
+            // A lambda's is its own (the JVM makes one for each): it names the method that is
+            // its body, which is how its parameter's type is found (`TypeResolver`).
             "getClass" => {
-                let c = rt.type_of(a(0));
+                let c = if rt.cid(a(0)) & crate::LAMBDA != 0 {
+                    rt.class_of(a(0))
+                } else {
+                    rt.type_of(a(0))
+                };
                 rt.class_literal(c)
             }
             // Object's own: `super.hashCode()` from an override must not come back to it.
@@ -2016,6 +2023,8 @@ fn builder(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Opti
             set(rt, from16(&u));
             V::Void
         }
+        // How much room the builder keeps is its own business: the text is the same.
+        "trimToSize" | "ensureCapacity" => V::Void,
         "deleteCharAt" => {
             let mut u = utf16(&cur(rt));
             let i = a(1).i().max(0) as usize;
@@ -3622,6 +3631,35 @@ mod tests {
         }
     }
 
+    /// `WordUtils.capitalize` and `capitalizeFully` (commons-lang3 and commons-text), as commons
+    /// gives them: each word's first letter in upper case, words being what whitespace parts.
+    #[test]
+    fn words_are_capitalized_as_commons_does() {
+        let mut rt = Rt::new();
+        let cap = |rt: &mut Rt, key: &'static str, text: &str| {
+            let s = rt.string(text);
+            let r = crate::api::call(rt, key, &[s]);
+            rt.str_of(r).map(str::to_owned)
+        };
+        let capitalize = "org/apache/commons/lang3/text/WordUtils.capitalize.(Ljava/lang/String;)Ljava/lang/String;";
+        let fully = "org/apache/commons/text/WordUtils.capitalizeFully.(Ljava/lang/String;)Ljava/lang/String;";
+        assert_eq!(
+            cap(&mut rt, capitalize, "i am FINE").as_deref(),
+            Some("I Am FINE")
+        );
+        assert_eq!(
+            cap(&mut rt, fully, "i am FINE").as_deref(),
+            Some("I Am Fine")
+        );
+        assert_eq!(
+            cap(&mut rt, capitalize, "oak_log  and\ttwo").as_deref(),
+            Some("Oak_log  And\tTwo")
+        );
+        assert_eq!(cap(&mut rt, capitalize, "").as_deref(), Some(""));
+        assert_eq!(crate::api::call(&mut rt, capitalize, &[V::NULL]), V::NULL);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `Boolean.valueOf(String)` reads the text as `parseBoolean` does ("true" in any case, and
     /// nothing else, is true), and gives the box: it gave the text back, so `booleanValue()` of it
     /// was false whatever a mod's option said (JOML's `-Djoml.nounsafe`, read so).
@@ -4618,7 +4656,7 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (_, _) if logger => {
             if desc.ends_with(")V") { V::Void } else { V::NULL }
         }
-        ("org/apache/logging/log4j/LogManager" | "org/slf4j/LoggerFactory" | "com/mojang/logging/LogUtils", "getLogger") => {
+        ("org/apache/logging/log4j/LogManager" | "org/slf4j/LoggerFactory" | "com/mojang/logging/LogUtils", "getLogger" | "getFormatterLogger" | "getRootLogger") => {
             rt.intern("compat:logger".into(), |rt| rt.new_object("org/apache/logging/log4j/Logger"))
         }
         ("org/apache/logging/log4j/MarkerManager", "getMarker") => a(0),
@@ -4682,6 +4720,28 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("joptsimple/internal/Strings" | "org/apache/commons/lang3/StringUtils", "repeat") => {
             let unit = if desc.starts_with("(C") { char::from_u32(a(0).i() as u32).unwrap_or(' ').to_string() } else { text(rt, a(0)) };
             new_str(rt, unit.repeat(a(1).i().max(0) as usize))
+        }
+        // `WordUtils.capitalize(text)`: the first letter of each word (what follows whitespace)
+        // in upper case; `capitalizeFully` puts the rest in lower case first.
+        ("org/apache/commons/lang3/text/WordUtils" | "org/apache/commons/text/WordUtils", "capitalize" | "capitalizeFully") if desc.starts_with("(Ljava/lang/String;)") => {
+            if a(0).r() == 0 {
+                return Some(V::NULL);
+            }
+            let t = if name == "capitalizeFully" { text(rt, a(0)).to_lowercase() } else { text(rt, a(0)) };
+            let mut out = String::with_capacity(t.len());
+            let mut starts = true;
+            for c in t.chars() {
+                if java_whitespace(c) {
+                    starts = true;
+                    out.push(c);
+                } else if starts {
+                    starts = false;
+                    out.extend(c.to_uppercase());
+                } else {
+                    out.push(c);
+                }
+            }
+            new_str(rt, out)
         }
         ("org/apache/commons/lang3/StringUtils", "capitalize" | "uncapitalize") => {
             if a(0).r() == 0 {

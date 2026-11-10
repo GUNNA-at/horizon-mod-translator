@@ -349,6 +349,32 @@ pub(crate) const PART_HEADER: &str = "#![allow(unused_mut, unused_variables, unu
 static ACCESSORS: std::sync::RwLock<BTreeMap<(String, String, bool), String>> =
     std::sync::RwLock::new(BTreeMap::new());
 
+/// The methods a class takes from the game's class above it over an interface's default of the
+/// same name (`derive::inherited_over_defaults`): by class, each one's name and descriptor. Set
+/// before a bundle is written with the game's own code.
+static INHERITED: std::sync::RwLock<BTreeMap<String, Vec<(String, String)>>> =
+    std::sync::RwLock::new(BTreeMap::new());
+
+/// Sets the methods classes take from the game over a default ([`INHERITED`]).
+pub fn set_inherited(inherited: BTreeMap<String, Vec<(String, String)>>) {
+    if let Ok(mut i) = INHERITED.write() {
+        *i = inherited;
+    }
+}
+
+fn inherited(class: &str) -> Vec<(String, String)> {
+    INHERITED
+        .read()
+        .ok()
+        .and_then(|i| i.get(class).cloned())
+        .unwrap_or_default()
+}
+
+/// The function that stands in `class` for a method it takes from the game's class above it.
+fn inherited_fn(class: &str, name: &str, desc: &str) -> String {
+    format!("{}__above", fn_name(class, name, desc))
+}
+
 /// Sets the game fields' accessors the code written from here on uses ([`ACCESSORS`]).
 pub fn set_accessors(accessors: BTreeMap<(String, String, bool), String>) {
     if let Ok(mut a) = ACCESSORS.write() {
@@ -372,6 +398,18 @@ const SUBSCRIBE_EVENT: &str = "Lnet/neoforged/bus/api/SubscribeEvent;";
 /// reads and writes as sixteen and nine numbers. Their own code, taken from the player's install,
 /// reads a field as its slot.
 pub const ARRAY_CLASSES: [&str; 2] = ["org/joml/Matrix4f", "org/joml/Matrix3f"];
+
+/// A step of the mods' loading told to the runtime (`hz/loading`: which mod's constructor runs
+/// next, that the last one ran, a class subscribed for its mod), as a call any build of the
+/// generated code can make: the texts `args` are its arguments.
+fn loading(step: &str, args: &[&str]) -> String {
+    let texts: Vec<String> = args.iter().map(|a| format!("rt.string({a:?})")).collect();
+    let desc = "Ljava/lang/String;".repeat(args.len());
+    format!(
+        "{{ let a = [{}]; horizon_compat::api::call(rt, \"hz/loading.{step}.({desc})V\", &a); }}",
+        texts.join(", ")
+    )
+}
 
 /// A field's value before anything is written to it, by its descriptor: None for a reference.
 fn zero_of(desc: &str) -> Option<&'static str> {
@@ -1263,7 +1301,7 @@ impl<'a> Program<'a> {
             let _ = writeln!(out, "    {{\n        let this = rt.new_object_id({:?}, {});", main.name, self.cid(&main.name));
             // FML makes the mod's container the active one while its constructor runs.
             if let Some(id) = main.annotation_of(MOD).and_then(|a| a.value("value")) {
-                let _ = writeln!(out, "        {{ let id = rt.string({id:?}); rt.interned.insert({:?}.into(), id); }}", "compat:active-mod");
+                let _ = writeln!(out, "        {}", loading("constructing", &[id]));
             }
             let _ = writeln!(out, "        let mut args = vec![this];");
             for p in &params {
@@ -1280,7 +1318,7 @@ impl<'a> Program<'a> {
             }
         }
         if !mains.is_empty() {
-            out.push_str("    horizon_compat::neo::constructed(rt);\n");
+            let _ = writeln!(out, "    {}", loading("constructed", &[]));
         }
         for c in classes {
             let Some(a) = EVENT_BUS_SUBSCRIBER.iter().find_map(|t| c.annotation_of(t)) else {
@@ -1314,11 +1352,7 @@ impl<'a> Program<'a> {
             };
             match named.or_else(own).or_else(jar) {
                 Some(id) => {
-                    let _ = writeln!(
-                        out,
-                        "    horizon_compat::neo::subscribe_class(rt, {:?}, {id:?});",
-                        c.name
-                    );
+                    let _ = writeln!(out, "    {}", loading("subscribe", &[&c.name, &id]));
                 }
                 None => {
                     let _ = writeln!(out, "    rt.subscribe_class({:?});", c.name);
@@ -1328,7 +1362,7 @@ impl<'a> Program<'a> {
         if !mains.is_empty() {
             out.push_str("    horizon_compat::neo::fire_registrations(rt);\n");
         }
-        out.push_str("    rt.resolve_registrations();\n}\n\n");
+        let _ = writeln!(out, "    {}\n}}\n", loading("resolved", &[]));
         out
     }
 
@@ -1346,6 +1380,23 @@ impl<'a> Program<'a> {
                 code.push_str(&f);
                 name
             });
+            // What the class takes from the game's class above it, over an interface's default: its
+            // own method here, which asks the class above as `super.method(...)` would.
+            for (name, desc) in inherited(&c.name) {
+                let above = c.superclass.as_deref().unwrap_or("java/lang/Object");
+                let _ = write!(
+                    code,
+                    "/// `{}` takes `{name}{desc}` from the game's class above it, not from an interface's default.
+fn {}(rt: &mut Rt, args: &[V]) -> V {{
+    api::call(rt, {:?}, args)
+}}
+
+",
+                    c.name,
+                    inherited_fn(&c.name, &name, &desc),
+                    format!("{above}.{name}.{desc}")
+                );
+            }
             defs.push_str(&self.class_def(c, reflect));
             for (key, kind, m) in subscribers_of(c) {
                 implementations.insert(key, (kind, m));
@@ -1394,6 +1445,7 @@ impl<'a> Program<'a> {
             // of them, a static one or a constructor too.
             .filter(|m| m.code.is_some() && (c.name.starts_with(horizon_compat::linked::DERIVED) || (m.access & 0x0008 == 0 && !m.name.starts_with('<'))))
             .map(|m| format!("({:?}, {}, {})", format!("{}.{}", m.name, m.desc), fn_name(&c.name, &m.name, &m.desc), m.access & 0x0002 != 0))
+            .chain(inherited(&c.name).iter().map(|(name, desc)| format!("({:?}, {}, false)", format!("{name}.{desc}"), inherited_fn(&c.name, name, desc))))
             .collect();
         // What a mixin adds to the class, or overwrites in it, is the class's own, before its own.
         let mut mixed = Vec::new();
@@ -3230,13 +3282,17 @@ mod loading_tests {
             .lines()
             .filter_map(|l| {
                 l.trim()
-                    .strip_prefix("horizon_compat::neo::subscribe_class(rt, ")
+                    .strip_prefix("{ let a = [rt.string(")
+                    .filter(|l| l.contains("hz/loading.subscribe."))
             })
-            .map(|l| l.trim_end_matches(");"))
+            .map(|l| l.split("]; ").next().unwrap_or(""))
             .collect();
         assert_eq!(
             subscribed,
-            ["\"t/BaseEvents\", \"base\"", "\"t/Events\", \"addon\""]
+            [
+                "\"t/BaseEvents\"), rt.string(\"base\")",
+                "\"t/Events\"), rt.string(\"addon\")"
+            ]
         );
         assert!(
             !start.contains("ServerEvents"),

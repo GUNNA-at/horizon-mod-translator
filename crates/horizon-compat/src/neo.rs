@@ -210,13 +210,16 @@ pub(crate) fn post_as(rt: &mut Rt, class: &str, event: V, only: Option<&str>) {
             continue;
         }
         // The listener's mod is the active one while it hears, as FML sets the container around
-        // a mod's turn: what it registers then (a config, another listener) is that mod's.
+        // a mod's turn: what it registers then (a config, another listener) is that mod's. And
+        // its hearing is one piece of the mod's code, on a clock of its own.
         let before = activate(rt, owner);
+        let outer = crate::api::timed_start();
         let started = profile.then(std::time::Instant::now);
         rt.call_functional(ACCEPT, l, &[event]);
         if let Some(t) = started {
             record(rt, class, l, t.elapsed());
         }
+        crate::api::timed_end(outer);
         activate(rt, before);
         rt.report_thrown(class);
     }
@@ -293,6 +296,16 @@ pub fn subscribe_class(rt: &mut Rt, class: &str, mod_id: &str) {
 /// is the active one until a listener hears.
 pub fn constructed(rt: &mut Rt) {
     activate(rt, V::NULL);
+    crate::api::timed_end(None);
+}
+
+/// The mod of id `id` is about to be constructed (generated code, before each `@Mod` class's
+/// constructor): it is the active one, and its constructor is one piece of the mod's code, on a
+/// clock of its own.
+pub fn constructing(rt: &mut Rt, id: &str) {
+    let id = rt.string(id);
+    activate(rt, id);
+    crate::api::timed_start();
 }
 
 /// Listener `l`'s `EventPriority` ordinal: 0 `HIGHEST` to 4 `LOWEST`, `NORMAL` (2) unless it said.
@@ -425,6 +438,10 @@ pub fn fire_registrations(rt: &mut Rt) {
         let key = rt.string(&registry);
         rt.put_field(ev, "$registry", key);
         post(rt, REGISTER_EVENT, ev);
+        // And the entries the mods' `DeferredRegister`s hold for this registry, as each of them
+        // registers its own when it hears the event: a registry's are there before the next
+        // one fires (an item's supplier finds its block).
+        resolve_pending(rt, Some(&registry));
     }
     resolve(rt);
     // With the registries full, NeoForge gives entity types their attributes
@@ -787,8 +804,73 @@ fn register(rt: &mut Rt, registry: &str, name: &str, obj: V) {
 
 /// Runs the registered suppliers (`DeferredRegister`'s), then names the states their blocks made.
 pub(crate) fn resolve(rt: &mut Rt) {
-    rt.resolve_registrations();
+    resolve_pending(rt, None);
+    rt.suppliers.retain(|s| s.2.r() != 0);
     crate::api::adopt_names(rt);
+}
+
+/// Runs the suppliers that wait in `registry` (in all of them, for None), each once, in the order
+/// they were registered, and registers what each makes under its name. A supplier that throws
+/// loses its own entry and no other: the exception is reported and the next supplier runs as if
+/// there had been none (left pending, it ended every supplier after it, and with one mod's
+/// failure most of a pack's blocks and items were never registered).
+fn resolve_pending(rt: &mut Rt, registry: Option<&str>) {
+    let mut i = 0;
+    // By index: a supplier may register more, and may make another's entry first ([`resolve_entry`]).
+    while i < rt.suppliers.len() {
+        if rt.suppliers[i].2.r() != 0 && registry.is_none_or(|r| rt.suppliers[i].0 == r) {
+            resolve_at(rt, i);
+        }
+        i += 1;
+    }
+}
+
+/// The entry `name` of `registry` made now, if its supplier still waits: what a holder read before
+/// its registry fired asks for (a block's item, made from `BLOCK.get()`). Whether it waited.
+fn resolve_entry(rt: &mut Rt, registry: &str, name: &str) -> bool {
+    match rt
+        .suppliers
+        .iter()
+        .position(|(r, n, s)| s.r() != 0 && r == registry && n == name)
+    {
+        Some(i) => {
+            resolve_at(rt, i);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The entries named `name` made now, in whichever registries their suppliers wait: for a holder
+/// that knows its name alone.
+pub(crate) fn resolve_named(rt: &mut Rt, name: &str) {
+    while let Some(i) = rt
+        .suppliers
+        .iter()
+        .position(|(_, n, s)| s.r() != 0 && n == name)
+    {
+        resolve_at(rt, i);
+    }
+    crate::api::adopt_names(rt);
+}
+
+/// Runs the supplier waiting at `i` of the pending ones, which then waits no more.
+fn resolve_at(rt: &mut Rt, i: usize) {
+    let supplier = std::mem::replace(&mut rt.suppliers[i].2, V::NULL);
+    let (registry, name) = (rt.suppliers[i].0.clone(), rt.suppliers[i].1.clone());
+    // Asked from inside code that is itself throwing or not: its exception is not this entry's.
+    let outer = rt.thrown.take();
+    let made = rt.call_functional(
+        "java/util/function/Supplier.get.()Ljava/lang/Object;",
+        supplier,
+        &[],
+    );
+    if rt.thrown.is_some() {
+        rt.report_thrown(&format!("the registration of {registry} {name}"));
+    } else if made.r() != 0 {
+        rt.registered.insert((registry, name), made);
+    }
+    rt.thrown = outer;
 }
 
 fn name_of(rt: &Rt, v: V) -> String {
@@ -812,7 +894,14 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference" | "net/minecraft/core/Holder$Direct")
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
         || (name == "canPerformAction" && owner.starts_with("net/minecraft/world/item/"))
+        || owner == LOADING_STEPS
 }
+
+/// The steps of the mods' loading that generated code tells the runtime of, as calls on a class of
+/// its own (so every build of that code can make them): `constructing(modId)` before each mod
+/// class's constructor, `constructed()` after the last, `subscribe(class, modId)` for each
+/// `@EventBusSubscriber` class, `resolved()` once the loading events are over.
+const LOADING_STEPS: &str = "hz/loading";
 
 const ITEM_STACK: &str = "net/minecraft/world/item/ItemStack";
 const ITEM: &str = "net/minecraft/world/item/Item";
@@ -905,6 +994,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     Some(match (owner, name) {
+        (LOADING_STEPS, _) => {
+            let text = |rt: &Rt, i: usize| rt.str_of(a(i)).unwrap_or("").to_owned();
+            match name {
+                "constructing" => constructing(rt, &text(rt, 0)),
+                "constructed" => constructed(rt),
+                // What still waits after the events (a register filled during setup).
+                "resolved" => resolve(rt),
+                "subscribe" => subscribe_class(rt, &text(rt, 0), &text(rt, 1)),
+                _ => return None,
+            }
+            V::Void
+        }
         // What a crash report would list: there are no Java crash reports here.
         ("net/neoforged/fml/CrashReportCallables", "registerCrashCallable" | "registerHeader") => V::Void,
         // `ItemAbility.get(name)`: one object per name, as NeoForge interns them.
@@ -1328,8 +1429,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let reg = rt.get_field(a(0), "$registry");
             let id = rt.get_field(a(0), "$id");
             let k = (rt.str_of(reg).unwrap_or("").to_owned(), rt.str_of(id).unwrap_or("").to_owned());
-            if !rt.registered.contains_key(&k) && rt.suppliers.iter().any(|(r, n, _)| *r == k.0 && *n == k.1) {
-                resolve(rt);
+            // Read before its registry fired: the entry is made now, alone.
+            if !rt.registered.contains_key(&k) && resolve_entry(rt, &k.0, &k.1) && k.0 == "block" {
+                crate::api::adopt_names(rt);
             }
             rt.registered.get(&k).copied().unwrap_or(V::NULL)
         }
@@ -2324,6 +2426,9 @@ fn version_part(text: &str, i: usize) -> i32 {
 /// Loading objects a mod's constructor takes: its bus, its container, and the side, the client's
 /// as `FMLEnvironment.dist` is (a mod that sets up its client from the constructor's `Dist` does).
 pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
+    // The constructor these are for starts now, on a clock of its own ([`constructing`], which
+    // code generated before it does not call).
+    crate::api::timed_start();
     match class {
         "net/neoforged/bus/api/IEventBus" => {
             let id = active_mod(rt).unwrap_or_default();
@@ -3047,7 +3152,12 @@ mod tests {
             "t/OpalEvents",
             vec![(CONFIG_EVENT, "t/OpalEvents.onConfig", true, 2)],
         );
-        subscribe_class(&mut rt, "t/OpalEvents", "opal");
+        let (class, id) = (rt.string("t/OpalEvents"), rt.string("opal"));
+        crate::api::call(
+            &mut rt,
+            "hz/loading.subscribe.(Ljava/lang/String;Ljava/lang/String;)V",
+            &[class, id],
+        );
         let opal = mod_container(&mut rt, "opal");
         let common = crate::api::api_enum(
             &mut rt,
@@ -3127,6 +3237,80 @@ mod tests {
         );
         assert_eq!(rt.str_of(same), rt.str_of(key));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The entries of the mods' `DeferredRegister`s: each registry's are made when it fires, so an
+    /// item's supplier finds its block though the item was registered first; one read before its
+    /// registry fired is made then, alone; and a supplier that throws loses its own entry only
+    /// (its exception once stayed pending and ended every supplier after it: with 365 mods, most
+    /// of the pack's blocks and items were never registered).
+    #[test]
+    fn a_deferred_entry_that_throws_loses_only_itself() {
+        const GET: &str =
+            "net/neoforged/neoforge/registries/DeferredHolder.get.()Ljava/lang/Object;";
+        /// Supplier 1 makes a block; 2 throws; 3 makes an item of the block its captured holder
+        /// gives; 4 makes an item; 5 makes a sound of the item its holder gives, read early.
+        fn supply(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let held = rt.captured(args[0]).first().copied();
+            Some(match id {
+                2 => {
+                    rt.throw_new("java/lang/IllegalStateException");
+                    V::Void
+                }
+                3 | 5 => {
+                    let of = call(rt, GET, &[held.unwrap()]).unwrap();
+                    let made = rt.new_object(if id == 3 { "t/BlockItem" } else { "t/Sound" });
+                    rt.put_field(made, "of", of);
+                    made
+                }
+                _ => rt.new_object(if id == 1 { "t/Block" } else { "t/Item" }),
+            })
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(supply);
+        let holder = |rt: &mut Rt, registry: &str, id: &str| {
+            let h = rt.new_object("net/neoforged/neoforge/registries/DeferredHolder");
+            let (r, i) = (rt.string(registry), rt.string(id));
+            rt.put_field(h, "$registry", r);
+            rt.put_field(h, "$id", i);
+            h
+        };
+        let (lamp, wand) = (
+            holder(&mut rt, "block", "t:lamp"),
+            holder(&mut rt, "item", "t:wand"),
+        );
+        // In the order a mod's classes happen to initialise: the block's item before the block.
+        for (registry, name, id, captured) in [
+            ("item", "t:lamp", 3, vec![lamp]),
+            ("item", "t:broken", 2, vec![]),
+            ("block", "t:lamp", 1, vec![]),
+            ("item", "t:wand", 4, vec![]),
+            ("sound_event", "t:hum", 5, vec![wand]),
+        ] {
+            let supplier = rt.lambda_id("java/util/function/Supplier", id, captured);
+            rt.suppliers
+                .push((registry.to_owned(), name.to_owned(), supplier));
+        }
+        fire_registrations(&mut rt);
+        let got = |rt: &Rt, registry: &str, name: &str| {
+            rt.registered
+                .get(&(registry.to_owned(), name.to_owned()))
+                .copied()
+        };
+        let block = got(&rt, "block", "t:lamp").expect("the block");
+        let item =
+            got(&rt, "item", "t:lamp").expect("its item, registered though one before it threw");
+        assert_eq!(
+            rt.get_field(item, "of"),
+            block,
+            "the block was there when its item was made"
+        );
+        assert_eq!(got(&rt, "item", "t:broken"), None);
+        let wand_item = got(&rt, "item", "t:wand").expect("the entry after the one that threw");
+        let hum = got(&rt, "sound_event", "t:hum").expect("the sound");
+        assert_eq!(rt.get_field(hum, "of"), wand_item);
+        assert!(rt.thrown.is_none());
+        assert!(rt.suppliers.is_empty());
     }
 
     /// Create's `ContraptionType` makes its holder from the registry before it is registered

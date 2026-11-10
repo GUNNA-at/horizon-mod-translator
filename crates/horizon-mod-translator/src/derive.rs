@@ -38,6 +38,90 @@ pub fn is_library(class: &str) -> bool {
         || class.starts_with("org/apache/commons/")
 }
 
+/// The methods each class of `program` takes from a class of the game's above it though an
+/// interface it implements has a default method of the same name and descriptor: a class's method
+/// wins over an interface's default, as the JVM resolves a call (TFMG's `CopycatCableBlockEntity`
+/// implements `IElectric`, whose default `getBlockPos()` asks `getPos()`, which the class answers
+/// from `BlockEntity`'s `getBlockPos()`: taken for each other, the two called each other without
+/// end). By class: the name and descriptor of each. A class of the program on the way up that
+/// declares the method (its own code, or abstract) settles it there, and is left out.
+pub fn inherited_over_defaults(
+    program: &[ClassFile],
+    game: &Game,
+) -> BTreeMap<String, Vec<(String, String)>> {
+    let own: HashMap<&str, &ClassFile> = program.iter().map(|c| (c.name.as_str(), c)).collect();
+    let mut out = BTreeMap::new();
+    for c in program
+        .iter()
+        .filter(|c| c.access & 0x0200 == 0 && !c.interfaces.is_empty())
+    {
+        // The default methods of the interfaces the class itself names, and of those above them.
+        let mut defaults: BTreeSet<(&str, &str)> = BTreeSet::new();
+        let mut todo: Vec<&str> = c.interfaces.iter().map(String::as_str).collect();
+        let mut seen: HashSet<&str> = HashSet::new();
+        while let Some(i) = todo.pop() {
+            let Some(k) = own.get(i).filter(|_| seen.insert(i)) else {
+                continue;
+            };
+            defaults.extend(
+                k.methods
+                    .iter()
+                    .filter(|m| {
+                        m.code.is_some() && m.access & 0x000a == 0 && !m.name.starts_with('<')
+                    })
+                    .map(|m| (m.name.as_str(), m.desc.as_str())),
+            );
+            todo.extend(k.interfaces.iter().map(String::as_str));
+        }
+        if defaults.is_empty() {
+            continue;
+        }
+        // Up the program's classes to the first that is not one: the game's, if it is there.
+        let (mut chain, mut at) = (Vec::new(), Some(c));
+        let mut above = None;
+        while let Some(k) = at.filter(|_| chain.len() < 1024) {
+            chain.push(k);
+            above = k.superclass.as_deref();
+            at = above.and_then(|s| own.get(s).copied());
+        }
+        let Some(first) = above.filter(|s| !own.contains_key(s) && game.class(s).is_some()) else {
+            continue;
+        };
+        let supers: Vec<&ClassFile> = {
+            let mut v = Vec::new();
+            let mut at = game.class(first);
+            while let Some(k) = at.filter(|_| v.len() < 1024) {
+                v.push(k);
+                at = k.superclass.as_deref().and_then(|s| game.class(s));
+            }
+            v
+        };
+        let taken: Vec<(String, String)> = defaults
+            .into_iter()
+            .filter(|(name, desc)| {
+                !chain
+                    .iter()
+                    .any(|k| k.methods.iter().any(|m| m.name == *name && m.desc == *desc))
+            })
+            .filter(|(name, desc)| {
+                supers.iter().any(|k| {
+                    k.methods.iter().any(|m| {
+                        m.name == *name
+                            && m.desc == *desc
+                            && m.code.is_some()
+                            && m.access & 0x000a == 0
+                    })
+                })
+            })
+            .map(|(name, desc)| (name.to_owned(), desc.to_owned()))
+            .collect();
+        if !taken.is_empty() {
+            out.insert(c.name.clone(), taken);
+        }
+    }
+    out
+}
+
 /// The Java runtime's classes read for their code ([`Game::open`]): those of `java.lang`,
 /// `java.util` and `java.util.function` themselves, where the static helpers a mod calls are
 /// (`Arrays`, `Collections`, `Math`, `Character`).
@@ -78,6 +162,13 @@ pub struct Game {
 
 impl Game {
     pub fn open(jars: &[&Path]) -> Result<Game, String> {
+        Game::open_naming(jars, &HashSet::new())
+    }
+
+    /// [`Game::open`] for a program that names the classes `named`: those of them that are enums
+    /// of the Java runtime outside its core packages are read too (`HttpClient.Version`,
+    /// `Normalizer.Form`), so each is carried with its constants as the game's enums are.
+    pub fn open_naming(jars: &[&Path], named: &HashSet<String>) -> Result<Game, String> {
         let mut classes = HashMap::new();
         for jar in jars {
             // A Java runtime's image: the classes of its core packages, whose own code can stand
@@ -86,11 +177,17 @@ impl Game {
                 let mut image = crate::jimage::Image::open(jar)?;
                 let names: Vec<String> = image
                     .names()
-                    .filter(|n| jdk_core(n) && !crate::jdk_code(n) && !classes.contains_key(*n))
+                    .filter(|n| {
+                        (jdk_core(n) || (is_jdk(n) && named.contains(*n)))
+                            && !crate::jdk_code(n)
+                            && !classes.contains_key(*n)
+                    })
                     .map(str::to_owned)
                     .collect();
                 for name in names {
-                    if let Some(c) = image.class(&name).and_then(|b| ClassFile::parse(&b).ok()) {
+                    if let Some(c) = image.class(&name).and_then(|b| ClassFile::parse(&b).ok())
+                        && (jdk_core(&name) || c.access & 0x4000 != 0)
+                    {
                         classes.insert(name, c);
                     }
                 }

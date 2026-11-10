@@ -2279,6 +2279,39 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             let items = elements(rt, a(0));
             rt.alloc("java/util/stream/Stream", Data::Stream(items))
         }
+        // `LongAdder`: a sum many threads add to, which here is one number (`value`).
+        ("java/util/concurrent/atomic/LongAdder", n) => {
+            let this = a(0);
+            let sum = match rt.get_field(this, "value") {
+                V::J(j) => j,
+                _ => 0,
+            };
+            match n {
+                "<init>" | "reset" => {
+                    rt.put_field(this, "value", V::J(0));
+                    V::Void
+                }
+                "add" | "increment" | "decrement" => {
+                    let by = match n {
+                        "add" => a(1).j(),
+                        "increment" => 1,
+                        _ => -1,
+                    };
+                    rt.put_field(this, "value", V::J(sum.wrapping_add(by)));
+                    V::Void
+                }
+                "sum" | "longValue" => V::J(sum),
+                "intValue" => V::I(sum as i32),
+                "floatValue" => V::F(sum as f32),
+                "doubleValue" => V::D(sum as f64),
+                "sumThenReset" => {
+                    rt.put_field(this, "value", V::J(0));
+                    V::J(sum)
+                }
+                "toString" => rt.string(&sum.to_string()),
+                _ => return None,
+            }
+        }
         // Atomics: one `value` field.
         ("java/util/concurrent/atomic/AtomicInteger" | "java/util/concurrent/atomic/AtomicLong" | "java/util/concurrent/atomic/AtomicBoolean" | "java/util/concurrent/atomic/AtomicReference", n) => {
             let this = a(0);
@@ -4611,6 +4644,71 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// `LongAdder`: what was added, summed; `sumThenReset` gives the sum and starts again.
+    #[test]
+    fn a_long_adder_sums_what_is_added() {
+        let mut rt = Rt::new();
+        let adder = rt.new_object("java/util/concurrent/atomic/LongAdder");
+        c(
+            &mut rt,
+            "java/util/concurrent/atomic/LongAdder.<init>.()V",
+            &[adder],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/atomic/LongAdder.add.(J)V",
+            &[adder, V::J(40)],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/atomic/LongAdder.increment.()V",
+            &[adder],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/atomic/LongAdder.increment.()V",
+            &[adder],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/atomic/LongAdder.decrement.()V",
+            &[adder],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/atomic/LongAdder.sum.()J",
+                &[adder]
+            ),
+            V::J(41)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/atomic/LongAdder.intValue.()I",
+                &[adder]
+            ),
+            V::I(41)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/atomic/LongAdder.sumThenReset.()J",
+                &[adder]
+            ),
+            V::J(41)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/atomic/LongAdder.longValue.()J",
+                &[adder]
+            ),
+            V::J(0)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

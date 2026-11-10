@@ -24,8 +24,81 @@ const FML_FOLDERS: [(&str, &str, bool); 4] = [("GAMEDIR", "", true), ("MODSDIR",
 /// directory is the game's folder still, but the mods' configs stay in memory.
 pub use crate::GAME_DIR;
 
-pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, PATH | PATHS | FILES | FILE | FILE_TIME | FML_PATHS | FML_CONFIG)
+pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+    matches!(
+        owner,
+        PATH | PATHS | FILES | FILE | FILE_TIME | FML_PATHS | FML_CONFIG
+    ) || (owner == FILE_UTILS && FILE_UTILS_METHODS.contains(&name))
+}
+
+/// commons-io's `FileUtils`: a file's text read and written whole, which a mod keeps its own
+/// config or data file with.
+const FILE_UTILS: &str = "org/apache/commons/io/FileUtils";
+const FILE_UTILS_METHODS: [&str; 6] = [
+    "readFileToString",
+    "readLines",
+    "write",
+    "writeStringToFile",
+    "forceMkdir",
+    "forceMkdirParent",
+];
+
+/// [`FILE_UTILS`]' methods. A missing file to read is `FileNotFoundException`, as commons-io's;
+/// a write makes the folders above the file first, as its `openOutputStream` does, and appends
+/// when its last argument says so.
+fn file_utils(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let p = text(rt, a(0))?;
+    let disk = on_disk(rt, &p);
+    Some(match name {
+        "readFileToString" | "readLines" => match std::fs::read(&disk) {
+            Ok(bytes) => {
+                let s = String::from_utf8_lossy(&bytes).into_owned();
+                if name == "readFileToString" {
+                    rt.string(&s)
+                } else {
+                    let lines: Vec<V> = s.lines().map(|l| rt.string(l)).collect();
+                    crate::jutil::new_list(rt, lines)
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => throw(
+                rt,
+                "java/io/FileNotFoundException",
+                &format!("File '{p}' does not exist"),
+            ),
+            Err(e) => throw_io(rt, &e, &p),
+        },
+        "write" | "writeStringToFile" => {
+            use std::io::Write;
+            let s = text(rt, a(1)).unwrap_or_default();
+            let append = desc.ends_with("Z)V") && args.last().is_some_and(|v| v.i() != 0);
+            if let Some(up) = disk.parent() {
+                let _ = std::fs::create_dir_all(up);
+            }
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(append)
+                .truncate(!append)
+                .open(&disk);
+            match file.and_then(|mut f| f.write_all(s.as_bytes())) {
+                Ok(()) => V::Void,
+                Err(e) => throw_io(rt, &e, &p),
+            }
+        }
+        "forceMkdir" | "forceMkdirParent" => {
+            let dir = if name == "forceMkdir" {
+                Some(disk.as_path())
+            } else {
+                disk.parent()
+            };
+            match dir.map(std::fs::create_dir_all) {
+                Some(Err(e)) => throw_io(rt, &e, &p),
+                _ => V::Void,
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// The game's folder.
@@ -588,14 +661,23 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             path_method(rt, name, &p, args)
         }
         FILES => files_method(rt, name, desc, args),
+        FILE_UTILS => file_utils(rt, name, desc, args),
         FILE if name == "<init>" => {
             let joined = match desc {
                 "(Ljava/lang/String;)V" => text(rt, a(1))?,
-                // `new File(parent, child)`: a null parent is the child alone.
+                // `new File(parent, child)`: the child under the parent, though it start with a
+                // `/` (`new File(dir, "/data")` is `dir/data`: the JDK's `UnixFileSystem.resolve`,
+                // not `Path.resolve`); a null parent is the child alone.
                 "(Ljava/io/File;Ljava/lang/String;)V" | "(Ljava/lang/String;Ljava/lang/String;)V" => {
-                    let child = text(rt, a(2))?;
+                    let child = clean(&text(rt, a(2))?);
                     match text(rt, a(1)) {
-                        Some(up) if a(1).r() != 0 => resolve(&up, &child),
+                        Some(up) if a(1).r() != 0 => match (up.as_str(), child.as_str()) {
+                            (_, "") => up,
+                            // An empty parent is the default one, the root.
+                            ("" | "/", c) => format!("/{}", c.trim_start_matches('/')),
+                            (u, c) if c.starts_with('/') => format!("{u}{c}"),
+                            (u, c) => format!("{u}/{c}"),
+                        },
                         _ => child,
                     }
                 }
@@ -672,6 +754,8 @@ mod tests {
         crate::api::call(rt, key, args)
     }
 
+    use c as c_;
+
     /// A game folder of its own for one test.
     fn game(rt: &mut Rt, test: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("horizon-compat-files-{test}-{}", std::process::id()));
@@ -680,6 +764,122 @@ mod tests {
         let v = rt.string(&dir.to_string_lossy());
         rt.statics.insert(GAME_DIR, v);
         dir
+    }
+
+    /// `new File(parent, child)` puts the child under the parent even when it starts with a `/`
+    /// (FancyMenu's `new File(dataDir, "/fancymenu_temp")`), as the JDK's `File` does and
+    /// `Path.resolve` does not. Expected texts are what a JVM prints for `getPath()`.
+    #[test]
+    fn a_file_under_a_parent_stays_under_it() {
+        let mut rt = Rt::new();
+        let made = |rt: &mut Rt, parent: Option<&str>, child: &str| {
+            let (f, c) = (rt.new_object(FILE), rt.string(child));
+            let up = match parent {
+                Some(p) => {
+                    let (dir, text) = (rt.new_object(FILE), rt.string(p));
+                    c_(
+                        rt,
+                        "java/io/File.<init>.(Ljava/lang/String;)V",
+                        &[dir, text],
+                    );
+                    dir
+                }
+                None => V::NULL,
+            };
+            c_(
+                rt,
+                "java/io/File.<init>.(Ljava/io/File;Ljava/lang/String;)V",
+                &[f, up, c],
+            );
+            let path = c_(rt, "java/io/File.getPath.()Ljava/lang/String;", &[f]);
+            rt.str_of(path).unwrap_or("").to_owned()
+        };
+        assert_eq!(
+            made(&mut rt, Some("/games/pack"), "/fancymenu_temp"),
+            "/games/pack/fancymenu_temp"
+        );
+        assert_eq!(
+            made(&mut rt, Some("/games/pack"), "config/a.json"),
+            "/games/pack/config/a.json"
+        );
+        assert_eq!(made(&mut rt, Some("/games/pack"), ""), "/games/pack");
+        assert_eq!(made(&mut rt, Some("/"), "/etc"), "/etc");
+        assert_eq!(made(&mut rt, Some("relative"), "//x//y/"), "relative/x/y");
+        assert_eq!(made(&mut rt, None, "/alone"), "/alone");
+    }
+
+    /// commons-io's `FileUtils`, which mods keep small files of their own with: a write makes the
+    /// folders above the file and replaces what it held, or adds to it when asked; the text reads
+    /// back whole or by lines; a file that is not there is `FileNotFoundException`.
+    #[test]
+    fn commons_io_reads_and_writes_a_files_text() {
+        let mut rt = Rt::new();
+        let dir = game(&mut rt, "commons-io");
+        let file = rt.new_object(FILE);
+        let path = rt.string("config/notes/list.txt");
+        c(
+            &mut rt,
+            "java/io/File.<init>.(Ljava/lang/String;)V",
+            &[file, path],
+        );
+        let write =
+            "org/apache/commons/io/FileUtils.write.(Ljava/io/File;Ljava/lang/CharSequence;)V";
+        let text = rt.string("one\ntwo\n");
+        c(&mut rt, write, &[file, text]);
+        let more = rt.string("three");
+        let utf8 = c(
+            &mut rt,
+            "java/nio/charset/Charset.defaultCharset.()Ljava/nio/charset/Charset;",
+            &[],
+        );
+        c(
+            &mut rt,
+            "org/apache/commons/io/FileUtils.writeStringToFile.(Ljava/io/File;Ljava/lang/String;Ljava/nio/charset/Charset;Z)V",
+            &[file, more, utf8, V::I(1)],
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config/notes/list.txt")).unwrap(),
+            "one\ntwo\nthree"
+        );
+        let read = c(
+            &mut rt,
+            "org/apache/commons/io/FileUtils.readFileToString.(Ljava/io/File;)Ljava/lang/String;",
+            &[file],
+        );
+        assert_eq!(rt.str_of(read), Some("one\ntwo\nthree"));
+        let lines = c(
+            &mut rt,
+            "org/apache/commons/io/FileUtils.readLines.(Ljava/io/File;Ljava/nio/charset/Charset;)Ljava/util/List;",
+            &[file, utf8],
+        );
+        let lines: Vec<&str> = crate::jutil::elements(&rt, lines)
+            .into_iter()
+            .map(|l| rt.str_of(l).unwrap_or(""))
+            .collect();
+        assert_eq!(lines, ["one", "two", "three"]);
+        // Written again without the last argument: what it held is gone.
+        let short = rt.string("x");
+        c(&mut rt, write, &[file, short]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config/notes/list.txt")).unwrap(),
+            "x"
+        );
+        let none = rt.new_object(FILE);
+        let missing = rt.string("config/none.txt");
+        c(
+            &mut rt,
+            "java/io/File.<init>.(Ljava/lang/String;)V",
+            &[none, missing],
+        );
+        c(
+            &mut rt,
+            "org/apache/commons/io/FileUtils.readFileToString.(Ljava/io/File;)Ljava/lang/String;",
+            &[none],
+        );
+        let e = rt.thrown.take().expect("no such file");
+        assert_eq!(rt.class_of(e), "java/io/FileNotFoundException");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

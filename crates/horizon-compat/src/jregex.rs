@@ -750,6 +750,8 @@ fn pattern_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             pattern(rt, a(0), flags)
         }
         "matcher" => matcher(rt, a(0), a(1)),
+        "asPredicate" => crate::functions::regex_predicate(rt, a(0), false),
+        "asMatchPredicate" => crate::functions::regex_predicate(rt, a(0), true),
         "pattern" | "toString" => rt.get_field(a(0), "$source"),
         "flags" => V::I(rt.get_field(a(0), "$flags").i()),
         "quote" => {
@@ -947,6 +949,44 @@ mod tests {
 
     fn strings(rt: &Rt, arr: V) -> Vec<String> {
         rt.captured(arr).into_iter().map(|v| rt.str_of(v).unwrap_or("?").to_owned()).collect()
+    }
+
+    /// `Pattern.asPredicate()` is true of a text the pattern is found in, `asMatchPredicate()`
+    /// of one it matches whole, as `Matcher.find()` and `matches()` answer.
+    #[test]
+    fn a_pattern_is_a_predicate_of_texts() {
+        let mut rt = Rt::new();
+        let source = rt.string("[0-9]+x");
+        let pattern = crate::api::call(
+            &mut rt,
+            "java/util/regex/Pattern.compile.(Ljava/lang/String;)Ljava/util/regex/Pattern;",
+            &[source],
+        );
+        let found = crate::api::call(
+            &mut rt,
+            "java/util/regex/Pattern.asPredicate.()Ljava/util/function/Predicate;",
+            &[pattern],
+        );
+        let whole = crate::api::call(
+            &mut rt,
+            "java/util/regex/Pattern.asMatchPredicate.()Ljava/util/function/Predicate;",
+            &[pattern],
+        );
+        let test = "java/util/function/Predicate.test.(Ljava/lang/Object;)Z";
+        for (text, in_it, all_of_it) in [("12x", 1, 1), ("a 12x b", 1, 0), ("x12", 0, 0)] {
+            let t = rt.string(text);
+            assert_eq!(
+                crate::api::call(&mut rt, test, &[found, t]),
+                V::I(in_it),
+                "{text}"
+            );
+            assert_eq!(
+                crate::api::call(&mut rt, test, &[whole, t]),
+                V::I(all_of_it),
+                "{text}"
+            );
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Java's split, word for word (expected values from the JDK): a leading empty string only
