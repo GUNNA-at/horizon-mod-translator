@@ -226,7 +226,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     }
     block_class(owner)
         && (extension(name, desc, false).is_some()
-            || (name == "getFriction" && desc == "()F")
+            || (matches!(name, "getFriction" | "getExplosionResistance") && desc == "()F")
             || (name == "getCloneItemStack" && desc == CLONE_DESC))
 }
 
@@ -267,6 +267,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     // A block's: `this` first.
     match (name, desc) {
         ("getFriction", "()F") => Some(V::F(property_friction(rt, a(0)))),
+        ("getExplosionResistance", "()F") => {
+            Some(V::F(crate::blocks::explosion_resistance(rt, a(0))))
+        }
         ("getCloneItemStack", CLONE_DESC) => clone_stack(rt, a(0), a(3)),
         _ => extension_default(rt, extension(name, desc, false)?, args),
     }

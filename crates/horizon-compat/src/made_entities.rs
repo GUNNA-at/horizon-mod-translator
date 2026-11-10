@@ -1046,6 +1046,13 @@ mod tests {
             api::call(rt, "net/minecraft/nbt/CompoundTag.remove.(Ljava/lang/String;)V", &[tag, uuid]);
             let body = api::call(rt, "net/minecraft/world/entity/animal/horse/Horse.getBodyArmorItem.()Lnet/minecraft/world/item/ItemStack;", &[horse]);
             assert_eq!(crate::api_common::item_like_name(rt, rt.get_field(body, "$item")), "minecraft:iron_horse_armor");
+            // Its slots as lists: four armor slots, empty, and the body's with them.
+            let armor = api::call(rt, "net/minecraft/world/entity/LivingEntity.getArmorSlots.()Ljava/lang/Iterable;", &[horse]);
+            assert_eq!(crate::jutil::elements(rt, armor).len(), 4);
+            let with_body = api::call(rt, "net/minecraft/world/entity/LivingEntity.getArmorAndBodyArmorSlots.()Ljava/lang/Iterable;", &[horse]);
+            let with_body = crate::jutil::elements(rt, with_body);
+            assert_eq!(with_body.len(), 5);
+            assert_eq!(crate::api_common::item_like_name(rt, rt.get_field(with_body[4], "$item")), "minecraft:iron_horse_armor");
             api::call(rt, "net/minecraft/world/entity/animal/horse/Horse.spawnAtLocation.(Lnet/minecraft/world/item/ItemStack;)Lnet/minecraft/world/entity/item/ItemEntity;", &[horse, body]);
             let access = api::call(rt, "net/minecraft/world/entity/Entity.registryAccess.()Lnet/minecraft/core/RegistryAccess;", &[horse]);
             api::call(rt, "net/minecraft/world/entity/animal/horse/SkeletonHorse.deserializeNBT.(Lnet/minecraft/core/HolderLookup$Provider;Lnet/minecraft/nbt/CompoundTag;)V", &[skeleton, access, tag]);

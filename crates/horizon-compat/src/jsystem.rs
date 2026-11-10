@@ -289,6 +289,501 @@ fn moment(f: [i64; 7]) -> i64 {
     (days_from_civil(year, month, 1) + f[2] - 1) * 86_400_000 + f[3] * 3_600_000 + f[4] * 60_000 + f[5] * 1000 + f[6]
 }
 
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+/// From Monday, as `DayOfWeek` counts.
+const WEEKDAYS: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+/// The moment `millis` (UTC, the one zone here) written by a pattern of Java's date letters, as
+/// `SimpleDateFormat` and `DateTimeFormatter` both read them: a run of a letter is a field, its
+/// length the width or the form (`MM` 03, `MMM` Mar, `MMMM` March), text between `'` is itself.
+/// A run of `S` is the fraction of the second for `DateTimeFormatter` (`fraction`), the
+/// milliseconds for `SimpleDateFormat`.
+pub(crate) fn format_moment(pattern: &str, millis: i64, fraction: bool) -> String {
+    let f = fields(millis);
+    let (year, month, day, hour, minute, second, ms) =
+        (f[0], f[1] + 1, f[2], f[3], f[4], f[5], f[6]);
+    let days = millis.div_euclid(86_400_000);
+    // 1970-01-01 was a Thursday.
+    let weekday = (days + 3).rem_euclid(7) as usize;
+    let day_of_year = days - days_from_civil(year, 1, 1) + 1;
+    let padded = |n: i64, width: usize| format!("{n:0width$}");
+    let mut out = String::new();
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            // `''` is a quote; else text up to the closing one.
+            if chars.get(i + 1) == Some(&'\'') {
+                out.push('\'');
+                i += 2;
+                continue;
+            }
+            i += 1;
+            while i < chars.len() && chars[i] != '\'' {
+                out.push(chars[i]);
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let n = chars[i..].iter().take_while(|x| **x == c).count();
+        i += n;
+        match c {
+            'G' => out.push_str("AD"),
+            'y' | 'u' | 'Y' if n == 2 => out.push_str(&padded(year.rem_euclid(100), 2)),
+            'y' | 'u' | 'Y' => out.push_str(&padded(year, n)),
+            'M' | 'L' if n >= 4 => out.push_str(MONTH_NAMES[(month - 1) as usize]),
+            'M' | 'L' if n == 3 => out.push_str(&MONTH_NAMES[(month - 1) as usize][..3]),
+            'M' | 'L' => out.push_str(&padded(month, n)),
+            'd' => out.push_str(&padded(day, n)),
+            'D' => out.push_str(&padded(day_of_year, n)),
+            'E' if n >= 4 => out.push_str(WEEKDAYS[weekday]),
+            'E' => out.push_str(&WEEKDAYS[weekday][..3]),
+            'e' | 'c' => out.push_str(&padded(weekday as i64 + 1, n)),
+            'a' => out.push_str(if hour < 12 { "AM" } else { "PM" }),
+            'H' => out.push_str(&padded(hour, n)),
+            'k' => out.push_str(&padded(if hour == 0 { 24 } else { hour }, n)),
+            'K' => out.push_str(&padded(hour % 12, n)),
+            'h' => out.push_str(&padded(if hour % 12 == 0 { 12 } else { hour % 12 }, n)),
+            'm' => out.push_str(&padded(minute, n)),
+            's' => out.push_str(&padded(second, n)),
+            'S' if fraction => out.push_str(&format!("{:09}", ms * 1_000_000)[..n.min(9)]),
+            'S' => out.push_str(&padded(ms, n)),
+            'n' => out.push_str(&padded(ms * 1_000_000, n)),
+            'w' => out.push_str(&padded((day_of_year + 6) / 7, n)),
+            'z' | 'V' | 'v' => out.push_str("UTC"),
+            'Z' if n >= 4 => out.push_str("GMT"),
+            'Z' => out.push_str("+0000"),
+            'X' => out.push('Z'),
+            'x' => out.push_str(if n == 1 { "+00" } else { "+0000" }),
+            'O' => out.push_str("GMT"),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The moment `text` spells under `pattern`: its numbers by the fields' letters, a month by
+/// its name too, the rest matched as written. None where the text does not fit the pattern.
+pub(crate) fn parse_moment(pattern: &str, text: &str) -> Option<i64> {
+    let (pattern, text): (Vec<char>, Vec<char>) =
+        (pattern.chars().collect(), text.chars().collect());
+    let mut f = [1970i64, 0, 1, 0, 0, 0, 0];
+    let (mut pm, mut twelve) = (false, false);
+    let (mut i, mut at) = (0, 0);
+    while i < pattern.len() {
+        let c = pattern[i];
+        if c == '\'' {
+            i += 1;
+            while i < pattern.len() && pattern[i] != '\'' {
+                if text.get(at) != Some(&pattern[i]) {
+                    return None;
+                }
+                (i, at) = (i + 1, at + 1);
+            }
+            i += 1;
+            continue;
+        }
+        if !c.is_ascii_alphabetic() {
+            if text.get(at) != Some(&c) {
+                return None;
+            }
+            (i, at) = (i + 1, at + 1);
+            continue;
+        }
+        let n = pattern[i..].iter().take_while(|x| **x == c).count();
+        i += n;
+        // A field next to another takes its own width; one before a separator takes the digits there are.
+        let adjacent = pattern.get(i).is_some_and(|x| x.is_ascii_alphabetic());
+        let number = |at: &mut usize| -> Option<i64> {
+            let start = *at;
+            while *at < text.len() && text[*at].is_ascii_digit() && (!adjacent || *at - start < n) {
+                *at += 1;
+            }
+            text[start..*at].iter().collect::<String>().parse().ok()
+        };
+        match c {
+            'y' | 'u' | 'Y' => {
+                let year = number(&mut at)?;
+                f[0] = if n == 2 && year < 100 {
+                    2000 + year
+                } else {
+                    year
+                };
+            }
+            'M' | 'L' if n >= 3 => {
+                let rest: String = text[at..].iter().collect();
+                let (m, name) = MONTH_NAMES.iter().enumerate().find_map(|(m, name)| {
+                    let short = &name[..3];
+                    if n >= 4 && rest.starts_with(name) {
+                        Some((m, name.len()))
+                    } else if rest.starts_with(short) {
+                        Some((m, 3))
+                    } else {
+                        None
+                    }
+                })?;
+                f[1] = m as i64;
+                at += name;
+            }
+            'M' | 'L' => f[1] = number(&mut at)? - 1,
+            'd' => f[2] = number(&mut at)?,
+            'H' | 'k' => f[3] = number(&mut at)? % 24,
+            'h' | 'K' => {
+                f[3] = number(&mut at)? % 12;
+                twelve = true;
+            }
+            'm' => f[4] = number(&mut at)?,
+            's' => f[5] = number(&mut at)?,
+            'S' => f[6] = number(&mut at)?,
+            'a' => {
+                let rest: String = text[at..].iter().take(2).collect();
+                pm = rest.eq_ignore_ascii_case("PM");
+                if !pm && !rest.eq_ignore_ascii_case("AM") {
+                    return None;
+                }
+                at += 2;
+            }
+            // A zone or a weekday's name: read past, the time is taken as UTC.
+            _ => {
+                while at < text.len()
+                    && (text[at].is_ascii_alphanumeric() || matches!(text[at], '+' | '-' | ':'))
+                {
+                    at += 1;
+                }
+            }
+        }
+    }
+    if twelve && pm {
+        f[3] += 12;
+    }
+    (at == text.len()).then(|| moment(f))
+}
+
+/// The moment a date or time object stands for, in milliseconds since 1970: a `Date`, a
+/// `Calendar`, an `Instant`, a `LocalDateTime` or a `ZonedDateTime` (each keeps one), a
+/// `LocalDate` (its midnight), a `LocalTime` (that time on the first day).
+pub(crate) fn moment_of(rt: &Rt, v: V) -> i64 {
+    if let V::J(millis) = rt.get_field(v, "$millis") {
+        return millis;
+    }
+    if let V::J(nanos) = rt.get_field(v, "$nanoOfDay") {
+        return nanos / 1_000_000;
+    }
+    match (
+        rt.get_field(v, "year"),
+        rt.get_field(v, "month"),
+        rt.get_field(v, "day"),
+    ) {
+        (V::I(year), V::I(month), V::I(day)) => {
+            days_from_civil(i64::from(year), i64::from(month), i64::from(day)) * 86_400_000
+        }
+        _ => now(),
+    }
+}
+
+const SIMPLE_FORMAT: &str = "java/text/SimpleDateFormat";
+const FORMATTER: &str = "java/time/format/DateTimeFormatter";
+const INSTANT: &str = "java/time/Instant";
+const LOCAL_DATE_TIME: &str = "java/time/LocalDateTime";
+
+/// An object of `class` that keeps a moment.
+fn at_moment(rt: &mut Rt, class: &'static str, millis: i64) -> V {
+    let o = rt.new_object(class);
+    rt.put_field(o, "$millis", V::J(millis));
+    o
+}
+
+/// A `DateTimeFormatter` (or a `SimpleDateFormat`, `class`) of `pattern`.
+fn formatter(rt: &mut Rt, class: &'static str, pattern: &str) -> V {
+    let f = rt.new_object(class);
+    let text = rt.string(pattern);
+    rt.put_field(f, "$pattern", text);
+    f
+}
+
+/// `DateTimeFormatter`'s constants a mod writes a time with.
+pub(crate) fn formatter_static(rt: &mut Rt, field: &str) -> Option<V> {
+    let pattern = match field {
+        "ISO_LOCAL_DATE" | "ISO_DATE" => "yyyy-MM-dd",
+        "ISO_LOCAL_TIME" | "ISO_TIME" => "HH:mm:ss",
+        "ISO_LOCAL_DATE_TIME" | "ISO_DATE_TIME" => "yyyy-MM-dd'T'HH:mm:ss",
+        "ISO_INSTANT" | "ISO_OFFSET_DATE_TIME" | "ISO_ZONED_DATE_TIME" => {
+            "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        }
+        "BASIC_ISO_DATE" => "yyyyMMdd",
+        "RFC_1123_DATE_TIME" => "EEE, d MMM yyyy HH:mm:ss 'GMT'",
+        _ => return None,
+    };
+    Some(rt.intern(format!("compat:date-formatter/{field}"), |rt| {
+        formatter(rt, FORMATTER, pattern)
+    }))
+}
+
+/// `SimpleDateFormat` and `DateFormat`: a moment written and read by a pattern, in UTC.
+pub(crate) fn date_format(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let pattern = |rt: &Rt, v: V| {
+        rt.str_of(rt.get_field(v, "$pattern"))
+            .unwrap_or("M/d/yy, h:mm a")
+            .to_owned()
+    };
+    Some(match name {
+        "<init>" => {
+            let given = if desc.starts_with("(Ljava/lang/String;") {
+                crate::jlang::text(rt, a(1))
+            } else {
+                "M/d/yy, h:mm a".to_owned()
+            };
+            let text = rt.string(&given);
+            rt.put_field(a(0), "$pattern", text);
+            V::Void
+        }
+        "getDateTimeInstance" | "getInstance" => {
+            formatter(rt, SIMPLE_FORMAT, "MMM d, yyyy, h:mm:ss a")
+        }
+        "getDateInstance" => formatter(rt, SIMPLE_FORMAT, "MMM d, yyyy"),
+        "getTimeInstance" => formatter(rt, SIMPLE_FORMAT, "h:mm:ss a"),
+        "format" if desc.ends_with(")Ljava/lang/String;") => {
+            let (p, millis) = (pattern(rt, a(0)), moment_of(rt, a(1)));
+            rt.string(&format_moment(&p, millis, false))
+        }
+        "parse" if desc == "(Ljava/lang/String;)Ljava/util/Date;" => {
+            let (p, text) = (pattern(rt, a(0)), crate::jlang::text(rt, a(1)));
+            match parse_moment(&p, &text) {
+                Some(millis) => at_moment(rt, DATE, millis),
+                None => crate::jlang::throw_with(
+                    rt,
+                    "java/text/ParseException",
+                    &format!("Unparseable date: \"{text}\""),
+                ),
+            }
+        }
+        "toPattern" | "toLocalizedPattern" => rt.get_field(a(0), "$pattern"),
+        "applyPattern" => {
+            rt.put_field(a(0), "$pattern", a(1));
+            V::Void
+        }
+        "setTimeZone" | "setLenient" | "setCalendar" => V::Void,
+        "getTimeZone" => time_zone(rt, "getDefault", "", &[])?,
+        _ => return None,
+    })
+}
+
+/// `TimeZone`, `ZoneId` and `ZoneOffset`: the zone asked for by its id, every one of them at
+/// UTC's time (the runtime keeps one clock).
+pub(crate) fn time_zone(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let zone = |rt: &mut Rt, class: &'static str, id: &str| {
+        let z = rt.new_object(class);
+        let text = rt.string(id);
+        rt.put_field(z, "$id", text);
+        z
+    };
+    let id = |rt: &Rt, v: V| {
+        rt.str_of(rt.get_field(v, "$id"))
+            .unwrap_or("UTC")
+            .to_owned()
+    };
+    Some(match name {
+        "getTimeZone" => {
+            let asked = if desc.starts_with("(Ljava/lang/String;") {
+                crate::jlang::text(rt, a(0))
+            } else {
+                id(rt, a(0))
+            };
+            zone(rt, "java/util/TimeZone", &asked)
+        }
+        "getDefault" => zone(rt, "java/util/TimeZone", "UTC"),
+        "systemDefault" => zone(rt, "java/time/ZoneId", "UTC"),
+        "of" | "ofOffset" => {
+            let asked = crate::jlang::text(rt, a(0));
+            zone(rt, "java/time/ZoneId", &asked)
+        }
+        "toZoneId" | "normalized" => {
+            let same = id(rt, a(0));
+            zone(rt, "java/time/ZoneId", &same)
+        }
+        "getID" | "getId" | "getDisplayName" | "toString" => {
+            let text = id(rt, a(0));
+            rt.string(&text)
+        }
+        "getRawOffset" | "getOffset" | "getDSTSavings" | "getTotalSeconds" => V::I(0),
+        "inDaylightTime" | "useDaylightTime" | "observesDaylightTime" => V::I(0),
+        "clone" => a(0),
+        "setDefault" | "setID" => V::Void,
+        "equals" => V::I((a(1).r() != 0 && id(rt, a(0)) == id(rt, a(1))) as i32),
+        "hashCode" => V::I(crate::jlang::string_hash(&id(rt, a(0)))),
+        _ => return None,
+    })
+}
+
+/// `Instant`, `LocalDateTime`, `ZonedDateTime` and `DateTimeFormatter`: a moment kept in
+/// milliseconds, read by its fields, and written by a pattern.
+pub(crate) fn java_time(
+    rt: &mut Rt,
+    owner: &'static str,
+    name: &str,
+    desc: &str,
+    args: &[V],
+) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if owner == FORMATTER {
+        return Some(match name {
+            "ofPattern" => {
+                let pattern = crate::jlang::text(rt, a(0));
+                formatter(rt, FORMATTER, &pattern)
+            }
+            "format" => {
+                let pattern = rt
+                    .str_of(rt.get_field(a(0), "$pattern"))
+                    .unwrap_or("yyyy-MM-dd'T'HH:mm:ss")
+                    .to_owned();
+                let millis = moment_of(rt, a(1));
+                rt.string(&format_moment(&pattern, millis, true))
+            }
+            "withZone" | "withLocale" | "withChronology" | "withResolverStyle" => a(0),
+            "toString" => rt.get_field(a(0), "$pattern"),
+            _ => return None,
+        });
+    }
+    let this = a(0);
+    let ints = params(desc).iter().take_while(|p| **p == "I").count();
+    Some(match name {
+        "now" => at_moment(rt, owner, now()),
+        "ofEpochMilli" => at_moment(rt, owner, a(0).j()),
+        "ofEpochSecond" => at_moment(rt, owner, a(0).j().saturating_mul(1000)),
+        // `LocalDateTime.of(year, month, day, hour, minute[, second])`, or of a date and a time.
+        "of" if ints >= 5 => {
+            let mut f = [0i64; 7];
+            for (i, slot) in f.iter_mut().enumerate().take(ints.min(6)) {
+                *slot = i64::from(a(i).i());
+            }
+            f[1] -= 1;
+            at_moment(rt, owner, moment(f))
+        }
+        "of" | "ofInstant" => {
+            let millis = moment_of(rt, a(0)) + if name == "of" { moment_of(rt, a(1)) } else { 0 };
+            at_moment(rt, owner, millis)
+        }
+        "from"
+        | "atZone"
+        | "atOffset"
+        | "toLocalDateTime"
+        | "toInstant"
+        | "withZoneSameInstant"
+        | "toOffsetDateTime"
+        | "atZoneSameInstant" => {
+            let class: &'static str = match name {
+                "toLocalDateTime" => LOCAL_DATE_TIME,
+                "toInstant" => INSTANT,
+                "atZone" | "atOffset" | "atZoneSameInstant" | "withZoneSameInstant" => {
+                    "java/time/ZonedDateTime"
+                }
+                "toOffsetDateTime" => "java/time/OffsetDateTime",
+                _ => owner,
+            };
+            let millis = moment_of(rt, this);
+            at_moment(rt, class, millis)
+        }
+        "getEpochSecond" | "toEpochSecond" => V::J(moment_of(rt, this).div_euclid(1000)),
+        "toEpochMilli" => V::J(moment_of(rt, this)),
+        "getNano" => V::I((moment_of(rt, this).rem_euclid(1000) * 1_000_000) as i32),
+        "getYear" => V::I(fields(moment_of(rt, this))[0] as i32),
+        "getMonthValue" => V::I(fields(moment_of(rt, this))[1] as i32 + 1),
+        "getDayOfMonth" => V::I(fields(moment_of(rt, this))[2] as i32),
+        "getHour" => V::I(fields(moment_of(rt, this))[3] as i32),
+        "getMinute" => V::I(fields(moment_of(rt, this))[4] as i32),
+        "getSecond" => V::I(fields(moment_of(rt, this))[5] as i32),
+        "getDayOfYear" => {
+            let millis = moment_of(rt, this);
+            let days = millis.div_euclid(86_400_000);
+            V::I((days - days_from_civil(fields(millis)[0], 1, 1) + 1) as i32)
+        }
+        "plusMillis" | "plusSeconds" | "plusMinutes" | "plusHours" | "plusDays" | "plusWeeks"
+        | "minusMillis" | "minusSeconds" | "minusMinutes" | "minusHours" | "minusDays"
+        | "minusWeeks" => {
+            let unit = match name.trim_start_matches("plus").trim_start_matches("minus") {
+                "Millis" => 1,
+                "Seconds" => 1000,
+                "Minutes" => 60_000,
+                "Hours" => 3_600_000,
+                "Days" => 86_400_000,
+                _ => 604_800_000,
+            };
+            let by = a(1).j().saturating_mul(unit);
+            let millis = moment_of(rt, this);
+            at_moment(
+                rt,
+                rt.class_of(this),
+                if name.starts_with("plus") {
+                    millis.saturating_add(by)
+                } else {
+                    millis.saturating_sub(by)
+                },
+            )
+        }
+        "isAfter" => V::I((moment_of(rt, this) > moment_of(rt, a(1))) as i32),
+        "isBefore" => V::I((moment_of(rt, this) < moment_of(rt, a(1))) as i32),
+        "compareTo" => V::I(moment_of(rt, this).cmp(&moment_of(rt, a(1))) as i32),
+        "equals" => V::I(
+            (a(1).r() != 0
+                && rt.class_of(a(1)) == rt.class_of(this)
+                && moment_of(rt, this) == moment_of(rt, a(1))) as i32,
+        ),
+        "hashCode" => V::I(moment_of(rt, this) as i32),
+        "format" => {
+            let pattern = rt
+                .str_of(rt.get_field(a(1), "$pattern"))
+                .unwrap_or("yyyy-MM-dd'T'HH:mm:ss")
+                .to_owned();
+            let millis = moment_of(rt, this);
+            rt.string(&format_moment(&pattern, millis, true))
+        }
+        // ISO-8601, as each prints itself: an `Instant` with its `Z`, the fraction where it
+        // is not zero.
+        "toString" => {
+            let millis = moment_of(rt, this);
+            let mut text = format_moment("yyyy-MM-dd'T'HH:mm:ss", millis, true);
+            if millis.rem_euclid(1000) != 0 {
+                text.push_str(&format!(".{:03}", millis.rem_euclid(1000)));
+            }
+            if owner != LOCAL_DATE_TIME {
+                text.push('Z');
+            }
+            rt.string(&text)
+        }
+        _ => return None,
+    })
+}
+
 /// Where `Calendar`'s field constants are in [`fields`], and for the day's others how many
 /// milliseconds one is.
 fn field(constant: i32) -> Result<usize, i64> {
@@ -853,6 +1348,167 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
     use super::*;
+
+    /// A moment written and read by Java's date patterns, by `SimpleDateFormat` and by
+    /// `DateTimeFormatter`; an `Instant`, a `LocalDateTime` and a time zone (UTC's time, under
+    /// whatever id).
+    #[test]
+    fn dates_are_written_and_read_by_their_patterns() {
+        crate::install();
+        let mut rt = Rt::new();
+        let text = |rt: &Rt, v: V| rt.str_of(v).unwrap_or("?").to_owned();
+        // 2024-02-29T13:05:09.007Z, a Thursday.
+        let millis = moment([2024, 1, 29, 13, 5, 9, 7]);
+        let date = rt.new_object(DATE);
+        c(&mut rt, "java/util/Date.<init>.(J)V", &[date, V::J(millis)]);
+        let simple = |rt: &mut Rt, pattern: &str| {
+            let (f, p) = (
+                rt.new_object("java/text/SimpleDateFormat"),
+                rt.string(pattern),
+            );
+            c(
+                rt,
+                "java/text/SimpleDateFormat.<init>.(Ljava/lang/String;)V",
+                &[f, p],
+            );
+            f
+        };
+        let plain = simple(&mut rt, "yyyy-MM-dd HH:mm:ss.SSS");
+        let written = c(
+            &mut rt,
+            "java/text/SimpleDateFormat.format.(Ljava/util/Date;)Ljava/lang/String;",
+            &[plain, date],
+        );
+        assert_eq!(text(&rt, written), "2024-02-29 13:05:09.007");
+        let worded = simple(&mut rt, "EEE, d MMM yy 'at' h:mm a, EEEE MMMM");
+        let written = c(
+            &mut rt,
+            "java/text/DateFormat.format.(Ljava/util/Date;)Ljava/lang/String;",
+            &[worded, date],
+        );
+        assert_eq!(
+            text(&rt, written),
+            "Thu, 29 Feb 24 at 1:05 PM, Thursday February"
+        );
+        let spelled = rt.string("2024-02-29 13:05:09.007");
+        let read = c(
+            &mut rt,
+            "java/text/SimpleDateFormat.parse.(Ljava/lang/String;)Ljava/util/Date;",
+            &[plain, spelled],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/Date.getTime.()J", &[read]),
+            V::J(millis)
+        );
+        let nonsense = rt.string("tomorrow");
+        c(
+            &mut rt,
+            "java/text/SimpleDateFormat.parse.(Ljava/lang/String;)Ljava/util/Date;",
+            &[plain, nonsense],
+        );
+        assert_eq!(
+            rt.thrown.take().map(|e| rt.class_of(e)),
+            Some("java/text/ParseException")
+        );
+
+        let pattern = rt.string("dd/MM/yyyy HH:mm");
+        let formatter = c(
+            &mut rt,
+            "java/time/format/DateTimeFormatter.ofPattern.(Ljava/lang/String;)Ljava/time/format/DateTimeFormatter;",
+            &[pattern],
+        );
+        let at = c(
+            &mut rt,
+            "java/time/LocalDateTime.of.(IIIII)Ljava/time/LocalDateTime;",
+            &[V::I(2024), V::I(2), V::I(29), V::I(13), V::I(5)],
+        );
+        let written = c(
+            &mut rt,
+            "java/time/LocalDateTime.format.(Ljava/time/format/DateTimeFormatter;)Ljava/lang/String;",
+            &[at, formatter],
+        );
+        assert_eq!(text(&rt, written), "29/02/2024 13:05");
+        let written = c(
+            &mut rt,
+            "java/time/format/DateTimeFormatter.format.(Ljava/time/temporal/TemporalAccessor;)Ljava/lang/String;",
+            &[formatter, at],
+        );
+        assert_eq!(text(&rt, written), "29/02/2024 13:05");
+        assert_eq!(
+            c(&mut rt, "java/time/LocalDateTime.getDayOfMonth.()I", &[at]),
+            V::I(29)
+        );
+        let iso =
+            crate::api::get_static(&mut rt, "java/time/format/DateTimeFormatter.ISO_LOCAL_DATE");
+        let today = c(
+            &mut rt,
+            "java/time/LocalDate.of.(III)Ljava/time/LocalDate;",
+            &[V::I(2024), V::I(2), V::I(29)],
+        );
+        let written = c(
+            &mut rt,
+            "java/time/LocalDate.format.(Ljava/time/format/DateTimeFormatter;)Ljava/lang/String;",
+            &[today, iso],
+        );
+        assert_eq!(text(&rt, written), "2024-02-29");
+
+        let instant = c(
+            &mut rt,
+            "java/time/Instant.ofEpochMilli.(J)Ljava/time/Instant;",
+            &[V::J(millis)],
+        );
+        let written = c(
+            &mut rt,
+            "java/time/Instant.toString.()Ljava/lang/String;",
+            &[instant],
+        );
+        assert_eq!(text(&rt, written), "2024-02-29T13:05:09.007Z");
+        assert_eq!(
+            c(&mut rt, "java/time/Instant.getEpochSecond.()J", &[instant]),
+            V::J(millis / 1000)
+        );
+        assert_eq!(
+            c(&mut rt, "java/time/Instant.getNano.()I", &[instant]),
+            V::I(7_000_000)
+        );
+        let now = c(&mut rt, "java/time/Instant.now.()Ljava/time/Instant;", &[]);
+        assert!(c(&mut rt, "java/time/Instant.toEpochMilli.()J", &[now]).j() > 1_700_000_000_000);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/time/Instant.isAfter.(Ljava/time/Instant;)Z",
+                &[now, instant]
+            ),
+            V::I(1)
+        );
+
+        let id = rt.string("Europe/Vienna");
+        let zone = c(
+            &mut rt,
+            "java/util/TimeZone.getTimeZone.(Ljava/lang/String;)Ljava/util/TimeZone;",
+            &[id],
+        );
+        let named = c(
+            &mut rt,
+            "java/util/TimeZone.getID.()Ljava/lang/String;",
+            &[zone],
+        );
+        assert_eq!(text(&rt, named), "Europe/Vienna");
+        assert_eq!(
+            c(&mut rt, "java/util/TimeZone.getRawOffset.()I", &[zone]),
+            V::I(0)
+        );
+        c(
+            &mut rt,
+            "java/text/SimpleDateFormat.setTimeZone.(Ljava/util/TimeZone;)V",
+            &[plain, zone],
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
 
     /// A `URI` is its text: its parts (`null` for those it has none of), another reference
     /// resolved against it, the `URL` of it and back; and a path's is the `file:` one a `File`

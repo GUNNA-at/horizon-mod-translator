@@ -2049,6 +2049,41 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 V::I((min.is_none_or(|m| m <= v) && max.is_none_or(|m| m >= v)) as i32)
             }
         }
+        // A moment and how it is written ([`crate::jsystem::java_time`]); a zone.
+        (
+            "java/time/Instant"
+            | "java/time/LocalDateTime"
+            | "java/time/ZonedDateTime"
+            | "java/time/OffsetDateTime"
+            | "java/time/format/DateTimeFormatter",
+            _,
+        ) => {
+            let owner = rt.static_key(owner);
+            return crate::jsystem::java_time(rt, owner, name, desc, args);
+        }
+        ("java/time/ZoneId" | "java/time/ZoneOffset", _) => {
+            return crate::jsystem::time_zone(rt, name, desc, args);
+        }
+        // A date or a time of day written by a formatter, and a date with a time of day.
+        (LOCAL_DATE | LOCAL_TIME, "format") => {
+            let pattern = rt
+                .str_of(rt.get_field(a(1), "$pattern"))
+                .unwrap_or("yyyy-MM-dd")
+                .to_owned();
+            let millis = crate::jsystem::moment_of(rt, a(0));
+            rt.string(&crate::jsystem::format_moment(&pattern, millis, true))
+        }
+        (LOCAL_DATE, "atStartOfDay" | "atTime") => {
+            let millis = crate::jsystem::moment_of(rt, a(0))
+                + if name == "atTime" && a(1).r() != 0 {
+                    crate::jsystem::moment_of(rt, a(1))
+                } else {
+                    0
+                };
+            let at = rt.new_object("java/time/LocalDateTime");
+            rt.put_field(at, "$millis", V::J(millis));
+            at
+        }
         // `LocalDate.now()`: today, in UTC (the game holds no time zone); `of(y, m, d)`; its parts.
         (LOCAL_DATE, "now") => {
             let days = now_nanos().div_euclid(86_400_000_000_000);
@@ -3816,6 +3851,14 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             .intern("compat:world-version".into(), |rt| {
                 rt.new_object(WORLD_VERSION)
             }),
+        // `PackType.getDirectory()`: the folder of a pack that kind of file is in.
+        ("net/minecraft/server/packs/PackType", "getDirectory") => {
+            rt.string(if rt.get_field(a(0), "$ordinal").i() == 0 {
+                "assets"
+            } else {
+                "data"
+            })
+        }
         (WORLD_VERSION | "net/minecraft/DetectedVersion", n) => match n {
             "getName" | "getId" => rt.string("1.21.1"),
             "getProtocolVersion" => V::I(767),
@@ -6246,6 +6289,16 @@ pub(crate) fn vanilla_block_entity_type(rt: &mut Rt, field: &str) -> V {
 
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match owner {
+        "java/time/format/DateTimeFormatter" => return crate::jsystem::formatter_static(rt, field),
+        "java/time/ZoneOffset" if field == "UTC" => {
+            let utc = rt.string("UTC");
+            return crate::jsystem::time_zone(
+                rt,
+                "of",
+                "(Ljava/lang/String;)Ljava/time/ZoneId;",
+                &[utc],
+            );
+        }
         "net/minecraft/world/item/ItemStackLinkedSet" if field == "TYPE_AND_TAG" => intern_strategy(rt, ITEM_STRATEGY),
         "net/neoforged/neoforge/fluids/FluidStackLinkedSet" if field == "TYPE_AND_COMPONENTS" => intern_strategy(rt, FLUID_STRATEGY),
         "net/minecraft/world/phys/Vec3" if field == "ZERO" => vec3_zero(rt),
@@ -6847,6 +6900,14 @@ mod tests {
         let pack = "net/minecraft/WorldVersion.getPackVersion.(Lnet/minecraft/server/packs/PackType;)I";
         let data = crate::api::get_static(&mut rt, "net/minecraft/server/packs/PackType.SERVER_DATA");
         let resources = crate::api::get_static(&mut rt, "net/minecraft/server/packs/PackType.CLIENT_RESOURCES");
+        for (kind, folder) in [(data, "data"), (resources, "assets")] {
+            let dir = crate::api::call(
+                &mut rt,
+                "net/minecraft/server/packs/PackType.getDirectory.()Ljava/lang/String;",
+                &[kind],
+            );
+            assert_eq!(rt.str_of(dir), Some(folder));
+        }
         assert_eq!((c(&mut rt, pack, &[v, resources]), c(&mut rt, pack, &[v, data])), (V::I(34), V::I(48)));
         let dv = c(&mut rt, "net/minecraft/WorldVersion.getDataVersion.()Lnet/minecraft/world/level/storage/DataVersion;", &[v]);
         assert_eq!(c(&mut rt, "net/minecraft/world/level/storage/DataVersion.getVersion.()I", &[dv]), V::I(3955));

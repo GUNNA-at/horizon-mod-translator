@@ -2910,6 +2910,25 @@ pub(crate) fn spawns_terrain_particles(rt: &Rt, text: &str) -> bool {
             .is_none_or(vanilla_terrain_particles)
 }
 
+/// `Block.getExplosionResistance()`: what a mod block's properties were given (or the vanilla
+/// block they copy has); a vanilla block's own where the table of copied blocks has it, else
+/// its hardness, which is what most of them resist with.
+pub(crate) fn explosion_resistance(rt: &mut Rt, block: V) -> f32 {
+    match rt.str_of(block).map(str::to_owned) {
+        Some(name) => match COPIED.iter().find(|(n, ..)| *n == name) {
+            Some(c) => c.2,
+            None => rt
+                .host()
+                .and_then(|h| h.block_facts(&name))
+                .map_or(0.0, |f| f.hardness.max(0.0)),
+        },
+        None => {
+            let props = rt.get_field(block, "$properties");
+            properties_field(rt, props, "explosionResistance").map_or(0.0, |v| v.f())
+        }
+    }
+}
+
 /// The `BlockBehaviour.Properties` field `name` (1.21.1's) as the builder calls left it: what they
 /// stored, else what the vanilla block a copy came from has, else `Properties.of()`'s value.
 fn properties_field(rt: &mut Rt, p: V, name: &str) -> Option<V> {
@@ -3710,6 +3729,12 @@ mod tests {
         let copy = api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.ofFullCopy.(Lnet/minecraft/world/level/block/state/BlockBehaviour;)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[stone]);
         assert_eq!(field(&mut rt, copy, "destroyTime", "F"), V::F(1.5), "stone's");
         assert_eq!(field(&mut rt, copy, "explosionResistance", "F"), V::F(6.0));
+        // And a block answers its own: a mod's by its properties, stone by the table.
+        const RESISTS: &str = "net/minecraft/world/level/block/Block.getExplosionResistance.()F";
+        let copied = rt.new_object("test/CopiedStone");
+        rt.put_field(copied, "$properties", copy);
+        assert_eq!(api::call(&mut rt, RESISTS, &[copied]), V::F(6.0));
+        assert_eq!(api::call(&mut rt, RESISTS, &[stone]), V::F(6.0));
         api::call(&mut rt, "net/minecraft/world/level/block/state/BlockBehaviour$Properties.destroyTime.(F)Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;", &[copy, V::F(-1.0)]);
         assert_eq!(field(&mut rt, copy, "destroyTime", "F"), V::F(-1.0), "what the mod set over it");
         let p = props(&mut rt);

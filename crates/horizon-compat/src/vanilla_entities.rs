@@ -1168,6 +1168,38 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "getMainHandItem" | "getOffhandItem" | "getItemBySlot" | "getItemInHand" | "getUseItem" | "getWeaponItem" | "getBodyArmorItem" => {
             crate::api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY").unwrap_or(V::NULL)
         }
+        // The stacks of its slots, in `EquipmentSlot`'s order: its hands, its armor from the
+        // feet up, all six (a mod looks through a mob's armor for its own pieces).
+        "getHandSlots" | "getArmorSlots" | "getAllSlots" | "getArmorAndBodyArmorSlots"
+            if desc == "()Ljava/lang/Iterable;" =>
+        {
+            let slots: &[&str] = match name {
+                "getHandSlots" => &["mainhand", "offhand"],
+                "getArmorSlots" => &["feet", "legs", "chest", "head"],
+                "getArmorAndBodyArmorSlots" => &["feet", "legs", "chest", "head", "body"],
+                _ => &["mainhand", "offhand", "feet", "legs", "chest", "head"],
+            };
+            let mut saved = match with_host(rt, |h| h.entity_nbt(id))
+                .flatten()
+                .and_then(|mut nbt| nbt.remove("equipment"))
+            {
+                Some(Nbt::Compound(eq)) if living => eq,
+                _ => Default::default(),
+            };
+            let empty =
+                crate::api_common::get_static(rt, "net/minecraft/world/item/ItemStack", "EMPTY")
+                    .unwrap_or(V::NULL);
+            let stacks: Vec<V> = slots
+                .iter()
+                .map(|slot| match saved.remove(*slot) {
+                    Some(Nbt::Compound(stack)) => {
+                        crate::api_common::parse_stack(rt, &stack).unwrap_or(empty)
+                    }
+                    _ => empty,
+                })
+                .collect();
+            crate::jutil::new_list(rt, stacks)
+        }
         // As the level saves it (`saveWithoutId`, NeoForge's `serializeNBT` with the type's id),
         // with the mod data the runtime keeps for it (`NeoForgeData`).
         "saveWithoutId" | "serializeNBT" => {

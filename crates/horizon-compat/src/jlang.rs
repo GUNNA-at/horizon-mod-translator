@@ -1079,6 +1079,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         };
         return Some(rt.string(&out));
     }
+    if matches!(owner, "java/text/SimpleDateFormat" | "java/text/DateFormat") {
+        return crate::jsystem::date_format(rt, name, desc, args);
+    }
     if !owner.starts_with("java/lang/") && owner != ABSTRACT_HANDLER {
         return None;
     }

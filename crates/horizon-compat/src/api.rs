@@ -3030,6 +3030,8 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 crate::jutil::new_list(rt, all)
             }
             "isDedicatedServer" | "isPublished" | "isHardcore" => V::I(0),
+            // The window's own server, as a world opened from the menu has it.
+            "isSingleplayer" => V::I(1),
             "isSameThread" => V::I(1),
             "getPlayerList" => crate::events::player_list(rt),
             _ => return None,

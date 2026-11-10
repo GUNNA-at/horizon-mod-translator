@@ -1708,6 +1708,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/util/Calendar" | "java/util/GregorianCalendar" | "java/util/Date" => {
             return crate::jsystem::calendar(rt, owner, name, desc, args);
         }
+        "java/util/TimeZone" => return crate::jsystem::time_zone(rt, name, desc, args),
         "java/util/StringJoiner" => return joiner(rt, name, desc, args),
         // An `Enumeration` here is an iterator under its older names.
         "java/util/Enumeration" => {

@@ -562,6 +562,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 crate::jutil::new_list(rt, all)
             }
             "getPlayerCount" => V::I(server_players(rt).len() as i32),
+            // How far the server sends and ticks chunks: the game's own setting is not a
+            // mod's to read yet, so vanilla's defaults.
+            "getViewDistance" | "getSimulationDistance" => V::I(10),
+            "getMaxPlayers" => V::I(8),
             "getPlayer" if desc.starts_with("(Ljava/util/UUID;)") => {
                 let (msb, lsb) = crate::tags::uuid_bits(rt, a(1));
                 let id = (u128::from(msb as u64) << 64) | u128::from(lsb as u64);

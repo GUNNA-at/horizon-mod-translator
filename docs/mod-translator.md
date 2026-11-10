@@ -10637,6 +10637,16 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     answered FramedBlocks read every quad's texture at -1 (935 errors in launch 17).
   - fastutil's `IntList.of(...)` and its lists and sets made of an array.
   - Tests: 23 compat-core, 835 compat.
+- [x] 2026-11-10 Part 180: dates written by their patterns, and more of launch 17's list.
+  - `SimpleDateFormat` and `DateFormat` (18 of the pack's jars make one), `DateTimeFormatter`
+    (`ofPattern` and the ISO constants), `Instant` (16 jars ask `Instant.now()`),
+    `LocalDateTime`, `ZonedDateTime`, `TimeZone`, `ZoneId`: a moment in milliseconds, written
+    by Java's pattern letters (`yyyy-MM-dd HH:mm:ss.SSS`, `EEE, d MMM yy 'at' h:mm a`) and read
+    back by them, in UTC under whatever zone is named (the runtime keeps one clock).
+  - `Block.getExplosionResistance()`, `PackType.getDirectory()`, a vanilla mob's
+    `getArmorSlots()` and its other slot lists (from its saved equipment),
+    `MinecraftServer.isSingleplayer()`, the player list's view distance.
+  - Tests: 836 compat.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
