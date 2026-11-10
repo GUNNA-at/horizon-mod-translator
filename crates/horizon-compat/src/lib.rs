@@ -78,6 +78,7 @@ pub mod jlang;
 pub mod jmath;
 pub mod jregex;
 pub mod jsystem;
+pub mod jtypes;
 pub mod jutil;
 pub mod keys;
 pub mod menus;

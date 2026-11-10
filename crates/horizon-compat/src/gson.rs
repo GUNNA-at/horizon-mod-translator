@@ -31,7 +31,24 @@ const NUMBER: i32 = 1;
 const BOOLEAN: i32 = 2;
 
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    matches!(owner, ELEMENT | OBJECT | ARRAY | PRIMITIVE | NULL | PARSER | GSON | BUILDER | HELPER)
+    matches!(
+        owner,
+        ELEMENT
+            | OBJECT
+            | ARRAY
+            | PRIMITIVE
+            | NULL
+            | PARSER
+            | GSON
+            | BUILDER
+            | HELPER
+            | TOKEN
+            | FIELD_ATTRIBUTES
+            | TYPE_ADAPTER
+            | OWN_ADAPTER
+            | SERIALIZATION_CONTEXT
+            | DESERIALIZATION_CONTEXT
+    )
 }
 
 /// The classes of the tree's elements.
@@ -888,6 +905,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         HELPER => return helper_call(rt, name, desc, args),
         PARSER => return parser_call(rt, name, desc, args),
         GSON | BUILDER => return gson_call(rt, owner, name, desc, args),
+        FIELD_ATTRIBUTES => return field_attributes_call(rt, name, args),
+        TOKEN => return token_call(rt, name, args),
+        // One of the runtime's own adapters, asked as a `TypeAdapter` (or, where that class is
+        // Gson's own code among the mod's, by the adapter's own class: what a call that found
+        // no code for it is asked by next).
+        TYPE_ADAPTER | OWN_ADAPTER => return adapter_call(rt, name, desc, args),
+        SERIALIZATION_CONTEXT | DESERIALIZATION_CONTEXT => return context_call(rt, name, args),
         _ => {}
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -1110,6 +1134,516 @@ fn read_as(rt: &mut Rt, text: &str, class: &str, lenient: bool) -> Option<V> {
 /// Whether `class` is one of the tree's (what Gson reads without a mapping of its own).
 fn tree_class(class: &str) -> bool {
     class == ELEMENT || is_element_class(class)
+}
+
+// ---- Types and adapters ----
+//
+// What a mod registers with a `GsonBuilder` to write and read a type its own way: a
+// `JsonSerializer`, a `JsonDeserializer`, a `TypeAdapter`, an `InstanceCreator`, a
+// `TypeAdapterFactory`. The `Gson` asks them before it maps a value itself, in Gson's order.
+
+const TOKEN: &str = "com/google/gson/reflect/TypeToken";
+const TYPE_ADAPTER: &str = "com/google/gson/TypeAdapter";
+const SERIALIZER: &str = "com/google/gson/JsonSerializer";
+const DESERIALIZER: &str = "com/google/gson/JsonDeserializer";
+const SERIALIZATION_CONTEXT: &str = "com/google/gson/JsonSerializationContext";
+const DESERIALIZATION_CONTEXT: &str = "com/google/gson/JsonDeserializationContext";
+/// The runtime's own `TypeAdapter` (`Gson.getAdapter`, `getDelegateAdapter`): a `Gson`, a type,
+/// and which of the Gson's adapters it starts at.
+const OWN_ADAPTER: &str = "compat:gson-adapter";
+/// The context a serializer or a deserializer is handed: its `Gson`.
+const CONTEXT: &str = "compat:gson-context";
+
+/// How a registered adapter is matched to a type: the very type (a `TypeAdapter`), the type or,
+/// registered for a plain class, any type of that class (a serializer or a deserializer), a
+/// class and those under it (`registerTypeHierarchyAdapter`), or whatever its factory makes one for.
+const EXACT: i32 = 0;
+const OF_CLASS: i32 = 1;
+const BELOW: i32 = 2;
+const MADE_BY: i32 = 3;
+
+/// One adapter a `Gson` has: the type it was registered for, the object, how it matches.
+struct Entry {
+    sig: String,
+    adapter: V,
+    mode: i32,
+}
+
+/// A builder's settings and what was registered with it, onto the `Gson` it makes (or back, for
+/// `Gson.newBuilder()`): each has its own lists from then on.
+fn copy_settings(rt: &mut Rt, from: V, to: V) {
+    for f in [
+        "$pretty",
+        "$html",
+        "$nulls",
+        "$lenient",
+        "$naming",
+        "$namer",
+        "$modifiers",
+    ] {
+        let v = rt.get_field(from, f);
+        rt.put_field(to, f, v);
+    }
+    for f in ["$adapters", "$creators", "$skipWriting", "$skipReading"] {
+        let list = rt.get_field(from, f);
+        if list.r() != 0 {
+            let entries = crate::jutil::elements(rt, list);
+            let copy = crate::jutil::new_list(rt, entries);
+            rt.put_field(to, f, copy);
+        }
+    }
+}
+
+/// Adds an entry to one of a builder's lists (`$adapters`, `$creators`).
+fn add_entry(rt: &mut Rt, builder: V, field: &'static str, entry: Vec<V>) {
+    let entry = crate::jutil::new_list(rt, entry);
+    let list = rt.get_field(builder, field);
+    if list.r() == 0 {
+        let list = crate::jutil::new_list(rt, vec![entry]);
+        rt.put_field(builder, field, list);
+    } else {
+        crate::api::call(
+            rt,
+            "java/util/List.add.(Ljava/lang/Object;)Z",
+            &[list, entry],
+        );
+    }
+}
+
+/// An adapter of a builder's: `list` 0 for the ones Gson asks first (last registered first), 1
+/// for the hierarchy's serializers and deserializers, asked after those.
+fn add_adapter(rt: &mut Rt, builder: V, sig: &str, adapter: V, mode: i32, list: i32) {
+    let sig = rt.string(sig);
+    add_entry(
+        rt,
+        builder,
+        "$adapters",
+        vec![sig, adapter, V::I(mode), V::I(list)],
+    );
+}
+
+/// `registerTypeAdapter(type, object)` and `registerTypeHierarchyAdapter(class, object)`: the
+/// object is whichever of Gson's four it implements, and may be several.
+fn register(rt: &mut Rt, builder: V, sig: &str, adapter: V, hierarchy: bool) {
+    if !hierarchy && rt.instance_of(adapter, "com/google/gson/InstanceCreator") {
+        let s = rt.string(sig);
+        add_entry(rt, builder, "$creators", vec![s, adapter]);
+    }
+    if rt.instance_of(adapter, SERIALIZER) || rt.instance_of(adapter, DESERIALIZER) {
+        let (mode, list) = if hierarchy { (BELOW, 1) } else { (OF_CLASS, 0) };
+        add_adapter(rt, builder, sig, adapter, mode, list);
+    }
+    if rt.instance_of(adapter, TYPE_ADAPTER) || rt.class_of(adapter) == OWN_ADAPTER {
+        add_adapter(
+            rt,
+            builder,
+            sig,
+            adapter,
+            if hierarchy { BELOW } else { EXACT },
+            0,
+        );
+    }
+}
+
+fn has_adapters(rt: &Rt, gson: V) -> bool {
+    gson.r() != 0 && rt.get_field(gson, "$adapters").r() != 0
+}
+
+/// A `Gson`'s adapters in the order it asks them: the type adapters, the serializers and the
+/// factories, the last registered first; then the hierarchy's serializers and deserializers, the
+/// last registered first.
+fn chain(rt: &Rt, gson: V) -> Vec<Entry> {
+    if !has_adapters(rt, gson) {
+        return Vec::new();
+    }
+    let all: Vec<(Entry, i32)> = crate::jutil::elements(rt, rt.get_field(gson, "$adapters"))
+        .into_iter()
+        .map(|e| {
+            let p = crate::jutil::elements(rt, e);
+            let at = |i: usize| p.get(i).copied().unwrap_or_default();
+            (
+                Entry {
+                    sig: rt.str_of(at(0)).unwrap_or("").to_owned(),
+                    adapter: at(1),
+                    mode: at(2).i(),
+                },
+                at(3).i(),
+            )
+        })
+        .collect();
+    let (first, hierarchy): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, list)| *list == 0);
+    first
+        .into_iter()
+        .rev()
+        .chain(hierarchy.into_iter().rev())
+        .map(|(e, _)| e)
+        .collect()
+}
+
+/// The first of a `Gson`'s adapters, from the one at `from` on, that answers for type `asked`
+/// (`writing` it, or reading it): a serializer alone reads nothing and a deserializer writes
+/// nothing, so the next is asked; a factory answers with what it makes for the type.
+fn adapter_for(rt: &mut Rt, gson: V, asked: &str, from: usize, writing: bool) -> Option<V> {
+    let asked_class = crate::jtypes::parts(asked).0;
+    for (i, e) in chain(rt, gson).into_iter().enumerate().skip(from) {
+        let hit = match e.mode {
+            MADE_BY => match factory_adapter(rt, gson, i, e.adapter, asked) {
+                Some(made) => return Some(made),
+                None => false,
+            },
+            EXACT => e.sig == asked,
+            OF_CLASS => {
+                e.sig == asked
+                    || (!e.sig.contains('<') && crate::jtypes::parts(&e.sig).0 == asked_class)
+            }
+            _ => rt.is_a(&asked_class, &crate::jtypes::parts(&e.sig).0),
+        };
+        let tree_adapter =
+            !rt.instance_of(e.adapter, TYPE_ADAPTER) && rt.class_of(e.adapter) != OWN_ADAPTER;
+        let other_way = tree_adapter
+            && !rt.instance_of(e.adapter, if writing { SERIALIZER } else { DESERIALIZER });
+        if hit && !other_way {
+            return Some(e.adapter);
+        }
+    }
+    None
+}
+
+/// What the factory at `i` of a `Gson`'s adapters makes for a type (`create(gson, typeToken)`),
+/// asked once for each type as Gson asks it: an adapter, or nothing for a type it leaves alone.
+fn factory_adapter(rt: &mut Rt, gson: V, i: usize, factory: V, sig: &str) -> Option<V> {
+    let mut made = rt.get_field(gson, "$made");
+    if made.r() == 0 {
+        made = rt.alloc("compat:gson-made", Data::Map(Default::default()));
+        rt.put_field(gson, "$made", made);
+    }
+    let key = format!("{i}:{sig}");
+    if let Some(Data::Map(m)) = rt.heap.get(made.r() as usize).map(|o| &o.data)
+        && let Some(v) = m.get(&key)
+    {
+        return Some(*v).filter(|v| v.r() != 0);
+    }
+    let token = token_of(rt, sig);
+    let adapter = rt.call_functional(
+        "com/google/gson/TypeAdapterFactory.create.(Lcom/google/gson/Gson;Lcom/google/gson/reflect/TypeToken;)Lcom/google/gson/TypeAdapter;",
+        factory,
+        &[gson, token],
+    );
+    let adapter = if adapter.r() == 0 { V::NULL } else { adapter };
+    if let Some(Data::Map(m)) = rt.heap.get_mut(made.r() as usize).map(|o| &mut o.data) {
+        m.insert(key, adapter);
+    }
+    Some(adapter).filter(|v| v.r() != 0)
+}
+
+/// The tree an adapter writes for `v` of type `sig`: a `TypeAdapter` through a writer into a
+/// tree (its own `toJsonTree`), a serializer by its `serialize`, which is not asked for a null.
+fn write_with(rt: &mut Rt, gson: V, adapter: V, v: V, sig: &str) -> V {
+    let tree = if rt.class_of(adapter) == OWN_ADAPTER {
+        own_to_tree(rt, adapter, v)
+    } else if rt.instance_of(adapter, TYPE_ADAPTER) {
+        rt.call_functional("com/google/gson/TypeAdapter.toJsonTree.(Ljava/lang/Object;)Lcom/google/gson/JsonElement;", adapter, &[v])
+    } else if v.r() == 0 {
+        V::NULL
+    } else {
+        let (ty, context) = (crate::jtypes::of(rt, sig), context_of(rt, gson));
+        rt.call_functional(
+            "com/google/gson/JsonSerializer.serialize.(Ljava/lang/Object;Ljava/lang/reflect/Type;Lcom/google/gson/JsonSerializationContext;)Lcom/google/gson/JsonElement;",
+            adapter,
+            &[v, ty, context],
+        )
+    };
+    if tree.r() == 0 { null(rt) } else { tree }
+}
+
+/// What an adapter reads from a tree: the reverse of [`write_with`].
+fn read_with(rt: &mut Rt, gson: V, adapter: V, json: V, sig: &str) -> V {
+    let absent = json.r() == 0 || rt.class_of(json) == NULL;
+    if rt.class_of(adapter) == OWN_ADAPTER {
+        return own_from_tree(rt, adapter, json);
+    }
+    if rt.instance_of(adapter, TYPE_ADAPTER) {
+        let json = if json.r() == 0 { null(rt) } else { json };
+        return rt.call_functional("com/google/gson/TypeAdapter.fromJsonTree.(Lcom/google/gson/JsonElement;)Ljava/lang/Object;", adapter, &[json]);
+    }
+    if absent {
+        return V::NULL;
+    }
+    let (ty, context) = (crate::jtypes::of(rt, sig), context_of(rt, gson));
+    rt.call_functional(
+        "com/google/gson/JsonDeserializer.deserialize.(Lcom/google/gson/JsonElement;Ljava/lang/reflect/Type;Lcom/google/gson/JsonDeserializationContext;)Ljava/lang/Object;",
+        adapter,
+        &[json, ty, context],
+    )
+}
+
+/// The object an `InstanceCreator` registered for the type makes (for the type itself, else for
+/// its class), where there is one.
+fn created(rt: &mut Rt, gson: V, ty: &str) -> Option<V> {
+    if gson.r() == 0 || rt.get_field(gson, "$creators").r() == 0 {
+        return None;
+    }
+    let all: Vec<(String, V)> = crate::jutil::elements(rt, rt.get_field(gson, "$creators"))
+        .into_iter()
+        .map(|e| {
+            let p = crate::jutil::elements(rt, e);
+            (
+                rt.str_of(p.first().copied().unwrap_or_default())
+                    .unwrap_or("")
+                    .to_owned(),
+                p.get(1).copied().unwrap_or_default(),
+            )
+        })
+        .collect();
+    let raw = generic(ty).0;
+    let (sig, creator) = all
+        .iter()
+        .rev()
+        .find(|(sig, _)| sig == ty)
+        .or_else(|| all.iter().rev().find(|(sig, _)| *sig == raw))?;
+    let ty = crate::jtypes::of(rt, sig);
+    let made = rt.call_functional("com/google/gson/InstanceCreator.createInstance.(Ljava/lang/reflect/Type;)Ljava/lang/Object;", *creator, &[ty]);
+    Some(made).filter(|v| v.r() != 0)
+}
+
+/// `Gson.toJsonTree(value[, type])`: `JsonNull` for nothing, else the value's tree by the type
+/// given, or by its own class.
+fn tree_of(rt: &mut Rt, gson: V, v: V, declared: Option<String>, nulls: bool) -> V {
+    if v.r() == 0 && matches!(v, V::R(_) | V::Void) && declared.is_none() {
+        return null(rt);
+    }
+    let ty = match declared {
+        Some(ty) => ty,
+        None if matches!(v, V::R(_)) => format!("L{};", rt.class_of(v)),
+        None => ANY.to_owned(),
+    };
+    to_tree_in(rt, gson, v, &ty, nulls, 0, 0)
+}
+
+/// One of the runtime's own adapters: what `gson` does with type `sig`, by its adapters from the
+/// one at `from` on.
+fn own_adapter(rt: &mut Rt, gson: V, sig: &str, from: usize) -> V {
+    let a = rt.new_object(OWN_ADAPTER);
+    let s = rt.string(sig);
+    rt.put_field(a, "$gson", gson);
+    rt.put_field(a, "$type", s);
+    rt.put_field(a, "$from", V::I(from as i32));
+    a
+}
+
+fn own_parts(rt: &Rt, adapter: V) -> (V, String, usize) {
+    (
+        rt.get_field(adapter, "$gson"),
+        rt.str_of(rt.get_field(adapter, "$type"))
+            .unwrap_or(ANY)
+            .to_owned(),
+        rt.get_field(adapter, "$from").i().max(0) as usize,
+    )
+}
+
+/// A `TypeAdapter` writes every null it is given (its writer, on its own, writes them).
+fn own_to_tree(rt: &mut Rt, adapter: V, v: V) -> V {
+    let (gson, sig, from) = own_parts(rt, adapter);
+    to_tree_in(rt, gson, v, &sig, true, 0, from)
+}
+
+fn own_from_tree(rt: &mut Rt, adapter: V, json: V) -> V {
+    let (gson, sig, from) = own_parts(rt, adapter);
+    if tree_class(&crate::jtypes::parts(&sig).0) {
+        return if json.r() == 0 { null(rt) } else { json };
+    }
+    from_tree_in(rt, gson, json, &sig, 0, from)
+}
+
+/// `TypeAdapter`'s methods on one of the runtime's own ([`OWN_ADAPTER`]); a mod's adapter runs
+/// its own code and Gson's.
+fn adapter_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    if rt.class_of(this) != OWN_ADAPTER {
+        return None;
+    }
+    // As a `JsonWriter` made for the purpose writes: compact, nulls and all, nothing escaped.
+    let plain = Style {
+        pretty: false,
+        html: false,
+        nulls: true,
+        sorted: false,
+    };
+    Some(match (name, desc) {
+        ("write", _) => {
+            let tree = own_to_tree(rt, this, a(2));
+            if rt.thrown.is_none() {
+                write_to(rt, a(1), tree, None);
+            }
+            V::Void
+        }
+        ("read", _) => match read_from(rt, a(1)) {
+            Some(tree) => own_from_tree(rt, this, tree),
+            None => V::NULL,
+        },
+        ("toJsonTree", _) => own_to_tree(rt, this, a(1)),
+        ("fromJsonTree", _) => own_from_tree(rt, this, a(1)),
+        ("toJson", "(Ljava/lang/Object;)Ljava/lang/String;") => {
+            let tree = own_to_tree(rt, this, a(1));
+            let s = write(rt, tree, plain);
+            rt.string(&s)
+        }
+        ("toJson", _) => {
+            let tree = own_to_tree(rt, this, a(2));
+            let s = write(rt, tree, plain);
+            let s = rt.string(&s);
+            crate::api::call(rt, "java/io/Writer.write.(Ljava/lang/String;)V", &[a(1), s]);
+            V::Void
+        }
+        // Its reader is strict, as one made by `new JsonReader(reader)` is.
+        ("fromJson", _) => {
+            let text = source_text(rt, a(1))?;
+            match parse(rt, &text, false) {
+                Err(e) => throw(rt, "com/google/gson/stream/MalformedJsonException", &e),
+                Ok(None) => throw(
+                    rt,
+                    "java/io/EOFException",
+                    "End of input at line 1 column 1 path $",
+                ),
+                Ok(Some((tree, _))) => own_from_tree(rt, this, tree),
+            }
+        }
+        ("nullSafe", _) => this,
+        _ => return None,
+    })
+}
+
+/// The context a `Gson` hands its serializers and deserializers: one object for the `Gson`.
+fn context_of(rt: &mut Rt, gson: V) -> V {
+    let made = rt.get_field(gson, "$context");
+    if made.r() != 0 {
+        return made;
+    }
+    let c = rt.new_object(CONTEXT);
+    rt.put_field(c, "$gson", gson);
+    rt.put_field(gson, "$context", c);
+    c
+}
+
+/// `context.serialize(value[, type])` and `context.deserialize(json, type)`: the `Gson`'s own
+/// `toJsonTree` and `fromJson`.
+fn context_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    if rt.class_of(a(0)) != CONTEXT {
+        return None;
+    }
+    let gson = rt.get_field(a(0), "$gson");
+    Some(match name {
+        "serialize" => {
+            let declared = (args.len() > 2).then(|| crate::jtypes::signature(rt, a(2)));
+            let nulls = style_of(rt, gson).nulls;
+            tree_of(rt, gson, a(1), declared, nulls)
+        }
+        "deserialize" if a(1).r() == 0 => V::NULL,
+        "deserialize" => {
+            let ty = crate::jtypes::signature(rt, a(2));
+            if tree_class(&crate::jtypes::parts(&ty).0) {
+                return Some(a(1));
+            }
+            from_tree_in(rt, gson, a(1), &ty, 0, 0)
+        }
+        _ => return None,
+    })
+}
+
+/// A `TypeToken` for a signature: Gson's name for a type with its arguments.
+fn token_of(rt: &mut Rt, sig: &str) -> V {
+    let t = rt.new_object(TOKEN);
+    let s = rt.string(sig);
+    rt.put_field(t, "$signature", s);
+    t
+}
+
+/// `TypeToken`: made by a class of the mod's that names its type argument (`new
+/// TypeToken<List<Entry>>() {}`), or for a type given.
+fn token_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let own = |rt: &Rt| {
+        rt.str_of(rt.get_field(this, "$signature"))
+            .unwrap_or(ANY)
+            .to_owned()
+    };
+    Some(match name {
+        // The type argument the object's class gives `TypeToken`, found up its classes.
+        "<init>" => {
+            let mut class = rt.class_of(this).to_owned();
+            let mut sig = ANY.to_owned();
+            loop {
+                if let Some((_, up, _)) = crate::jtypes::class_signature(rt, &class)
+                    && up.starts_with("Lcom/google/gson/reflect/TypeToken<")
+                {
+                    sig = crate::jtypes::parts(&up).1.first().cloned().unwrap_or(sig);
+                    break;
+                }
+                match rt.supers.get(class.as_str()).copied() {
+                    Some(up) if up != TOKEN => class = up.to_owned(),
+                    _ => break,
+                }
+            }
+            // A wildcard or a type variable there stands for its bound.
+            let sig = match sig.as_bytes().first() {
+                Some(b'+' | b'-') => sig[1..].to_owned(),
+                Some(b'*' | b'T') => ANY.to_owned(),
+                _ => sig,
+            };
+            let s = rt.string(&sig);
+            rt.put_field(this, "$signature", s);
+            V::Void
+        }
+        "get" => {
+            let sig = crate::jtypes::signature(rt, a(0));
+            token_of(rt, &sig)
+        }
+        "getParameterized" => {
+            let raw = crate::jtypes::parts(&crate::jtypes::signature(rt, a(0))).0;
+            let of: Vec<String> = crate::jutil::elements(rt, a(1))
+                .into_iter()
+                .map(|t| crate::jtypes::signature(rt, t))
+                .collect();
+            let sig = if of.is_empty() {
+                format!("L{raw};")
+            } else {
+                format!("L{raw}<{}>;", of.concat())
+            };
+            token_of(rt, &sig)
+        }
+        "getArray" => {
+            let sig = format!("[{}", crate::jtypes::signature(rt, a(0)));
+            token_of(rt, &sig)
+        }
+        "getType" => {
+            let sig = own(rt);
+            crate::jtypes::of(rt, &sig)
+        }
+        "getRawType" => {
+            let sig = own(rt);
+            let raw = if sig.starts_with('[') {
+                sig.split('<').next().unwrap_or(&sig).to_owned()
+            } else {
+                crate::jtypes::parts(&sig).0
+            };
+            rt.class_literal(&raw)
+        }
+        "equals" => V::I(
+            (a(1).r() != 0
+                && rt.class_of(a(1)) != "java/lang/Class"
+                && rt.instance_of(a(1), TOKEN)
+                && crate::jtypes::signature(rt, a(1)) == own(rt)) as i32,
+        ),
+        "hashCode" => V::I(crate::jlang::string_hash(&own(rt))),
+        "toString" => {
+            let text = crate::jtypes::type_name(&own(rt));
+            rt.string(&text)
+        }
+        _ => return None,
+    })
 }
 
 // ---- Streams ----
@@ -1433,13 +1967,56 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
                 rt.put_field(this, "$lenient", V::I(1));
                 this
             }
+            // How a field is named in JSON: one of Gson's policies, or a strategy of the mod's.
+            "setFieldNamingPolicy" | "setFieldNamingStrategy" => {
+                let policy = rt.class_of(a(1)) == NAMING_POLICY;
+                let named = if policy {
+                    crate::api_common::enum_name(rt, a(1), false)
+                } else {
+                    V::NULL
+                };
+                rt.put_field(this, "$naming", named);
+                rt.put_field(this, "$namer", if policy { V::NULL } else { a(1) });
+                this
+            }
+            // The modifiers that keep a field out, in place of `transient` and `static`.
+            "excludeFieldsWithModifiers" => {
+                let mask = crate::jutil::elements(rt, a(1))
+                    .iter()
+                    .fold(0, |m, v| m | v.i());
+                rt.put_field(this, "$modifiers", V::I(mask));
+                this
+            }
+            "setExclusionStrategies" => {
+                for strategy in crate::jutil::elements(rt, a(1)) {
+                    for list in ["$skipWriting", "$skipReading"] {
+                        add_entry(rt, this, list, vec![strategy]);
+                    }
+                }
+                this
+            }
+            "addSerializationExclusionStrategy" | "addDeserializationExclusionStrategy" => {
+                let list = if name == "addSerializationExclusionStrategy" {
+                    "$skipWriting"
+                } else {
+                    "$skipReading"
+                };
+                add_entry(rt, this, list, vec![a(1)]);
+                this
+            }
             "create" => {
                 let g = rt.new_object(GSON);
-                for f in ["$pretty", "$html", "$nulls", "$lenient"] {
-                    let v = rt.get_field(this, f);
-                    rt.put_field(g, f, v);
-                }
+                copy_settings(rt, this, g);
                 g
+            }
+            "registerTypeAdapter" | "registerTypeHierarchyAdapter" => {
+                let sig = crate::jtypes::signature(rt, a(1));
+                register(rt, this, &sig, a(2), name == "registerTypeHierarchyAdapter");
+                this
+            }
+            "registerTypeAdapterFactory" => {
+                add_adapter(rt, this, "", a(1), MADE_BY, 0);
+                this
             }
             // The rest configure what mapping onto classes would use: kept as the builder.
             _ if desc.ends_with(")Lcom/google/gson/GsonBuilder;") => this,
@@ -1477,11 +2054,8 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             "toJson",
             "(Ljava/lang/Object;Ljava/lang/reflect/Type;Lcom/google/gson/stream/JsonWriter;)V",
         ) => {
-            let tree = if is_element_class(rt.class_of(a(1))) {
-                a(1)
-            } else {
-                to_tree(rt, a(1), ANY, true, 0)
-            };
+            let declared = Some(crate::jtypes::signature(rt, a(2)));
+            let tree = tree_of(rt, this, a(1), declared, true);
             to_writer(rt, this, a(3), tree);
             V::Void
         }
@@ -1514,14 +2088,47 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             r
         }
         ("toJsonTree", _) if is_element_class(rt.class_of(a(1))) => deep_copy(rt, a(1)),
-        // An object of the mod's own, or a collection of them: field by field ([`to_tree`]).
-        ("toJsonTree", _) => to_tree(rt, a(1), ANY, style.nulls, 0),
+        // An object of the mod's own, or a collection of them: field by field ([`to_tree_in`]),
+        // or as an adapter registered with this `Gson` writes it.
+        ("toJsonTree", _) => {
+            let declared = (args.len() > 2).then(|| crate::jtypes::signature(rt, a(2)));
+            tree_of(rt, this, a(1), declared, style.nulls)
+        }
+        // The adapter for a type: the mod's own where it registered one for exactly that type,
+        // else one of the runtime's that writes and reads as this `Gson` does.
+        ("getAdapter", _) => {
+            let sig = crate::jtypes::signature(rt, a(1));
+            let registered = chain(rt, this).into_iter().find(|e| {
+                e.mode == EXACT && e.sig == sig && rt.instance_of(e.adapter, TYPE_ADAPTER)
+            });
+            match registered {
+                Some(e) => e.adapter,
+                None => own_adapter(rt, this, &sig, 0),
+            }
+        }
+        // The adapter that would answer were `skipPast` not registered: the ones after it. One
+        // that isn't registered leaves only Gson's own.
+        ("getDelegateAdapter", _) => {
+            let sig = crate::jtypes::signature(rt, a(2));
+            let all = chain(rt, this);
+            let from = all
+                .iter()
+                .position(|e| e.adapter == a(1))
+                .map_or(all.len(), |i| i + 1);
+            own_adapter(rt, this, &sig, from)
+        }
+        ("newBuilder", _) => {
+            let b = rt.new_object(BUILDER);
+            copy_settings(rt, this, b);
+            b
+        }
         (
             "toJson",
             "(Ljava/lang/Object;)Ljava/lang/String;"
             | "(Ljava/lang/Object;Ljava/lang/reflect/Type;)Ljava/lang/String;",
         ) => {
-            let tree = to_tree(rt, a(1), ANY, style.nulls, 0);
+            let declared = (args.len() > 2).then(|| crate::jtypes::signature(rt, a(2)));
+            let tree = tree_of(rt, this, a(1), declared, style.nulls);
             let s = write(rt, tree, style);
             rt.string(&s)
         }
@@ -1530,7 +2137,8 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             "(Ljava/lang/Object;Ljava/lang/Appendable;)V"
             | "(Ljava/lang/Object;Ljava/lang/reflect/Type;Ljava/lang/Appendable;)V",
         ) => {
-            let tree = to_tree(rt, a(1), ANY, style.nulls, 0);
+            let declared = (args.len() > 3).then(|| crate::jtypes::signature(rt, a(2)));
+            let tree = tree_of(rt, this, a(1), declared, style.nulls);
             let s = write(rt, tree, style);
             let (s, out) = (rt.string(&s), a(args.len() - 1));
             let append = if matches!(
@@ -1545,10 +2153,12 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             V::Void
         }
         ("fromJson", _) => {
-            let class = rt.str_of(a(2)).unwrap_or("").to_owned();
+            // The type asked for: a class, a type with its arguments (a `TypeToken`'s), nothing.
+            let ty = crate::jtypes::signature(rt, a(2));
+            let class = crate::jtypes::parts(&ty).0;
             if !tree_class(&class) {
                 // Into a class of the mod's own (or a map, a list): the tree, read by the class
-                // ([`from_tree`]). A `Type` that is no class is read as its tree's own shape.
+                // ([`from_tree_in`]). A `Type` that is no class is read as its tree's own shape.
                 let tree = if is_element_class(rt.class_of(a(1))) {
                     a(1)
                 } else if a(1).r() == 0 {
@@ -1569,12 +2179,7 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
                         Ok(Some((v, _))) => v,
                     }
                 };
-                let ty = if class.is_empty() {
-                    ANY.to_owned()
-                } else {
-                    crate::jlang::descriptor_of(&class)
-                };
-                return Some(from_tree(rt, tree, &ty, 0));
+                return Some(from_tree_in(rt, this, tree, &ty, 0, 0));
             }
             if is_element_class(rt.class_of(a(1))) {
                 let v = a(1);
@@ -1832,18 +2437,145 @@ fn generic(ty: &str) -> (String, Vec<String>) {
     (format!("{};", &ty[..open]), args)
 }
 
-/// The fields Gson reads and writes of an object of mod class `class`: its own and its
-/// superclasses' that are neither static, transient nor the compiler's, each by its name, its
-/// name in JSON (`@SerializedName`, else the same) and its type ([`generic`]'s input).
-fn bound_fields(rt: &mut Rt, class: &str) -> Vec<(&'static str, String, String)> {
+const NAMING_POLICY: &str = "com/google/gson/FieldNamingPolicy";
+const FIELD_ATTRIBUTES: &str = "com/google/gson/FieldAttributes";
+
+/// A field's name in JSON under one of Gson's naming policies (`FieldNamingPolicy`): the name's
+/// words, which begin at its capitals, set apart or its first letter raised.
+fn policy_name(policy: &str, name: &str) -> String {
+    let apart = |separator: char| {
+        let mut out = String::new();
+        for c in name.chars() {
+            if c.is_uppercase() && !out.is_empty() {
+                out.push(separator);
+            }
+            out.push(c);
+        }
+        out
+    };
+    let raised = |s: String| match s.char_indices().find(|(_, c)| c.is_alphabetic()) {
+        Some((i, c)) if !c.is_uppercase() => {
+            format!("{}{}{}", &s[..i], c.to_uppercase(), &s[i + c.len_utf8()..])
+        }
+        _ => s,
+    };
+    match policy {
+        "UPPER_CAMEL_CASE" => raised(name.to_owned()),
+        "UPPER_CAMEL_CASE_WITH_SPACES" => raised(apart(' ')),
+        "UPPER_CASE_WITH_UNDERSCORES" => apart('_').to_uppercase(),
+        "LOWER_CASE_WITH_UNDERSCORES" => apart('_').to_lowercase(),
+        "LOWER_CASE_WITH_DASHES" => apart('-').to_lowercase(),
+        "LOWER_CASE_WITH_DOTS" => apart('.').to_lowercase(),
+        _ => name.to_owned(),
+    }
+}
+
+/// What an `ExclusionStrategy` is shown of a field: its class, its name, its type, its modifiers.
+fn field_attributes(rt: &mut Rt, class: &str, name: &str, ty: &str, access: u16) -> V {
+    let f = rt.new_object(FIELD_ATTRIBUTES);
+    for (field, text) in [("$class", class), ("$name", name), ("$type", ty)] {
+        let v = rt.string(text);
+        rt.put_field(f, field, v);
+    }
+    rt.put_field(f, "$access", V::I(i32::from(access)));
+    f
+}
+
+fn field_attributes_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let held = |rt: &Rt, field: &'static str| {
+        rt.str_of(rt.get_field(this, field))
+            .unwrap_or("")
+            .to_owned()
+    };
+    Some(match name {
+        "getName" => rt.get_field(this, "$name"),
+        "getDeclaringClass" => {
+            let class = held(rt, "$class");
+            rt.class_literal(&class)
+        }
+        "getDeclaredType" => {
+            let ty = held(rt, "$type");
+            crate::jtypes::of(rt, &ty)
+        }
+        "getDeclaredClass" => {
+            let raw = generic(&held(rt, "$type")).0;
+            rt.class_literal(crate::jlang::descriptor_class(&raw))
+        }
+        "hasModifier" => V::I((rt.get_field(this, "$access").i() & a(1).i() != 0) as i32),
+        "getAnnotation" => {
+            let (class, field, wanted) = (
+                held(rt, "$class"),
+                held(rt, "$name"),
+                rt.str_of(a(1)).unwrap_or("").to_owned(),
+            );
+            crate::annotations::on_field(rt, &class, &field)
+                .into_iter()
+                .find(|&n| rt.class_of(n) == wanted)
+                .unwrap_or(V::NULL)
+        }
+        "getAnnotations" => {
+            let (class, field) = (held(rt, "$class"), held(rt, "$name"));
+            let all = crate::annotations::on_field(rt, &class, &field);
+            crate::jutil::new_list(rt, all)
+        }
+        _ => return None,
+    })
+}
+
+/// The fields `gson` reads (or, `writing`, writes) of an object of mod class `class`: its own and
+/// its superclasses', less the compiler's, those with a modifier that keeps a field out
+/// (`transient` and `static`, unless the builder named others) and those an `ExclusionStrategy`
+/// of the Gson's skips, by the field or by its class. Each by its name, its name in JSON
+/// (`@SerializedName`, else as the Gson's naming policy or strategy has it, else the same) and
+/// its type ([`generic`]'s input).
+fn bound_fields(
+    rt: &mut Rt,
+    gson: V,
+    class: &str,
+    writing: bool,
+) -> Vec<(&'static str, String, String)> {
     let mut out: Vec<(&'static str, String, String)> = Vec::new();
     let mut c = class.to_owned();
+    let excluded = match rt.get_field(gson, "$modifiers") {
+        V::I(mask) if gson.r() != 0 => mask as u16,
+        _ => 0x88,
+    };
+    let policy = rt.str_of(rt.get_field(gson, "$naming")).map(str::to_owned);
+    let namer = rt.get_field(gson, "$namer");
+    let skips = match rt.get_field(
+        gson,
+        if writing {
+            "$skipWriting"
+        } else {
+            "$skipReading"
+        },
+    ) {
+        list if gson.r() != 0 && list.r() != 0 => crate::jutil::elements(rt, list)
+            .into_iter()
+            .flat_map(|e| crate::jutil::elements(rt, e))
+            .collect(),
+        _ => Vec::new(),
+    };
     while rt.is_mod_class(&c) {
         for (access, name, desc, signature) in
             crate::jlang::typed_fields(rt, &c).unwrap_or_default()
         {
-            if access & 0x1088 != 0 || out.iter().any(|f| f.0 == name) {
+            if access & 0x1000 != 0 || access & excluded != 0 || out.iter().any(|f| f.0 == name) {
                 continue;
+            }
+            let ty = signature.unwrap_or(desc);
+            if !skips.is_empty() {
+                let shown = field_attributes(rt, &c, &name, &ty, access);
+                let of = rt.class_literal(crate::jlang::descriptor_class(&generic(&ty).0));
+                let skipped = skips.iter().any(|&strategy| {
+                    rt.call_functional("com/google/gson/ExclusionStrategy.shouldSkipClass.(Ljava/lang/Class;)Z", strategy, &[of]).i() != 0
+                        || rt.call_functional("com/google/gson/ExclusionStrategy.shouldSkipField.(Lcom/google/gson/FieldAttributes;)Z", strategy, &[shown]).i() != 0
+                });
+                if skipped {
+                    continue;
+                }
             }
             let named = crate::annotations::on_field(rt, &c, &name)
                 .into_iter()
@@ -1856,9 +2588,25 @@ fn bound_fields(rt: &mut Rt, class: &str) -> Vec<(&'static str, String, String)>
                         &[a],
                     )
                 })
-                .and_then(|v| rt.str_of(v).map(str::to_owned))
-                .unwrap_or_else(|| name.clone());
-            out.push((rt.static_key(&name), json, signature.unwrap_or(desc)));
+                .and_then(|v| rt.str_of(v).map(str::to_owned));
+            let json = match json {
+                Some(json) => json,
+                None if namer.r() != 0 && gson.r() != 0 => {
+                    let (holder, field_name) = (rt.class_literal(&c), rt.string(&name));
+                    let field = crate::api::call(
+                        rt,
+                        "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+                        &[holder, field_name],
+                    );
+                    let translated = rt.call_functional("com/google/gson/FieldNamingStrategy.translateName.(Ljava/lang/reflect/Field;)Ljava/lang/String;", namer, &[field]);
+                    rt.str_of(translated)
+                        .map_or_else(|| name.clone(), str::to_owned)
+                }
+                None => policy
+                    .as_deref()
+                    .map_or_else(|| name.clone(), |p| policy_name(p, &name)),
+            };
+            out.push((rt.static_key(&name), json, ty));
         }
         match rt.supers.get(c.as_str()) {
             Some(&sup) => c = sup.to_owned(),
@@ -1872,7 +2620,11 @@ fn bound_fields(rt: &mut Rt, class: &str) -> Vec<(&'static str, String, String)>
 /// signature): a primitive or its box, a string, an enum's constant by name, an array or a
 /// collection element by element, a map by its keys' text, a tree as itself, and an object of a
 /// mod's own class field by field ([`bound_fields`]; one left null is left out unless `nulls`).
-pub(crate) fn to_tree(rt: &mut Rt, v: V, ty: &str, nulls: bool, depth: usize) -> V {
+///
+/// As `gson` writes it: one of its adapters, from the one at `from` on, answers first
+/// ([`adapter_for`]), for the value's own class where the type says no more than a class, then
+/// for the type. What a value holds is written by all of them.
+fn to_tree_in(rt: &mut Rt, gson: V, v: V, ty: &str, nulls: bool, depth: usize, from: usize) -> V {
     match ty {
         "Z" => return boolean(rt, v.i() != 0),
         "C" => {
@@ -1888,13 +2640,30 @@ pub(crate) fn to_tree(rt: &mut Rt, v: V, ty: &str, nulls: bool, depth: usize) ->
     if matches!(v, V::I(_) | V::J(_) | V::F(_) | V::D(_)) {
         return number(rt, v);
     }
-    if v.r() == 0 || depth > DEPTH {
+    if depth > DEPTH {
+        return null(rt);
+    }
+    if v.r() != 0 && is_element_class(rt.class_of(v)) {
+        return v;
+    }
+    if has_adapters(rt, gson) && ty.starts_with(['L', '[']) {
+        let mut asked: Vec<String> = Vec::new();
+        if v.r() != 0 && !ty.contains('<') && from == 0 {
+            asked.push(format!("L{};", rt.class_of(v)));
+        }
+        if ty != ANY && !asked.iter().any(|a| a == ty) {
+            asked.push(ty.to_owned());
+        }
+        for sig in asked {
+            if let Some(adapter) = adapter_for(rt, gson, &sig, from, true) {
+                return write_with(rt, gson, adapter, v, &sig);
+            }
+        }
+    }
+    if v.r() == 0 {
         return null(rt);
     }
     let class = rt.class_of(v);
-    if is_element_class(class) {
-        return v;
-    }
     if let Some(text) = rt.str_of(v).map(str::to_owned) {
         return string(rt, &text);
     }
@@ -1930,7 +2699,7 @@ pub(crate) fn to_tree(rt: &mut Rt, v: V, ty: &str, nulls: bool, depth: usize) ->
             let of = ty.strip_prefix('[').map_or_else(|| arg(0), str::to_owned);
             let mut items = Vec::new();
             for e in crate::jutil::elements(rt, v) {
-                items.push(to_tree(rt, e, &of, nulls, depth + 1));
+                items.push(to_tree_in(rt, gson, e, &of, nulls, depth + 1, 0));
             }
             new_array(rt, items)
         }
@@ -1938,25 +2707,28 @@ pub(crate) fn to_tree(rt: &mut Rt, v: V, ty: &str, nulls: bool, depth: usize) ->
             let (o, of) = (new_object(rt), arg(1));
             for (k, e) in crate::jutil::table_pairs(rt, v) {
                 // A key is its text: a string, a number, an enum's constant by name.
-                let key = to_tree(rt, k, ANY, false, depth + 1);
+                let key = to_tree_in(rt, gson, k, ANY, false, depth + 1, 0);
                 let key = if rt.class_of(key) == PRIMITIVE {
                     primitive_as(rt, key, "getAsString")
                 } else {
                     rt.string(&rt.to_java_string(k, 'L'))
                 };
-                let e = to_tree(rt, e, &of, nulls, depth + 1);
+                let e = to_tree_in(rt, gson, e, &of, nulls, depth + 1, 0);
                 put(rt, o, key, e);
             }
             o
         }
         None if rt.is_mod_class(class) => {
             let o = new_object(rt);
-            for (field, json, of) in bound_fields(rt, class) {
+            for (field, json, of) in bound_fields(rt, gson, class, true) {
                 let value = rt.get_field(v, field);
                 if value.r() == 0 && !nulls && of.len() > 1 {
                     continue;
                 }
-                let (key, e) = (rt.string(&json), to_tree(rt, value, &of, nulls, depth + 1));
+                let (key, e) = (
+                    rt.string(&json),
+                    to_tree_in(rt, gson, value, &of, nulls, depth + 1, 0),
+                );
                 put(rt, o, key, e);
             }
             o
@@ -1969,37 +2741,31 @@ pub(crate) fn to_tree(rt: &mut Rt, v: V, ty: &str, nulls: bool, depth: usize) ->
     }
 }
 
-/// What Gson reads a tree as when the type says only `Object`: a string, a boolean, a number (a
-/// whole one as an `Integer` or a `Long`, since a list's element type isn't always known here and
-/// an `int` read back from a `Double` would be wrong more often), a list, a map.
-fn natural(rt: &mut Rt, json: V, depth: usize) -> V {
+/// What Gson reads a tree as when the type says only `Object`: a string, a boolean, a number as
+/// a `Double` (Gson's default for a number whose type nothing names: `1` is read back `1.0`), a
+/// list, a map.
+fn natural(rt: &mut Rt, gson: V, json: V, depth: usize) -> V {
     match rt.class_of(json) {
         PRIMITIVE => match kind(rt, json) {
             STRING => primitive_as(rt, json, "getAsString"),
-            BOOLEAN => from_tree(rt, json, "Ljava/lang/Boolean;", depth),
-            _ => {
-                let d = primitive_as(rt, json, "getAsDouble").d();
-                let ty = if d.fract() != 0.0 || d.abs() >= 9.0e18 {
-                    "Ljava/lang/Double;"
-                } else if d.abs() <= f64::from(i32::MAX) {
-                    "Ljava/lang/Integer;"
-                } else {
-                    "Ljava/lang/Long;"
-                };
-                from_tree(rt, json, ty, depth)
-            }
+            BOOLEAN => from_tree_in(rt, gson, json, "Ljava/lang/Boolean;", depth, 0),
+            _ => from_tree_in(rt, gson, json, "Ljava/lang/Double;", depth, 0),
         },
-        ARRAY => from_tree(rt, json, "Ljava/util/List;", depth),
-        OBJECT => from_tree(rt, json, "Ljava/util/Map;", depth),
+        ARRAY => from_tree_in(rt, gson, json, "Ljava/util/List;", depth, 0),
+        OBJECT => from_tree_in(rt, gson, json, "Ljava/util/Map;", depth, 0),
         _ => V::NULL,
     }
 }
 
 /// A tree as the Java value of type `ty` (a descriptor or a generic signature), as Gson reads it:
-/// the reverse of [`to_tree`]. An object of a mod's own class is made by its constructor without
+/// the reverse of [`to_tree_in`]. An object of a mod's own class is made by its constructor without
 /// arguments, or with none run where it has none, and then each field the tree has a member for
 /// is set; a field the tree doesn't name keeps what the constructor gave it.
-pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
+///
+/// As `gson` reads it: one of its adapters for the type, from the one at `from` on, reads first
+/// ([`adapter_for`]); an object is made by the `InstanceCreator` registered for its type where
+/// there is one.
+fn from_tree_in(rt: &mut Rt, gson: V, json: V, ty: &str, depth: usize, from: usize) -> V {
     let (raw, args) = generic(ty);
     let arg = |i: usize| args.get(i).cloned().unwrap_or_else(|| ANY.to_owned());
     let absent = json.r() == 0 || rt.class_of(json) == NULL;
@@ -2028,7 +2794,19 @@ pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
     if raw.len() == 1 {
         return primitive(rt, raw.chars().next().unwrap_or('I'));
     }
-    if absent || depth > DEPTH {
+    if depth > DEPTH {
+        return V::NULL;
+    }
+    // What the type says only `Object` of, and a tree, are Gson's own to read before any
+    // adapter of the mod's.
+    if has_adapters(rt, gson)
+        && raw != ANY
+        && !tree_class(raw.trim_start_matches('L').trim_end_matches(';'))
+        && let Some(adapter) = adapter_for(rt, gson, ty, from, false)
+    {
+        return read_with(rt, gson, adapter, json, ty);
+    }
+    if absent {
         return V::NULL;
     }
     let boxed = match raw.as_str() {
@@ -2049,13 +2827,13 @@ pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
     if let Some(of) = raw.strip_prefix('[') {
         let mut out = Vec::new();
         for e in items(rt, json) {
-            out.push(from_tree(rt, e, of, depth + 1));
+            out.push(from_tree_in(rt, gson, e, of, depth + 1, 0));
         }
         return rt.alloc("[", Data::Array(out));
     }
     let class = raw.trim_start_matches('L').trim_end_matches(';').to_owned();
     if raw == ANY {
-        return natural(rt, json, depth);
+        return natural(rt, gson, json, depth);
     }
     if class == "java/lang/String" || class == "java/lang/CharSequence" {
         return if scalar {
@@ -2090,7 +2868,7 @@ pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
         let of = arg(0);
         let mut out = Vec::new();
         for e in items(rt, json) {
-            out.push(from_tree(rt, e, &of, depth + 1));
+            out.push(from_tree_in(rt, gson, e, &of, depth + 1, 0));
         }
         return if simple.ends_with("Set") {
             crate::jutil::new_set_of(rt, &out)
@@ -2120,14 +2898,14 @@ pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
                 } else {
                     named
                 };
-                from_tree(rt, read, &key_ty, depth + 1)
+                from_tree_in(rt, gson, read, &key_ty, depth + 1, 0)
             };
-            let e = from_tree(rt, e, &of, depth + 1);
+            let e = from_tree_in(rt, gson, e, &of, depth + 1, 0);
             crate::jutil::table_put(rt, map, key, e);
         }
         return map;
     }
-    let made = rt.reflect(&class, "<init>.()V", &[]).or_else(|| {
+    let made = created(rt, gson, ty).or_else(|| rt.reflect(&class, "<init>.()V", &[])).or_else(|| {
         if rt.thrown.is_some() {
             None
         } else {
@@ -2137,7 +2915,7 @@ pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
     let Some(object) = made else {
         return V::NULL;
     };
-    for (field, name, of) in bound_fields(rt, &class) {
+    for (field, name, of) in bound_fields(rt, gson, &class, false) {
         let key = rt.string(&name);
         let Some(member) = crate::jutil::table_get(rt, json, key) else {
             continue;
@@ -2146,7 +2924,7 @@ pub(crate) fn from_tree(rt: &mut Rt, json: V, ty: &str, depth: usize) -> V {
         if of.len() == 1 && rt.class_of(member) != PRIMITIVE {
             continue;
         }
-        let value = from_tree(rt, member, &of, depth + 1);
+        let value = from_tree_in(rt, gson, member, &of, depth + 1, 0);
         rt.put_field(object, field, value);
     }
     object
@@ -2258,7 +3036,7 @@ mod tests {
                 r#"{"speed":3,"name":"fast","ratio":0.5,"on":true,"kept":11,"tags":["a","b"],"entries":[{"id":"x","weight":2},{"id":"y","weight":0}],"limits":{"a":1,"b":20}}"#
             )
         );
-        // With no class to read by, the tree's own shape: maps, lists, whole numbers as integers.
+        // With no class to read by, the tree's own shape: maps, lists, every number a `Double`.
         let object = rt.class_literal("java/lang/Object");
         let plain = call(
             &mut rt,
@@ -2269,7 +3047,7 @@ mod tests {
         let three = crate::jutil::table_get(&mut rt, plain, speed).unwrap();
         assert_eq!(
             (rt.class_of(three), rt.get_field(three, "value")),
-            ("java/lang/Integer", V::I(3))
+            ("java/lang/Double", V::D(3.0))
         );
         let listed = crate::jutil::new_list(&mut rt, vec![config]);
         let tree = call(

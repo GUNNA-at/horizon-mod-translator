@@ -10102,6 +10102,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Found by it, for the next change of the runtime's core: an object of the API's in a string
     concatenation (`"" + jsonObject`) prints as `Class@hash`, not as its `toString`.
   - Molten Vents alone: constructed, 12 blocks. Tests: 782 compat, 16 compat-core, 31 translator.
+- [x] 2026-11-10 Part 163: Gson's adapters and Java's generic types. What a mod registered with a
+  `GsonBuilder` was dropped (the builder answered with itself): 18 of the pack's jars call
+  `registerTypeAdapter`, 5 `registerTypeHierarchyAdapter`, 3 `registerTypeAdapterFactory`, and their
+  values were written and read field by field instead. A `TypeToken` (17 jars) had no answer, so a
+  `List<Entry>` asked for through one was read as a list of maps. 21 jars read a type's arguments
+  (`ParameterizedType.getActualTypeArguments`) and got the class alone.
+  - `jtypes`: `java.lang.reflect.Type` beside `Class`, from the generic signatures the translator
+    already keeps for a class, its fields and its record components: `ParameterizedType`,
+    `GenericArrayType`, `WildcardType`, `TypeVariable`, one object for each type, with the names
+    Java prints. `Field.getGenericType`, `Class.getGenericSuperclass`, `getGenericInterfaces` and
+    `getTypeParameters` answer with them.
+  - `TypeToken`: the type argument its (anonymous) class names, `get`, `getParameterized`,
+    `getArray`, `getType`, `getRawType`. `Gson.fromJson` and `toJson` take a class, a type or a
+    token.
+  - A `Gson` asks its adapters in Gson's order before it maps a value itself: the type adapters,
+    the serializers and the factories, last registered first, then the hierarchy's; for the
+    value's own class where the type says no more than a class, then for the type. A
+    `JsonSerializer` or `JsonDeserializer` gets the type and a context that is the `Gson`
+    (`serialize`, `deserialize`); a `TypeAdapter` writes into and reads from a tree by Gson's own
+    code (Part 162); an `InstanceCreator` makes the object; a `TypeAdapterFactory` is asked once
+    for each type. `getAdapter` and `getDelegateAdapter` hand out an adapter of the runtime's own
+    that does what the `Gson` does from that place in the order on.
+  - Which fields are bound: `setFieldNamingPolicy` (Gson's seven), `setFieldNamingStrategy`,
+    `excludeFieldsWithModifiers`, `setExclusionStrategies` and the two one-way forms, with the
+    `FieldAttributes` a strategy is shown.
+  - A number read where the type says only `Object` is a `Double`, as Gson reads it (`{"a": 1}`
+    into a `Map` prints `{a=1.0}`); it was an `Integer` here.
+  - `tests/gson.rs` now compares 70 texts with the JVM's: objects with lists, maps, arrays, enums
+    and nested objects both ways, `Object`, `Map` and `List` read back, tokens and their types'
+    names, each kind of adapter and their order, a factory with its delegate, the naming policies
+    and strategies.
+  - Tests: 784 compat (the types' own two), 16 compat-core, 31 translator.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -1085,8 +1085,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
                 V::I(enum_constants(rt, &n).is_some() as i32)
             }
-            "getSuperclass" => {
+            "getSuperclass" | "getGenericSuperclass" => {
                 let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                // With its type arguments, where the class names any for it.
+                if name == "getGenericSuperclass"
+                    && let Some(up) = crate::jtypes::generic_superclass(rt, &n)
+                {
+                    return Some(up);
+                }
                 match rt.supers.get(n.as_str()).copied() {
                     Some(sup) => class_object(rt, sup),
                     None if n == "java/lang/Object" => V::NULL,
@@ -1172,8 +1178,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "hashCode" => V::I(string_hash(rt.str_of(a(0)).unwrap_or(""))),
             "equals" => V::I((rt.str_of(a(0)) == rt.str_of(a(1))) as i32),
             // The interfaces a mod's class names, its package, and the class it is nested in.
-            "getInterfaces" => {
+            "getInterfaces" | "getGenericInterfaces" => {
                 let n = rt.str_of(a(0)).unwrap_or("").replace('.', "/");
+                if name == "getGenericInterfaces"
+                    && let Some(all) = crate::jtypes::generic_interfaces(rt, &n)
+                {
+                    return Some(all);
+                }
                 let names: Vec<&'static str> = rt
                     .interfaces
                     .get(n.as_str())
@@ -1181,6 +1192,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     .unwrap_or_default();
                 let classes: Vec<V> = names.into_iter().map(|i| class_object(rt, i)).collect();
                 rt.alloc("[Ljava/lang/Class;", Data::Array(classes))
+            }
+            "getTypeParameters" => {
+                let n = rt.str_of(a(0)).unwrap_or("").to_owned();
+                crate::jtypes::type_parameters(rt, &n)
             }
             "getPackage" => {
                 let n = rt.str_of(a(0)).unwrap_or("").replace('/', ".");
@@ -1349,9 +1364,17 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getName" => rt.get_field(a(0), "$name"),
             "getDeclaringRecord" => rt.get_field(a(0), "$class"),
             "getGenericSignature" => rt.get_field(a(0), "$signature"),
-            "getType" | "getGenericType" => {
+            "getType" => {
                 let desc = text(rt, rt.get_field(a(0), "$desc"));
                 rt.class_literal(descriptor_class(&desc))
+            }
+            // With its type arguments where the record declares any (`List<Entry>`).
+            "getGenericType" => {
+                let sig = match rt.str_of(rt.get_field(a(0), "$signature")) {
+                    Some(sig) if !sig.is_empty() => sig.to_owned(),
+                    _ => text(rt, rt.get_field(a(0), "$desc")),
+                };
+                crate::jtypes::of(rt, &sig)
             }
             // The component's accessor: the method of its name, with no parameters.
             "getAccessor" => {
@@ -1377,6 +1400,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let (class, name, _) = field_parts(rt, a(0));
                 let (_, desc) = find_field(rt, &class, name)?;
                 rt.class_literal(descriptor_class(&desc))
+            }
+            // The field's type with its type arguments, where the class declares any.
+            "getGenericType" => {
+                let (class, name, _) = field_parts(rt, a(0));
+                let mut at = class.clone();
+                let sig = loop {
+                    let fields = typed_fields(rt, &at)?;
+                    if let Some(f) = fields.into_iter().find(|f| f.1 == name) {
+                        break f.3.unwrap_or(f.2);
+                    }
+                    at = rt.supers.get(at.as_str()).copied()?.to_owned();
+                };
+                crate::jtypes::of(rt, &sig)
             }
             "getModifiers" => {
                 let (class, name, _) = field_parts(rt, a(0));

@@ -213,6 +213,15 @@ fn java_is_a(c: &str, class: &str) -> bool {
                 | "java/util/concurrent/atomic/AtomicInteger" | "java/util/concurrent/atomic/AtomicLong" | "java/math/BigInteger" | "java/math/BigDecimal"
         ),
         "java/lang/CharSequence" => matches!(c, "java/lang/String" | "java/lang/StringBuilder" | "java/lang/StringBuffer"),
+        // A class is a type; so are the four kinds a generic signature spells ([`crate::jtypes`]).
+        "java/lang/reflect/Type" => matches!(
+            c,
+            "java/lang/Class"
+                | crate::jtypes::PARAMETERIZED
+                | crate::jtypes::GENERIC_ARRAY
+                | crate::jtypes::WILDCARD
+                | crate::jtypes::VARIABLE
+        ),
         "java/lang/Comparable" => matches!(
             c,
             "java/lang/String" | "java/lang/Integer" | "java/lang/Long" | "java/lang/Float" | "java/lang/Double" | "java/lang/Short" | "java/lang/Byte"
@@ -356,7 +365,20 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 30] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 31] = [
+    // How Gson names a field in JSON (`GsonBuilder.setFieldNamingPolicy`), by the policy's name.
+    (
+        "com/google/gson/FieldNamingPolicy",
+        &[
+            "IDENTITY",
+            "UPPER_CAMEL_CASE",
+            "UPPER_CAMEL_CASE_WITH_SPACES",
+            "UPPER_CASE_WITH_UNDERSCORES",
+            "LOWER_CASE_WITH_UNDERSCORES",
+            "LOWER_CASE_WITH_DASHES",
+            "LOWER_CASE_WITH_DOTS",
+        ],
+    ),
     // The side a game runs on: a `switch` over it builds its table from `values()`.
     ("net/neoforged/api/distmarker/Dist", &["CLIENT", "DEDICATED_SERVER"]),
     // How a file is opened, copied and walked: the file calls read these by name.

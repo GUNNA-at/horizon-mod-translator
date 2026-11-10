@@ -24,21 +24,46 @@ const CASES: &[(&str, &[&str])] = &[
     ),
     ("adapter", &["0", "1"]),
     ("tree", &["0", "1", "2"]),
+    ("reflective", &["0", "1"]),
+    ("natural", &["0"]),
+    ("tokens", &["0"]),
+    ("adapters", &["0", "1", "2", "3", "4", "5"]),
+    ("factories", &["0"]),
+    ("policy", &["0", "1", "2", "3", "4", "5"]),
 ];
 
 const FIXTURE: &str = r##"
+import com.google.gson.ExclusionStrategy;
+import com.google.gson.FieldAttributes;
+import com.google.gson.FieldNamingPolicy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.InstanceCreator;
+import com.google.gson.JsonDeserializationContext;
+import com.google.gson.JsonDeserializer;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonSerializationContext;
+import com.google.gson.JsonSerializer;
 import com.google.gson.TypeAdapter;
+import com.google.gson.TypeAdapterFactory;
+import com.google.gson.annotations.SerializedName;
+import com.google.gson.reflect.TypeToken;
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
 import com.google.gson.stream.JsonWriter;
 import java.io.IOException;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 public class GsonFixture {
     /// One line for a text of several.
@@ -267,6 +292,220 @@ public class GsonFixture {
             TypeAdapter<Point> safe = a.nullSafe();
             return text + " | " + tree.toString() + " | " + back.x + "," + back.y + "," + back.label + " | " + fromTree.x + fromTree.label
                 + " | " + safe.toJson(null) + " | " + safe.fromJson("null") + " | " + safe.toJsonTree(null).toString();
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
+
+    enum Kind { SPUR, BEVEL }
+
+    static class Gear {
+        String name = "unnamed";
+        int teeth;
+        double ratio = 1.0;
+        boolean on;
+        List<String> tags = new ArrayList<>();
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        Point at;
+        Point[] path;
+        transient int cache = 5;
+        static int SHARED = 1;
+        Kind kind;
+        Gear() {}
+    }
+
+    static String show(Point p) {
+        return p == null ? "null" : p.x + ":" + p.y + ":" + p.label;
+    }
+
+    static String show(Gear g) {
+        return g.name + "/" + g.teeth + "/" + g.ratio + "/" + g.on + "/" + g.tags + "/" + g.counts + "/" + show(g.at) + "/"
+            + (g.path == null ? "null" : g.path.length + show(g.path[0])) + "/" + g.cache + "/" + g.kind;
+    }
+
+    public static String reflective(int n) {
+        try {
+            Gson gson = n == 1 ? new GsonBuilder().serializeNulls().setPrettyPrinting().create() : new Gson();
+            String text = "{\"name\": \"big\", \"teeth\": 12, \"ratio\": 0.25, \"on\": true, \"tags\": [\"a\", \"b\"], \"counts\": {\"x\": 1, \"y\": 20},"
+                + " \"at\": {\"x\": 3, \"y\": 4, \"label\": \"c\"}, \"path\": [{\"x\": 1}, null], \"cache\": 9, \"kind\": \"BEVEL\", \"unknown\": [1]}";
+            Gear g = gson.fromJson(text, Gear.class);
+            Gear empty = gson.fromJson("{}", Gear.class);
+            return show(g) + " | " + gson.toJson(g) + " | " + show(empty) + " | " + gson.toJson(empty) + " | "
+                + gson.toJsonTree(g).getAsJsonObject().get("counts").toString();
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
+
+    public static String natural(int n) {
+        try {
+            Gson gson = new Gson();
+            String text = "{\"a\": 1, \"b\": [1, 2.5, \"x\", true, null, {\"c\": 10000000000}], \"d\": {\"e\": -0.0}}";
+            Object any = gson.fromJson(text, Object.class);
+            Map<?, ?> map = gson.fromJson(text, Map.class);
+            List<?> list = gson.fromJson("[1, [2], {\"k\": 3}]", List.class);
+            Object first = ((Map<?, ?>) any).get("a");
+            return any + " | " + map.get("b") + " | " + list + " | " + first.getClass().getSimpleName() + " | " + gson.toJson(any) + " | " + gson.toJson(list);
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
+
+    public static String tokens(int n) {
+        try {
+            Gson gson = new Gson();
+            Type listOfPoints = new TypeToken<List<Point>>() {}.getType();
+            Type mapType = new TypeToken<Map<String, List<Integer>>>() {}.getType();
+            List<Point> points = gson.fromJson("[{\"x\": 1, \"y\": 2, \"label\": \"a\"}, {\"x\": 3}]", listOfPoints);
+            Map<String, List<Integer>> m = gson.fromJson("{\"a\": [1, 2], \"b\": []}", mapType);
+            int sum = 0;
+            for (Point p : points) sum += p.x + p.y;
+            for (List<Integer> l : m.values()) for (int i : l) sum += i;
+            ParameterizedType pt = (ParameterizedType) mapType;
+            TypeToken<?> made = TypeToken.getParameterized(Map.class, String.class, Point.class);
+            return sum + " | " + points.get(0).label + points.size() + " | " + m + " | " + listOfPoints.getTypeName() + " | " + pt.getRawType().getTypeName()
+                + " | " + pt.getActualTypeArguments()[1].getTypeName() + " | " + new TypeToken<List<Point>>() {}.getRawType().getName() + " | "
+                + made.getType().getTypeName() + " | " + gson.toJson(points, listOfPoints) + " | " + (listOfPoints instanceof Class)
+                + made.equals(TypeToken.getParameterized(Map.class, String.class, Point.class)) + (mapType instanceof ParameterizedType);
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
+
+    static class PointJson implements JsonSerializer<Point>, JsonDeserializer<Point> {
+        @Override public JsonElement serialize(Point p, Type type, JsonSerializationContext context) {
+            JsonObject o = new JsonObject();
+            o.addProperty("p", p.x + ";" + p.y);
+            o.add("label", context.serialize(p.label));
+            o.addProperty("type", type.getTypeName());
+            return o;
+        }
+
+        @Override public Point deserialize(JsonElement json, Type type, JsonDeserializationContext context) {
+            JsonObject o = json.getAsJsonObject();
+            String[] xy = o.get("p").getAsString().split(";");
+            String label = context.deserialize(o.get("label"), String.class);
+            return new Point(Integer.parseInt(xy[0]), Integer.parseInt(xy[1]), label);
+        }
+    }
+
+    static class Holder {
+        Point main;
+        List<Point> all = new ArrayList<>();
+        Object any;
+        Kind kind = Kind.SPUR;
+    }
+
+    public static String adapters(int n) {
+        try {
+            GsonBuilder b = new GsonBuilder();
+            String lone = "{\"x\": 1, \"label\": \"q\"}";
+            switch (n) {
+                case 0: b.registerTypeAdapter(Point.class, new PointJson()); lone = "{\"p\": \"1;2\", \"label\": \"q\"}"; break;
+                case 1: b.registerTypeAdapter(Point.class, new PointAdapter()); lone = "{\"at\": \"1,2\", \"label\": \"q\"}"; break;
+                case 2:
+                    b.registerTypeAdapter(Point.class, new PointJson()).registerTypeAdapter(Point.class, new PointAdapter());
+                    lone = "{\"at\": \"1,2\", \"label\": \"q\"}";
+                    break;
+                case 3: b.registerTypeHierarchyAdapter(Point.class, new PointJson()); lone = "{\"p\": \"1;2\", \"label\": \"q\"}"; break;
+                case 4: b.registerTypeAdapter(Kind.class, (JsonSerializer<Kind>) (k, t, c) -> new JsonPrimitive(k.name().toLowerCase())); break;
+                default: b.registerTypeAdapter(Point.class, (InstanceCreator<Point>) t -> new Point(7, 7, "made")); break;
+            }
+            Gson gson = b.create();
+            Holder h = new Holder();
+            h.main = new Point(1, 2, "m");
+            h.all.add(new Point(3, 4, null));
+            h.any = new Point(5, 6, "any");
+            String text = gson.toJson(h);
+            Holder back = n == 4 ? gson.fromJson("{\"kind\": \"BEVEL\"}", Holder.class) : gson.fromJson(text, Holder.class);
+            return text + " | " + show(back.main) + " " + back.all.size() + (back.all.isEmpty() ? "" : show(back.all.get(0))) + " " + back.any + " " + back.kind
+                + " | " + gson.toJson(new Point(8, 9, "d")) + " | " + show(gson.fromJson(lone, Point.class)) + " | " + gson.toJson(Kind.BEVEL);
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
+
+    static class ViaFactory implements TypeAdapterFactory {
+        @Override public <T> TypeAdapter<T> create(Gson gson, TypeToken<T> type) {
+            if (type.getRawType() != Point.class) {
+                return null;
+            }
+            final TypeAdapter<T> delegate = gson.getDelegateAdapter(this, type);
+            final TypeAdapter<JsonElement> elements = gson.getAdapter(JsonElement.class);
+            return new TypeAdapter<T>() {
+                @Override public void write(JsonWriter out, T value) throws IOException {
+                    JsonElement tree = delegate.toJsonTree(value);
+                    if (tree.isJsonObject()) {
+                        tree.getAsJsonObject().addProperty("via", "factory");
+                    }
+                    elements.write(out, tree);
+                }
+
+                @Override public T read(JsonReader in) throws IOException {
+                    JsonElement tree = elements.read(in);
+                    if (tree.isJsonObject()) {
+                        tree.getAsJsonObject().addProperty("label", "read");
+                    }
+                    return delegate.fromJsonTree(tree);
+                }
+            };
+        }
+    }
+
+    public static String factories(int n) {
+        try {
+            Gson gson = new GsonBuilder().registerTypeAdapterFactory(new ViaFactory()).create();
+            Holder h = new Holder();
+            h.main = new Point(1, 2, "m");
+            h.all.add(new Point(3, 4, "x"));
+            String text = gson.toJson(h);
+            Holder back = gson.fromJson(text, Holder.class);
+            TypeAdapter<Point> a = gson.getAdapter(Point.class);
+            TypeAdapter<Holder> plain = gson.getAdapter(Holder.class);
+            return text + " | " + back.main.label + back.all.get(0).label + " | " + a.toJson(new Point(5, 6, null)) + " | " + plain.toJson(h) + " | "
+                + plain.fromJson("{\"main\": {\"x\": 9}}").main.x + " | " + gson.getAdapter(new TypeToken<List<Point>>() {}).toJson(h.all);
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
+
+    static class Named {
+        String displayName = "Gear Box";
+        int toothCount = 12;
+        transient int cached = 3;
+        static int shared = 4;
+        @SerializedName("explicit") String renamedField = "kept";
+        Point origin = new Point(0, 0, "o");
+        String secretKey = "hidden";
+    }
+
+    static class SkipSecrets implements ExclusionStrategy {
+        @Override public boolean shouldSkipField(FieldAttributes f) {
+            return f.getName().startsWith("secret") || f.hasModifier(Modifier.VOLATILE) || f.getAnnotation(Deprecated.class) != null;
+        }
+
+        @Override public boolean shouldSkipClass(Class<?> c) {
+            return c == Point.class;
+        }
+    }
+
+    public static String policy(int n) {
+        try {
+            GsonBuilder b = new GsonBuilder();
+            switch (n) {
+                case 0: b.setFieldNamingPolicy(FieldNamingPolicy.LOWER_CASE_WITH_UNDERSCORES); break;
+                case 1: b.setFieldNamingPolicy(FieldNamingPolicy.UPPER_CAMEL_CASE_WITH_SPACES); break;
+                case 2: b.excludeFieldsWithModifiers(Modifier.STATIC); break;
+                case 3: b.setExclusionStrategies(new SkipSecrets()); break;
+                case 4: b.addSerializationExclusionStrategy(new SkipSecrets()); break;
+                default: b.setFieldNamingStrategy(f -> f.getName().toUpperCase() + "_" + f.getDeclaringClass().getSimpleName()); break;
+            }
+            Gson gson = b.create();
+            String text = gson.toJson(new Named());
+            Named back = gson.fromJson(
+                "{\"display_name\": \"a\", \"Display Name\": \"b\", \"displayName\": \"c\", \"DISPLAYNAME_Named\": \"d\", \"explicit\": \"e\","
+                + " \"cached\": 9, \"secretKey\": \"s\", \"origin\": {\"x\": 5}}", Named.class);
+            return text + " | " + back.displayName + back.renamedField + back.cached + back.secretKey + show(back.origin);
         } catch (Exception e) {
             return thrown(e);
         }
