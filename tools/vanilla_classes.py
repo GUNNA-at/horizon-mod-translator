@@ -251,13 +251,36 @@ def header(data):
     access, this, sup, n = struct.unpack_from(">HHHH", data, at)
     name = lambda i: utf[cls[i]] if i else ""
     ifs = [name(i) for i in struct.unpack_from(f">{n}H", data, at + 8)]
-    return name(this), access, name(sup), ifs
+    at += 8 + 2 * n
+    # Its fields, passed over, then its methods: each one's name and descriptor.
+    members = []
+    for kind in ("fields", "methods"):
+        count = struct.unpack_from(">H", data, at)[0]
+        at += 2
+        for _ in range(count):
+            _, name_at, desc_at, attributes = struct.unpack_from(">HHHH", data, at)
+            at += 8
+            for _ in range(attributes):
+                at += 6 + struct.unpack_from(">I", data, at + 2)[0]
+            if kind == "methods":
+                members.append(f"{utf[name_at]}.{utf[desc_at]}")
+    return name(this), access, name(sup), ifs, members
+
+
+def method_hash(method):
+    """FNV-1a, 32 bits, of a method's `name.descriptor`: what the runtime looks a declared
+    method up by (`api::declares`)."""
+    h = 0x811C9DC5
+    for b in method.encode("utf8"):
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return h
 
 
 def every_class(jars):
     """Each named class under `PREFIXES` in `jars` (the first jar that has a class wins, as on a
-    class path): (superclass or "", interfaces), in the form `hierarchy` gives."""
-    known = {}
+    class path): (superclass or "", interfaces), in the form `hierarchy` gives, and the methods
+    each declares (`name.descriptor`)."""
+    known, declared = {}, {}
     for jar in jars:
         with zipfile.ZipFile(jar) as z:
             for entry in z.namelist():
@@ -267,13 +290,14 @@ def every_class(jars):
                 # Anonymous and local classes: a `$` part that starts with a digit.
                 if name in known or any(part[:1].isdigit() for part in name.split("$")[1:]):
                     continue
-                own, access, sup, ifs = header(z.read(entry))
+                own, access, sup, ifs, methods = header(z.read(entry))
                 if own != name:
                     continue
                 if access & 0x0200 or access & 0x4000 or sup == "java/lang/Object":
                     sup = ""
                 known[name] = (sup, ifs)
-    return known
+                declared[name] = methods
+    return known, declared
 
 
 def main():
@@ -283,7 +307,8 @@ def main():
     classes = hierarchy(jar, set(block_classes.values()) | set(item_classes.values()))
     reached = len(classes)
     # The blocks' and items' classes as `javap` gave them stay; every other class is added.
-    for name, entry in every_class(jar.split(":")).items():
+    every, declared = every_class(jar.split(":"))
+    for name, entry in every.items():
         classes.setdefault(name, entry)
     for c in [*block_classes.values(), *item_classes.values()]:
         k = c
@@ -317,10 +342,19 @@ def main():
         f"pub(crate) static CLASSES: [(&str, &str, &[&str]); {len(classes)}] = [",
         *[f'    ("{c}", "{s}", &[{", ".join(chr(34) + i + chr(34) for i in ifs)}]),' for c, (s, ifs) in sorted(classes.items())],
         "];",
+        "",
+        "/// The methods each class of [`CLASSES`] declares itself, in the same order: the FNV-1a",
+        "/// hash (32 bits) of each one's `name.descriptor`, sorted. A call that names a class is",
+        "/// that class's own method where the class declares one, and the nearest one above it",
+        "/// that does otherwise.",
+        f"pub(crate) static DECLARED: [&[u32]; {len(classes)}] = [",
+        *[f'    &[{", ".join(str(h) for h in sorted({method_hash(m) for m in declared.get(c, [])}))}],' for c in sorted(classes)],
+        "];",
     ]
     with open(OUT, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"{len(blocks_out)} of {len(block_classes)} blocks, {len(items_out)} of {len(item_classes)} items, {len(classes)} classes ({reached} reached from the blocks and items) -> {OUT}")
+    methods = sum(len(declared.get(c, [])) for c in classes)
+    print(f"{len(blocks_out)} of {len(block_classes)} blocks, {len(items_out)} of {len(item_classes)} items, {len(classes)} classes ({reached} reached from the blocks and items) declaring {methods} methods -> {OUT}")
 
 
 main()

@@ -116,6 +116,7 @@ pub mod quads;
 pub mod recipes;
 pub mod palette;
 pub mod particle_engine;
+pub mod nio;
 pub mod particles;
 pub mod places;
 pub mod records;

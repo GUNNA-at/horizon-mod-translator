@@ -39,6 +39,8 @@ public class BlockPos {
     private int kept;
     public int getKept() { return kept; }
     public int keptTwice() { return kept * 2; }
+    public int open;
+    public int getOpen() { return open; }
 }";
 
 const LOWER: &str = "package net.minecraft.core;
@@ -242,6 +244,69 @@ fn a_method_stands_where_its_code_asks_only_what_is_mapped() {
         classes[1].superclass.as_deref(),
         Some("hz/derived/net/minecraft/core/BlockPos")
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A field of the game's that a mod's own code reads, which nothing answers and a mapped method
+/// only returns, is read through that method, by the class the mod's reference names:
+/// `lower.open`, a field `BlockPos` declares, read through `Lower`. A field the runtime answers
+/// for itself is left to it.
+#[test]
+fn a_mods_read_of_a_games_field_goes_through_its_getter() {
+    if !has("javac") {
+        eprintln!("skipped: no javac");
+        return;
+    }
+    const READS: &str = "package example;
+import net.minecraft.core.Lower;
+public class Reads {
+    public static int run(Lower l) { return l.open + 1; }
+}";
+    let dir = scratch("field-accessors");
+    let (game_jar, classes) = jar(
+        &dir,
+        "game",
+        &[
+            ("net/minecraft/core/BlockPos.java", BLOCK_POS),
+            ("net/minecraft/core/Lower.java", LOWER),
+        ],
+        None,
+    );
+    let (_, own) = jar(
+        &dir,
+        "mod",
+        &[("example/Reads.java", READS)],
+        Some(&classes),
+    );
+    let reads = horizon_mod_translator::class::ClassFile::parse(
+        &std::fs::read(own.join("example/Reads.class")).unwrap(),
+    )
+    .unwrap();
+    let game = Game::open(&[&game_jar]).unwrap();
+    let through = |answered: bool| {
+        let field = move |_: &str, name: &str, _: &str| answered && name == "open";
+        let mapped = Mapped {
+            method: &|m, _| m.name == "getOpen",
+            field: &field,
+            constant: &|_| false,
+            translated: &|_| false,
+        };
+        let mut deriver = Deriver::new(&game, mapped);
+        deriver.field_accessors(&reads);
+        deriver
+            .accessors
+            .get(&(
+                "net/minecraft/core/Lower".to_owned(),
+                "open".to_owned(),
+                false,
+            ))
+            .cloned()
+    };
+    assert_eq!(
+        through(false).as_deref(),
+        Some("net/minecraft/core/BlockPos.getOpen.()I")
+    );
+    assert_eq!(through(true), None);
     let _ = std::fs::remove_dir_all(dir);
 }
 

@@ -409,4 +409,49 @@ public class Fixture {
         for (int p : parts) acc = acc * 31 + p;
         return acc;
     }
+
+    /** Maps, a list and a set of the fixture's own on the JDK's concrete classes, as a
+     *  double-brace initialisation makes them: each is that map, list or set, with what its
+     *  class adds or changes. One part by its number, or all of them folded together for 0. */
+    public static int subCollections(int part) {
+        java.util.Map<String, Integer> named = new java.util.HashMap<String, Integer>() {{
+            put("one", 1);
+            put("two", 2);
+            putIfAbsent("two", 22);
+        }};
+        class Counted extends java.util.LinkedHashMap<String, Integer> {
+            int puts;
+            @Override public Integer put(String k, Integer v) { puts++; return super.put(k, v); }
+            int total() { int t = 0; for (int v : values()) t += v; return t; }
+        }
+        Counted counted = new Counted();
+        counted.put("b", 5);
+        counted.put("a", 7);
+        counted.put("b", 9);
+        java.util.List<Integer> evens = new java.util.ArrayList<Integer>() {
+            @Override public boolean add(Integer v) { return v % 2 == 0 && super.add(v); }
+        };
+        for (int i = 0; i < 9; i++) evens.add(i);
+        java.util.Set<String> seen = new java.util.HashSet<String>() {{ add("x"); add("y"); add("x"); }};
+        java.util.Map<String, Integer> sorted = new java.util.TreeMap<String, Integer>() {{ put("b", 2); put("a", 1); }};
+        java.util.Map<String, Integer> shared = new java.util.concurrent.ConcurrentHashMap<String, Integer>() {{ put("k", 40); }};
+        int walked = 0;
+        for (java.util.Map.Entry<String, Integer> e : counted.entrySet()) walked = walked * 31 + e.getKey().charAt(0) + e.getValue();
+        int[] parts = {
+            named.size() * 100 + named.get("two"),
+            (named.containsKey("one") ? 3 : 0) + (named instanceof java.util.HashMap ? 5 : 0) + (named.containsValue(22) ? 7 : 0),
+            counted.puts * 1000 + counted.total() * 10 + counted.size(),
+            walked,
+            String.join(",", counted.keySet()).length() + counted.keySet().iterator().next().charAt(0),
+            evens.size() * 10 + evens.get(2),
+            seen.size() + (seen.contains("y") ? 10 : 0),
+            sorted.toString().length() + sorted.keySet().iterator().next().charAt(0),
+            new java.util.HashMap<>(named).size() + new java.util.ArrayList<>(evens).size(),
+            shared.getOrDefault("k", 1) + shared.merge("k", 2, Integer::sum),
+        };
+        if (part > 0) return parts[part - 1];
+        int acc = 0;
+        for (int p : parts) acc = acc * 31 + p;
+        return acc;
+    }
 }

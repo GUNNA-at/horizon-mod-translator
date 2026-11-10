@@ -1028,6 +1028,17 @@ fn derived_classes(
             }
         }
     }
+    // The game's fields the mods' own code reads or writes that a mapped method of the game's
+    // only returns or only sets, as for the game's own code above.
+    let before = deriver.accessors.len();
+    for c in program {
+        deriver.field_accessors(c);
+    }
+    println!(
+        "  the game's fields read through a method of the game's: {} ({} of them from the mods' own code)",
+        deriver.accessors.len(),
+        deriver.accessors.len() - before
+    );
     horizon_mod_translator::codegen::set_accessors(deriver.accessors.clone());
     horizon_mod_translator::codegen::set_inherited(
         horizon_mod_translator::derive::inherited_over_defaults(program, &game),

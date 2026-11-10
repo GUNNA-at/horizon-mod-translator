@@ -215,8 +215,11 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, key);
         return v;
     }
-    for class in retry_classes(rt, owner, args) {
-        let up = rt.static_key(&format!("{class}.{rest}"));
+    for retry in retries(rt, key, owner, rest, args).iter() {
+        if retry.dead.get() {
+            continue;
+        }
+        let up = retry.key;
         let seen = rt.unmapped.get(up).copied().unwrap_or(0);
         let r2 = call_exact(rt, up, args);
         if rt.unmapped.get(up).copied().unwrap_or(0) == seen {
@@ -225,6 +228,9 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             return r2;
         }
         uncount(rt, up);
+        if unclaimed(up) {
+            retry.dead.set(true);
+        }
     }
     // What every class takes from `Object` where nothing up its chain declares it (an entity's,
     // a block entity's): Java's own `equals`, `hashCode` and `toString`, as the JVM resolves a
@@ -431,14 +437,102 @@ fn chained(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return None;
     }
     let this = args.first().copied().unwrap_or_default();
-    Some(if this.r() != 0 && rt.class_of(this) == owner { this } else { rt.new_object(owner) })
+    if this.r() != 0 && rt.class_of(this) == owner {
+        return Some(this);
+    }
+    // An object of the class with nothing of it: what is asked of it next goes unanswered
+    // too, and the trace then names this call ([`trace_unmapped`]).
+    let made = rt.new_object(owner);
+    if Rt::tracing() {
+        let origin = rt.string(key);
+        rt.put_field(made, STAND_IN, origin);
+    }
+    Some(made)
 }
 
-/// Where a missed call is asked next. First up from the named class, a translated subclass to its
-/// API superclass. Then from the receiver's own class up, the way the JVM dispatches an interface
-/// call: `Supplier.get` on a DeferredHolder answers as `DeferredHolder.get`, and
-/// `CharSequence.length` on a String as `String.length`.
-fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> {
+/// Where a stand-in object keeps the key of the unmapped call that made it ([`chained`]).
+const STAND_IN: &str = "$standIn";
+
+/// The class above the game's or the loader's class `class` ("" for none) and the interfaces it
+/// declares, as their class files have them ([`crate::vanilla_classes`]); None for a class
+/// that is not one of theirs.
+fn game_parents(class: &str) -> Option<(&'static str, &'static [&'static str])> {
+    let all = &crate::vanilla_classes::CLASSES;
+    all.binary_search_by(|e| e.0.cmp(class))
+        .ok()
+        .map(|i| (all[i].1, all[i].2))
+}
+
+/// The hash `tools/vanilla_classes.py` files a declared method under: FNV-1a (32 bits) of its
+/// `name.descriptor`, which is what follows the class in a key.
+fn method_hash(rest: &str) -> u32 {
+    rest.bytes().fold(0x811C_9DC5, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
+}
+
+/// Whether the game's or the loader's class `class` declares the method of hash `hash` itself
+/// ([`crate::vanilla_classes::DECLARED`]); None for a class that is not one of theirs.
+fn declares(class: &str, hash: u32) -> Option<bool> {
+    let i = crate::vanilla_classes::CLASSES
+        .binary_search_by(|e| e.0.cmp(class))
+        .ok()?;
+    Some(
+        crate::vanilla_classes::DECLARED[i]
+            .binary_search(&hash)
+            .is_ok(),
+    )
+}
+
+/// The class whose method a call of the method of hash `hash` through the game's class `class`
+/// runs, as the JVM resolves it, where that is not `class` itself: the nearest class above it
+/// that declares the method, its superclasses before the interfaces. None where `class`
+/// declares it (nothing above is the method called then), where nothing above does, and for a
+/// class that is not the game's.
+fn resolved_above(class: &'static str, hash: u32) -> Option<&'static str> {
+    if declares(class, hash)? {
+        return None;
+    }
+    let mut chain = vec![class];
+    let mut c = class;
+    while let Some((above, _)) = game_parents(c).filter(|(above, _)| !above.is_empty()) {
+        if declares(above, hash) == Some(true) {
+            return Some(above);
+        }
+        chain.push(above);
+        c = above;
+    }
+    let mut next = 0;
+    while next < chain.len() {
+        let c = chain[next];
+        next += 1;
+        for &i in game_parents(c)
+            .map(|(_, interfaces)| interfaces)
+            .unwrap_or_default()
+        {
+            if declares(i, hash) == Some(true) {
+                return Some(i);
+            }
+            if !chain.contains(&i) {
+                chain.push(i);
+            }
+        }
+    }
+    None
+}
+
+/// Where a missed call of `owner.rest` is asked next. First up from the named class, a
+/// translated subclass to its API superclass. Then from the receiver's own class up, the way the
+/// JVM dispatches an interface call: `Supplier.get` on a DeferredHolder answers as
+/// `DeferredHolder.get`, and `CharSequence.length` on a String as `String.length`. Then the
+/// interfaces those classes implement. And past those, the class whose method the call is by
+/// the game's own class files ([`resolved_above`]), from the receiver's class and from the
+/// named one: `player.getBlockY()` names `Player`, or the client's `LocalPlayer`, and the
+/// method is `Entity`'s; `level.isEmptyBlock(pos)` names `ServerLevel`, and it is
+/// `LevelReader`'s. A class that declares the method itself is asked nowhere above: `super.tick`
+/// to a falling block is that block's own tick, not the empty one of the classes above it. Nor
+/// is a constructor, which no class takes from another. A class is asked once.
+fn retry_classes(rt: &Rt, owner: &'static str, rest: &str, args: &[V]) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     let climb = |out: &mut Vec<&'static str>, mut c: &'static str| {
         while let Some(sup) = rt.supers.get(c).copied().or_else(|| api_super(c)) {
@@ -450,10 +544,12 @@ fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> 
         }
     };
     climb(&mut out, owner);
+    let mut receiver = None;
     if let Some(&v @ V::R(n)) = args.first()
         && n != 0
     {
         let class = rt.class_of(v);
+        receiver = Some(class);
         if class != owner && !out.contains(&class) {
             out.push(class);
             climb(&mut out, class);
@@ -477,7 +573,98 @@ fn retry_classes(rt: &Rt, owner: &'static str, args: &[V]) -> Vec<&'static str> 
             }
         }
     }
+    // (`HORIZON_COMPAT_CLASS_FILES=off` leaves the class files out, as before they were read.)
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if rest.starts_with("<init>.")
+        || *OFF.get_or_init(|| {
+            std::env::var_os("HORIZON_COMPAT_CLASS_FILES").is_some_and(|v| v == "off")
+        })
+    {
+        return out;
+    }
+    let hash = method_hash(rest);
+    for class in receiver.into_iter().chain([owner]) {
+        if let Some(found) = resolved_above(class, hash)
+            && !classes.contains(&found)
+        {
+            classes.push(found);
+            out.push(found);
+        }
+    }
     out
+}
+
+/// One more key a missed call is asked under ([`retries`]): the same method of another class.
+struct Retry {
+    key: &'static str,
+    /// Nothing answers the key for a receiver of this kind ([`unclaimed`]): it is not asked
+    /// again.
+    dead: std::cell::Cell<bool>,
+}
+
+thread_local! {
+    /// The keys a missed call was asked under, by its own key and what its receiver is: its
+    /// class, whether it is an enum's constant, and how many classes the runtime knows of
+    /// (a class that came since may be one more to ask).
+    static RETRIES: std::cell::RefCell<crate::HashMap<(usize, usize, usize, usize, bool, usize), std::rc::Rc<[Retry]>>> =
+        std::cell::RefCell::new(crate::HashMap::default());
+}
+
+/// The keys the missed call `key` (`owner.rest`) is asked again under ([`retry_classes`]),
+/// found once for the call's key and its receiver's class: a call nothing maps is made again
+/// and again, and the classes above a class of the game's are many.
+fn retries(
+    rt: &mut Rt,
+    key: &'static str,
+    owner: &'static str,
+    rest: &str,
+    args: &[V],
+) -> std::rc::Rc<[Retry]> {
+    let (class, constant) = match args.first() {
+        Some(&v @ V::R(n)) if n != 0 => (
+            rt.class_of(v),
+            !matches!(rt.get_field(v, "$ordinal"), V::Void),
+        ),
+        _ => ("", false),
+    };
+    let known = rt
+        .supers
+        .len()
+        .wrapping_mul(31)
+        .wrapping_add(rt.interfaces.len());
+    let id = (
+        key.as_ptr() as usize,
+        key.len(),
+        class.as_ptr() as usize,
+        class.len(),
+        constant,
+        known,
+    );
+    if let Some(found) = RETRIES.with(|r| r.borrow().get(&id).cloned()) {
+        return found;
+    }
+    let found: std::rc::Rc<[Retry]> = retry_classes(rt, owner, rest, args)
+        .into_iter()
+        .map(|class| Retry {
+            key: rt.static_key(&format!("{class}.{rest}")),
+            dead: std::cell::Cell::new(false),
+        })
+        .collect();
+    RETRIES.with(|r| r.borrow_mut().insert(id, found.clone()));
+    found
+}
+
+/// Whether nothing answers `key` but by what its receiver is: no arm of [`call_exact`]'s own
+/// took it, it has no intrinsic and no module claims it ([`Route`], known once it was called).
+/// What is left to answer it reads the key and the receiver's class alone (a function object,
+/// an annotation, a mod's class under a constructor of the game's), so a miss for one receiver
+/// of a class is a miss for every one.
+fn unclaimed(key: &'static str) -> bool {
+    ROUTES.with(|r| {
+        r.borrow()
+            .get(&(key.as_ptr() as usize, key.len()))
+            .is_some_and(|route| route.intrinsic.is_none() && route.claimed == 0)
+    })
 }
 
 fn uncount(rt: &mut Rt, key: &'static str) {
@@ -597,7 +784,12 @@ fn trace_unmapped(rt: &Rt, key: &'static str, args: &[V]) {
     let n = rt.unmapped.get(key).copied().unwrap_or(0);
     if n == 1 {
         let on = match args.first() {
-            Some(&v @ V::R(_)) => format!(" (on {})", rt.class_of(v)),
+            // A stand-in's calls go unanswered because of the call that made it, which is the
+            // one to map: named with it.
+            Some(&v @ V::R(_)) => match rt.str_of(rt.get_field(v, STAND_IN)) {
+                Some(origin) => format!(" (on {}, the stand-in {origin} gave)", rt.class_of(v)),
+                None => format!(" (on {})", rt.class_of(v)),
+            },
             Some(v) => format!(" (on {v:?})"),
             None => String::new(),
         };
@@ -1253,7 +1445,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 94] = [
+const CHAIN: [Module; 95] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -1347,13 +1539,14 @@ const CHAIN: [Module; 94] = [
     crate::render::call,
     world,
     crate::palette::call,
+    crate::nio::call,
     crate::records::call,
 ];
 
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 94] = [
+const CLAIMS: [Claims; 95] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -1448,10 +1641,11 @@ const CLAIMS: [Claims; 94] = [
     // The world's calls end in `api_common`'s, which take most of vanilla's classes.
     |_, _, _| true,
     crate::palette::claims,
+    crate::nio::claims,
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 94] = [
+const MODULE_NAMES: [&str; 95] = [
     "diodes",
     "rails",
     "fake_players",
@@ -1545,6 +1739,7 @@ const MODULE_NAMES: [&str; 94] = [
     "render",
     "world",
     "palette",
+    "nio",
     "records",
 ];
 
@@ -3445,6 +3640,9 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
         // `Unsafe.theUnsafe`, which a mod takes by reflection to write a field it may not
         // ([`crate::jlang`]'s `sun.misc.Unsafe`).
         "sun/misc/Unsafe.theUnsafe" => crate::jlang::the_unsafe(rt),
+        // A byte buffer's two orders ([`crate::nio`]).
+        "java/nio/ByteOrder.BIG_ENDIAN" => crate::nio::order(rt, false),
+        "java/nio/ByteOrder.LITTLE_ENDIAN" => crate::nio::order(rt, true),
         // The data fixer's type references (`References.BLOCK_ENTITY`), by their type names.
         k if k.starts_with("net/minecraft/util/datafix/fixes/References.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
@@ -3578,6 +3776,53 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call through a class of the game's is the method of the nearest class above it that
+    /// declares one, as the game's class files have it (a player's block position is
+    /// `Entity`'s, a level's empty-block test `LevelReader`'s default); the class's own where
+    /// it declares one, whatever is above (`FallingBlock.tick`); nothing for a class that is
+    /// not the game's, or a method nothing declares.
+    #[test]
+    fn a_call_is_resolved_as_the_games_class_files_declare_it() {
+        let above = |class: &'static str, rest: &str| resolved_above(class, method_hash(rest));
+        const ENTITY: Option<&str> = Some("net/minecraft/world/entity/Entity");
+        assert_eq!(
+            above("net/minecraft/world/entity/player/Player", "getBlockY.()I"),
+            ENTITY
+        );
+        assert_eq!(
+            above("net/minecraft/client/player/LocalPlayer", "getBlockY.()I"),
+            ENTITY
+        );
+        assert_eq!(
+            above("net/minecraft/world/entity/Entity", "getBlockY.()I"),
+            None
+        );
+        assert_eq!(
+            above(
+                "net/minecraft/server/level/ServerLevel",
+                "isEmptyBlock.(Lnet/minecraft/core/BlockPos;)Z"
+            ),
+            Some("net/minecraft/world/level/LevelReader")
+        );
+        let tick = "tick.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/util/RandomSource;)V";
+        assert_eq!(
+            above("net/minecraft/world/level/block/FallingBlock", tick),
+            None
+        );
+        assert_eq!(
+            above("net/minecraft/world/level/block/BushBlock", tick),
+            Some("net/minecraft/world/level/block/state/BlockBehaviour")
+        );
+        assert_eq!(above("java/util/ArrayList", "size.()I"), None);
+        assert_eq!(
+            above(
+                "net/minecraft/world/entity/player/Player",
+                "noSuchMethod.()V"
+            ),
+            None
+        );
+    }
 
     /// `StackWalker.walk` applies the function to a stream of no frames and gives back what it
     /// answers: a check of every frame it looks at passes (Lucene's `skip(2).limit(1).allMatch`),

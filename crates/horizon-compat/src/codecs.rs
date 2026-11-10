@@ -1051,7 +1051,7 @@ fn java_json(rt: &mut Rt, v: V) -> Json {
         _ => {}
     }
     match rt.heap.get(v.r() as usize).map(|o| &o.data) {
-        Some(Data::Table(_)) if rt.class_of(v).ends_with("Map") => {
+        Some(Data::Table(_)) if jutil::is_map_object(rt, v) => {
             let mut o = Map::new();
             for (k, e) in jutil::table_pairs(rt, v) {
                 let key = match java_json(rt, k) {

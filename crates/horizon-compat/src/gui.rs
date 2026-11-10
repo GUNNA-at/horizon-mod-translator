@@ -1979,6 +1979,14 @@ fn single(rt: &mut Rt, class: &'static str) -> V {
     rt.intern(format!("client/{class}"), |rt| rt.new_object(class))
 }
 
+const TEXTURES: &str = "net/minecraft/client/renderer/texture/TextureManager";
+const TEXTURE: &str = "net/minecraft/client/renderer/texture/AbstractTexture";
+const DYNAMIC_TEXTURE: &str = "net/minecraft/client/renderer/texture/DynamicTexture";
+const SIMPLE_TEXTURE: &str = "net/minecraft/client/renderer/texture/SimpleTexture";
+const RENDER_TARGET: &str = "com/mojang/blaze3d/pipeline/RenderTarget";
+const TEXTURE_TARGET: &str = "com/mojang/blaze3d/pipeline/TextureTarget";
+const MAIN_TARGET: &str = "com/mojang/blaze3d/pipeline/MainTarget";
+
 /// `CameraType`'s constants, in its order.
 const CAMERA_TYPES: [&str; 3] = ["FIRST_PERSON", "THIRD_PERSON_BACK", "THIRD_PERSON_FRONT"];
 
@@ -2026,7 +2034,7 @@ fn game_type(rt: &mut Rt) -> V {
     crate::api::api_enum(rt, GAME_TYPE, GAME_TYPES[i], i as i32)
 }
 
-fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+fn client_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     let size = |rt: &Rt| rt.host().map_or([0, 0], |h| h.gui_size());
     let scale = |rt: &Rt| rt.host().map_or(1.0, |h| h.gui_scale());
@@ -2078,13 +2086,129 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
             let n = formatting_name(rt, a(0)).to_ascii_lowercase();
             rt.string(&n)
         }
-        // Textures by location: one object each, whose GL settings the host keeps itself.
-        ("net/minecraft/client/renderer/texture/TextureManager", "getTexture") => {
-            let at = rt.str_of(a(1)).unwrap_or("").to_owned();
-            rt.intern(format!("compat:texture/{at}"), |rt| rt.new_object("net/minecraft/client/renderer/texture/AbstractTexture"))
+        // Textures by location: one object each, whose GL settings the host keeps itself. A mod
+        // registers its own under a location (a map's tiles, a skin it made: a
+        // `DynamicTexture` over the image it draws into) and asks for it back by that.
+        (MINECRAFT, "getTextureManager") => single(rt, TEXTURES),
+        // The window's frame buffer, as large as the window: a mod binds it back after drawing
+        // into one of its own, and reads its size. What a render target does to GL (binding,
+        // clearing, its buffers) the game's renderer does for itself, so each is nothing here.
+        (MINECRAFT, "getMainRenderTarget") => {
+            let target = single(rt, "com/mojang/blaze3d/pipeline/MainTarget");
+            let (w, h) = (
+                (f64::from(size(rt)[0]) * scale(rt)) as i32,
+                (f64::from(size(rt)[1]) * scale(rt)) as i32,
+            );
+            for (field, v) in [
+                ("width", w),
+                ("height", h),
+                ("viewWidth", w),
+                ("viewHeight", h),
+            ] {
+                rt.put_field(target, field, V::I(v));
+            }
+            target
         }
-        ("net/minecraft/client/renderer/texture/AbstractTexture", "setFilter" | "bind" | "close" | "releaseId") => V::Void,
-        ("net/minecraft/client/renderer/texture/AbstractTexture", "getId") => V::I(0),
+        (TEXTURE_TARGET, "<init>") if desc == "(IIZZ)V" => {
+            for (field, v) in [
+                ("width", a(1)),
+                ("height", a(2)),
+                ("viewWidth", a(1)),
+                ("viewHeight", a(2)),
+            ] {
+                rt.put_field(a(0), field, v);
+            }
+            V::Void
+        }
+        (
+            RENDER_TARGET | TEXTURE_TARGET | MAIN_TARGET,
+            "getColorTextureId" | "getDepthTextureId",
+        ) => V::I(0),
+        (RENDER_TARGET | TEXTURE_TARGET | MAIN_TARGET, "isStencilEnabled") => V::I(0),
+        (RENDER_TARGET | TEXTURE_TARGET | MAIN_TARGET, _)
+            if desc.ends_with(")V") && name != "<init>" =>
+        {
+            V::Void
+        }
+        // No server's entry in the list of servers: the window plays its own world.
+        (MINECRAFT, "getCurrentServer") => V::NULL,
+        // No loading overlay once the game runs.
+        (MINECRAFT, "getOverlay") => V::NULL,
+        // The "fabulous" graphics' shader, which Horizon's renderer has none of.
+        (MINECRAFT, "useShaderTransparency") => V::I(0),
+        (TEXTURES, "register")
+            if desc.starts_with("(Lnet/minecraft/resources/ResourceLocation;") =>
+        {
+            let at = crate::neo::location(rt, a(1));
+            rt.interned.insert(format!("compat:texture/{at}"), a(2));
+            V::Void
+        }
+        // `register(prefix, texture)`: vanilla names it `dynamic/<prefix>_<n>`, counting from 1
+        // for each prefix.
+        (TEXTURES, "register") => {
+            let prefix = rt.str_of(a(1)).unwrap_or("").to_owned();
+            let counted = format!("compat:textures-named/{prefix}");
+            let n = rt.interned.get(&counted).map_or(0, |v| v.i()) + 1;
+            rt.interned.insert(counted, V::I(n));
+            let at = format!("minecraft:dynamic/{prefix}_{n}");
+            rt.interned.insert(format!("compat:texture/{at}"), a(2));
+            rt.string(&at)
+        }
+        (TEXTURES, "getTexture") => {
+            let at = crate::neo::location(rt, a(1));
+            let key = format!("compat:texture/{at}");
+            match rt.interned.get(&key) {
+                Some(&texture) => texture,
+                // `getTexture(location, fallback)`: the one given when none is there.
+                None if args.len() == 3 => a(2),
+                None => rt.intern(key, |rt| rt.new_object(TEXTURE)),
+            }
+        }
+        (TEXTURES, "release") => {
+            let at = crate::neo::location(rt, a(1));
+            rt.interned.remove(&format!("compat:texture/{at}"));
+            V::Void
+        }
+        (TEXTURES, "bindForSetup") => V::Void,
+        // A texture over an image the mod keeps drawing into: the image is its `getPixels()`.
+        (DYNAMIC_TEXTURE, "<init>") => {
+            let pixels = if desc.starts_with("(Lcom/mojang/blaze3d/platform/NativeImage;") {
+                a(1)
+            } else {
+                let image = rt.new_object("com/mojang/blaze3d/platform/NativeImage");
+                crate::api::call(
+                    rt,
+                    "com/mojang/blaze3d/platform/NativeImage.<init>.(IIZ)V",
+                    &[image, a(1), a(2), a(3)],
+                );
+                image
+            };
+            rt.put_field(a(0), "$pixels", pixels);
+            V::Void
+        }
+        (DYNAMIC_TEXTURE, "getPixels") => match rt.get_field(a(0), "$pixels") {
+            V::Void => V::NULL,
+            pixels => pixels,
+        },
+        (DYNAMIC_TEXTURE, "setPixels") => {
+            rt.put_field(a(0), "$pixels", a(1));
+            V::Void
+        }
+        (DYNAMIC_TEXTURE, "close") => {
+            rt.put_field(a(0), "$pixels", V::NULL);
+            V::Void
+        }
+        (DYNAMIC_TEXTURE, "upload") => V::Void,
+        (SIMPLE_TEXTURE, "<init>") => {
+            rt.put_field(a(0), "location", a(1));
+            V::Void
+        }
+        (SIMPLE_TEXTURE, "load") => V::Void,
+        (
+            TEXTURE | DYNAMIC_TEXTURE | SIMPLE_TEXTURE,
+            "setFilter" | "bind" | "close" | "releaseId",
+        ) => V::Void,
+        (TEXTURE | DYNAMIC_TEXTURE | SIMPLE_TEXTURE, "getId") => V::I(0),
         // The pointer in the window's pixels.
         ("net/minecraft/client/MouseHandler", "xpos" | "ypos") => {
             let c = rt.host().map_or([0.0, 0.0], |h| h.cursor());
@@ -2609,8 +2733,13 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | "net/neoforged/bus/api/ICancellableEvent"
             | "net/minecraft/client/renderer/RenderBuffers"
             | "net/minecraft/client/renderer/MultiBufferSource$BufferSource"
-            | "net/minecraft/client/renderer/texture/TextureManager"
-            | "net/minecraft/client/renderer/texture/AbstractTexture"
+            | TEXTURES
+            | TEXTURE
+            | DYNAMIC_TEXTURE
+            | SIMPLE_TEXTURE
+            | RENDER_TARGET
+            | TEXTURE_TARGET
+            | MAIN_TARGET
             | "net/minecraft/client/MouseHandler"
             | "net/minecraft/client/KeyboardHandler"
             | "net/minecraft/client/Options"
@@ -2647,6 +2776,11 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
                     | "$screen"
                     | "getEntityModels"
                     | "getBlockEntityRenderDispatcher"
+                    | "getTextureManager"
+                    | "getMainRenderTarget"
+                    | "getCurrentServer"
+                    | "getOverlay"
+                    | "useShaderTransparency"
             ))
         || owner == LANGUAGE_MANAGER
 }
@@ -2669,7 +2803,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         GL_STATE => desc.ends_with(")V").then_some(V::Void),
         _ => text_calls(rt, owner, name, desc, args)
             .or_else(|| tooltip_calls(rt, owner, name, desc, args))
-            .or_else(|| client_calls(rt, owner, name, args)),
+            .or_else(|| client_calls(rt, owner, name, desc, args)),
     }
 }
 
@@ -3360,6 +3494,84 @@ mod tests {
                 [[-1.0, 9.0], [-1.0, -2.0], [20.0, -2.0], [20.0, 9.0]],
                 0x7FFF_0000
             )]
+        );
+    }
+
+    /// A texture a mod registers is the one it gets back by its location; one registered by a
+    /// prefix is named `dynamic/<prefix>_<n>`, counted from 1 for each prefix, as vanilla names
+    /// them; released, its location has a plain texture again. A `DynamicTexture` holds the
+    /// image it was made over, or one of the size it was made with.
+    #[test]
+    fn a_mod_registers_its_own_textures() {
+        crate::install();
+        let mut rt = Rt::new();
+        let c = crate::api::call;
+        let mc = rt.new_object(MINECRAFT);
+        let manager = c(
+            &mut rt,
+            "net/minecraft/client/Minecraft.getTextureManager.()Lnet/minecraft/client/renderer/texture/TextureManager;",
+            &[mc],
+        );
+        let image = rt.new_object("com/mojang/blaze3d/platform/NativeImage");
+        c(
+            &mut rt,
+            "com/mojang/blaze3d/platform/NativeImage.<init>.(IIZ)V",
+            &[image, V::I(4), V::I(2), V::I(0)],
+        );
+        let texture = rt.new_object(DYNAMIC_TEXTURE);
+        c(
+            &mut rt,
+            "net/minecraft/client/renderer/texture/DynamicTexture.<init>.(Lcom/mojang/blaze3d/platform/NativeImage;)V",
+            &[texture, image],
+        );
+        const PIXELS: &str = "net/minecraft/client/renderer/texture/DynamicTexture.getPixels.()Lcom/mojang/blaze3d/platform/NativeImage;";
+        assert_eq!(c(&mut rt, PIXELS, &[texture]), image);
+        let at = rt.string("map:tile");
+        c(
+            &mut rt,
+            "net/minecraft/client/renderer/texture/TextureManager.register.(Lnet/minecraft/resources/ResourceLocation;Lnet/minecraft/client/renderer/texture/AbstractTexture;)V",
+            &[manager, at, texture],
+        );
+        const GET: &str = "net/minecraft/client/renderer/texture/TextureManager.getTexture.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/client/renderer/texture/AbstractTexture;";
+        assert_eq!(c(&mut rt, GET, &[manager, at]), texture);
+        const NAMED: &str = "net/minecraft/client/renderer/texture/TextureManager.register.(Ljava/lang/String;Lnet/minecraft/client/renderer/texture/DynamicTexture;)Lnet/minecraft/resources/ResourceLocation;";
+        let prefix = rt.string("skin");
+        let first = c(&mut rt, NAMED, &[manager, prefix, texture]);
+        let second = c(&mut rt, NAMED, &[manager, prefix, texture]);
+        assert_eq!(
+            (rt.str_of(first), rt.str_of(second)),
+            (
+                Some("minecraft:dynamic/skin_1"),
+                Some("minecraft:dynamic/skin_2")
+            )
+        );
+        assert_eq!(c(&mut rt, GET, &[manager, second]), texture);
+        c(
+            &mut rt,
+            "net/minecraft/client/renderer/texture/TextureManager.release.(Lnet/minecraft/resources/ResourceLocation;)V",
+            &[manager, at],
+        );
+        let plain = c(&mut rt, GET, &[manager, at]);
+        assert!(plain != texture && rt.class_of(plain) == TEXTURE);
+        let sized = rt.new_object(DYNAMIC_TEXTURE);
+        c(
+            &mut rt,
+            "net/minecraft/client/renderer/texture/DynamicTexture.<init>.(IIZ)V",
+            &[sized, V::I(8), V::I(4), V::I(1)],
+        );
+        let pixels = c(&mut rt, PIXELS, &[sized]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/mojang/blaze3d/platform/NativeImage.getWidth.()I",
+                &[pixels]
+            ),
+            V::I(8)
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
         );
     }
 }

@@ -10449,6 +10449,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - The server's resources and the client's connection hold their recipe manager in the
     field the game keeps it in (Cucumber's mixin reads the field at the constructor's end).
   - Tests: 819 compat, 16 compat-core, 36 translator; the differential and weave tests.
+- [x] 2026-11-10 Part 173: a mod's own maps on the JDK's, byte buffers, and calls resolved as
+  the game's class files declare them.
+  - A mod's own subclass of one of the JDK's concrete maps was no map: a double-brace
+    initialisation (`new HashMap<>() {{ put(k, v); }}`) makes an object of an anonymous class
+    of the mod's, and the runtime told a map from a set by the class's name, so the object was
+    a set and had no `put`. 312 of the pack's classes extend a `java.util` class (56 `HashMap`,
+    24 `LinkedHashMap`, 4 `ConcurrentHashMap`...: Ars Nouveau's Starbuncle names, Create Deco's
+    blocks, an armour's defence by slot). A mod's class is a map by what it extends now. The
+    differential fixture puts such maps, a list and a set on the JDK's classes against a JVM.
+  - `java.nio.ByteBuffer`, which the runtime had none of (21 of the pack's jars use one): a
+    heap buffer over a Java `byte[]` it shares with whoever wrapped it or asks for its
+    `array()`, with Java's position, limit, mark and byte order; `allocate`, `wrap`, the
+    relative and absolute `get`/`put` of every primitive in either order, the bulk ones, `flip`,
+    `compact`, `slice`, `duplicate`, and Java's exceptions past the limit.
+  - A call that names a class of the game's is asked of the class whose method it is, as the
+    JVM resolves it: `tools/vanilla_classes.py` writes the methods each of the game's 9,735
+    classes declares (88,301, as hashes of name and descriptor), and a call nothing answers
+    under the class it names is asked again under the nearest class above that declares the
+    method, never past a class that declares its own (`super.tick()` to a falling block is not
+    `BlockBehaviour`'s empty one). Measured on the 668 unmapped calls on an object that
+    launches 13 and 14 logged: one more answers (NeoForge's `PercentageAttribute.setSyncable`).
+    The rest are unmapped where they are declared; what this buys is that a method mapped once,
+    at its class, answers every call that names a class below it.
+  - A read of a game object's field in a mod's own code goes through the game's own getter of
+    it where nothing else answers and a mapped method only returns the field (the translator
+    did so for the game's own code it carries; a mixin's `@Shadow` of the field too).
+  - The trace of an unmapped call on a stand-in object names the unmapped call that made the
+    stand-in: most of a launch's unmapped lines are such followers, and the one to map is the
+    first.
+  - The texture manager (`Minecraft.getTextureManager()`, asked by 47 of the pack's jars):
+    textures registered under a location or a prefix (vanilla's `dynamic/<prefix>_<n>`), found
+    again and released; a `DynamicTexture` holds its image. The window's render target and a
+    mod's own, whose GL calls are the game's renderer's to make. `registryAccess()` of
+    whatever is in a level (a player: 19 jars). An equipment slot's index, kind, filter flag
+    and name, `EquipmentSlotGroup.bySlot`. A player's block coordinates.
+  - Tests: 825 compat, 16 compat-core, 36 translator; the differential and weave tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

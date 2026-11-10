@@ -625,6 +625,66 @@ impl<'a> Deriver<'a> {
         out
     }
 
+    /// The accessors of the game's fields the mods' own class `c` reads or writes
+    /// ([`Deriver::accessors`]): where the runtime has no answer for a field and a mapped method
+    /// of the game's only returns or only sets it, the read or the write is that method's
+    /// call, by the class the reference names. `player.level`, `Entity`'s field read through
+    /// `ServerPlayer`, is `Entity.level()`; so is the same field a mixin into `Player` shadows.
+    pub fn field_accessors(&mut self, c: &ClassFile) {
+        let mut refs: Vec<(String, String, String, bool)> = Vec::new();
+        for m in &c.methods {
+            let Some(code) = &m.code else { continue };
+            let Ok(insns) = insn::decode(&code.bytes) else {
+                continue;
+            };
+            for i in insns {
+                let idx = match i.arg {
+                    insn::Operand::Int(v) => v as u16,
+                    insn::Operand::IndexCount(v, _) => v,
+                    _ => continue,
+                };
+                if matches!(i.op, 0xb4 | 0xb5)
+                    && let Some(r) = c.member(idx)
+                {
+                    refs.push((r.owner, r.name, r.desc, i.op == 0xb5));
+                }
+            }
+        }
+        // A mixin's shadow of a field of the game's class it is mixed into.
+        const SHADOW: &str = "Lorg/spongepowered/asm/mixin/Shadow;";
+        for target in c.mixin_targets() {
+            for f in c
+                .fields
+                .iter()
+                .filter(|f| f.access & 0x0008 == 0 && f.annotations.iter().any(|a| a.ty == SHADOW))
+            {
+                for write in [false, true] {
+                    refs.push((target.clone(), f.name.clone(), f.desc.clone(), write));
+                }
+            }
+        }
+        let game = self.game;
+        for (owner, name, desc, write) in refs {
+            let id = (owner.clone(), name.clone(), write);
+            if !crate::is_api(&owner)
+                || (self.mapped.translated)(&owner)
+                || self.accessors.contains_key(&id)
+            {
+                continue;
+            }
+            let class = game.field_class(&owner, &name).unwrap_or(&owner).to_owned();
+            if (self.mapped.translated)(&class) {
+                continue;
+            }
+            let mapped = !write
+                && (self.reads(&owner, &name, &desc)
+                    || (class != owner && self.reads(&class, &name, &desc)));
+            if !mapped && let Some(key) = self.accessor(&class, &name, write) {
+                self.accessors.insert(id, key);
+            }
+        }
+    }
+
     /// The mapped method that only returns (or, `write`, only sets) field `name` of `class`, as
     /// a key (`owner.name.desc`), if the game has one.
     pub fn accessor(&mut self, class: &str, name: &str, write: bool) -> Option<String> {

@@ -987,7 +987,9 @@ pub(crate) fn own_elements(rt: &mut Rt, collection: V) -> Vec<V> {
 pub fn elements(rt: &Rt, v: V) -> Vec<V> {
     match rt.heap.get(v.r() as usize).map(|o| (&o.data, o.class)) {
         Some((Data::List(l), _)) => l.clone(),
-        Some((Data::Table(t), c)) if is_map(c) => t.entries.iter().map(|(_, v)| *v).collect(),
+        Some((Data::Table(t), c)) if is_map(c) || is_map_object(rt, v) => {
+            t.entries.iter().map(|(_, v)| *v).collect()
+        }
         Some((Data::Table(t), _)) => t.entries.iter().map(|(k, _)| *k).collect(),
         Some((Data::Array(a), c)) if c.starts_with('[') => a.clone(),
         Some((Data::Iter(items, at), _)) => items[(*at).min(items.len())..].to_vec(),
@@ -1363,6 +1365,15 @@ fn guava_optional(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> 
 
 fn is_map(class: &str) -> bool {
     class.ends_with("Map") || class.ends_with("Map$Values")
+}
+
+/// Whether `v`, an object that holds a table, is a map (its entries are keys with their
+/// values) and not a set: one of the JDK's and the libraries' own by its class's name, and a
+/// mod's own class by what it extends. `new HashMap<>() {{ put(k, v); }}` makes an object of
+/// an anonymous class of the mod's, which is that `HashMap` (taken for a set, by its name, it
+/// had no `put`).
+pub(crate) fn is_map_object(rt: &Rt, v: V) -> bool {
+    is_map(rt.class_of(v)) || (rt.cid(v) != 0 && rt.instance_of_static(v, "java/util/Map"))
 }
 
 /// Appends `v` to the list at `l` (`List.add`); nothing for what isn't a list.
@@ -1821,7 +1832,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             && arg.r() != 0
             && desc.starts_with("(L")
         {
-            let src_is_map = is_map(rt.class_of(arg)) && matches!(rt.heap.get(arg.r() as usize).map(|o| &o.data), Some(Data::Table(_)));
+            let src_is_map = is_map_object(rt, arg)
+                && matches!(
+                    rt.heap.get(arg.r() as usize).map(|o| &o.data),
+                    Some(Data::Table(_))
+                );
             if desc.contains("Comparator") {
                 if let Some(Data::Table(t)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data) {
                     t.comparator = arg;
@@ -1875,7 +1890,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::baked_models::at(rt, this, a(1));
             map_call(rt, name, desc, args)
         }
-        't' if is_map(rt.class_of(this)) => map_call(rt, name, desc, args),
+        't' if is_map_object(rt, this) => map_call(rt, name, desc, args),
         't' => set_call(rt, name, args),
         'i' => iter_call(rt, name, args),
         's' => stream_call(rt, name, args),
@@ -2386,7 +2401,7 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         (o, "fastIterator" | "fastIterable" | "fastForEach")
             if o.starts_with("it/unimi/dsi/fastutil/")
                 && o.ends_with("Maps")
-                && is_map(rt.class_of(a(0)))
+                && is_map_object(rt, a(0))
                 && matches!(rt.heap.get(a(0).r() as usize).map(|o| &o.data), Some(Data::Table(_))) =>
         {
             let es = map_call(rt, "entrySet", "()Lit/unimi/dsi/fastutil/objects/ObjectSet;", &[a(0)])?;
@@ -4774,6 +4789,60 @@ mod tests {
     }
 
     use super::*;
+
+    /// A mod's own subclass of a JDK map is that map (double-brace initialisation, `new
+    /// HashMap<>() {{ put(k, v); }}`, makes one): what its constructor puts through its own
+    /// class's name, through the map's class or through the interface is in it, whichever of
+    /// the JDK's maps it extends.
+    #[test]
+    fn a_mods_subclass_of_a_map_is_that_map() {
+        crate::install();
+        for (n, above) in [
+            "java/util/HashMap",
+            "java/util/LinkedHashMap",
+            "java/util/IdentityHashMap",
+            "java/util/concurrent/ConcurrentHashMap",
+            "java/util/TreeMap",
+            "it/unimi/dsi/fastutil/objects/Object2ObjectOpenHashMap",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut rt = Rt::new();
+            rt.supers.insert("m/Names$1", above);
+            let made = rt.new_object_id("m/Names$1", 7 + n as u32);
+            let init: &'static str = rt.static_key(&format!("{above}.<init>.()V"));
+            crate::api::call(&mut rt, init, &[made]);
+            let (k, v, k2, v2) = (
+                rt.string("a"),
+                rt.string("1"),
+                rt.string("b"),
+                rt.string("2"),
+            );
+            let own: &'static str = rt.static_key(&format!(
+                "{above}.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
+            ));
+            crate::api::call(&mut rt, own, &[made, k, v]);
+            crate::api::call(
+                &mut rt,
+                "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[made, k2, v2],
+            );
+            assert!(rt.unmapped.is_empty(), "{above}: {:?}", rt.unmapped);
+            let got = crate::api::call(
+                &mut rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[made, k],
+            );
+            assert_eq!(rt.str_of(got), Some("1"), "{above}");
+            assert_eq!(
+                crate::api::call(&mut rt, "java/util/Map.size.()I", &[made]),
+                V::I(2),
+                "{above}"
+            );
+            assert_eq!(rt.class_of(made), "m/Names$1");
+        }
+    }
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))

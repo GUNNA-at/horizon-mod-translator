@@ -1761,8 +1761,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 _ => return None,
             }
         }
-        // The level's registries: each is its registry key (its path).
-        (o, "registryAccess") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("LevelReader") || o.ends_with("MinecraftServer")) => {
+        // The level's registries: each is its registry key (its path). The server's, a level's,
+        // and whatever is in a level and hands out its level's (an entity, a player: 19 of the
+        // pack's jars ask a player) are the same ones here.
+        (o, "registryAccess") if o.starts_with("net/minecraft/") && desc.starts_with("()Lnet/minecraft/core/RegistryAccess") => {
             rt.intern("compat:registry-access".into(), |rt| rt.new_object("net/minecraft/core/RegistryAccess"))
         }
         // `level.holderLookup(Registries.BLOCK)`: the registry, as the level's registries give it.

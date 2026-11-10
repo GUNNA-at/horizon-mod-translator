@@ -239,6 +239,9 @@ fn java_is_a(c: &str, class: &str) -> bool {
                 | "com/google/gson/JsonParseException" | "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"
                 | "net/minecraft/ResourceLocationException" | "net/minecraft/ReportedException"
                 | "org/apache/commons/lang3/NotImplementedException"
+                // A byte buffer's ([`crate::nio`]).
+                | "java/nio/BufferUnderflowException" | "java/nio/BufferOverflowException"
+                | "java/nio/ReadOnlyBufferException" | "java/nio/InvalidMarkException"
         ) || java_is_a(c, NETTY_CODEC_EXCEPTION)
             || c == NETTY_CODEC_EXCEPTION,
         // Netty's codec exceptions, which the runtime throws reading a packet (as Netty's
@@ -254,11 +257,22 @@ fn java_is_a(c: &str, class: &str) -> bool {
             matches!(c, "io/netty/handler/codec/CorruptedFrameException" | "io/netty/handler/codec/TooLongFrameException")
         }
         // Commons Lang's: `NotImplementedException extends UnsupportedOperationException`.
-        "java/lang/UnsupportedOperationException" => c == "org/apache/commons/lang3/NotImplementedException",
+        "java/lang/UnsupportedOperationException" => {
+            matches!(
+                c,
+                "org/apache/commons/lang3/NotImplementedException"
+                    | "java/nio/ReadOnlyBufferException"
+            )
+        }
         "com/google/gson/JsonParseException" => matches!(c, "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"),
         "java/lang/IllegalArgumentException" => matches!(c, "java/lang/NumberFormatException" | "java/util/IllegalFormatException"),
         "java/lang/IndexOutOfBoundsException" => matches!(c, "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/StringIndexOutOfBoundsException"),
-        "java/lang/IllegalStateException" => c == "java/util/concurrent/CancellationException",
+        "java/lang/IllegalStateException" => {
+            matches!(
+                c,
+                "java/util/concurrent/CancellationException" | "java/nio/InvalidMarkException"
+            )
+        }
         "java/util/NoSuchElementException" => c == "java/util/InputMismatchException",
         "java/io/IOException" => {
             (c.starts_with("java/") && c.ends_with("IOException") && c != class)
@@ -3565,6 +3579,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "getX" | "getY" | "getZ" | "position" | "getPosition" | "blockPosition" | "getEyeY" | "getEyePosition" | "getEyeHeight" | "getLookAngle" | "getViewVector" | "getXRot" | "getYRot" | "getYHeadRot" | "getBoundingBox" | "getBbWidth" | "getBbHeight"
                     | "getRotationVector" | "getVisualRotationYInDegrees" | "getPreciseBodyRotation" | "$yHeadRot" | "$yBodyRot"
                     | "getOnPos" | "getOnPosLegacy" | "getBlockPosBelowThatAffectsMyMovement"
+                    | "getBlockX" | "getBlockY" | "getBlockZ"
             )
             && (!n.starts_with('$') || desc == "()F")
             && (player_place(rt, a(0)).is_some() || is_player_class(rt.class_of(a(0)))) =>
@@ -3575,6 +3590,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "getX" => V::D(p[0]),
                 "getY" => V::D(p[1]),
                 "getZ" => V::D(p[2]),
+                // The block the player's feet are in, by one of its coordinates.
+                "getBlockX" | "getBlockY" | "getBlockZ" => {
+                    V::I(p[usize::from(n.as_bytes()[8] - b'X')].floor() as i32)
+                }
                 "position" | "getPosition" => vec3(rt, p[0], p[1], p[2]),
                 "blockPosition"
                 | "getOnPos"
@@ -4792,6 +4811,48 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                     V::NULL
                 }
             }
+        }
+        // An equipment slot's own facts, as 1.21.1's constants are made: its kind, its index
+        // among the slots of that kind (boots 0 to helmet 3), the number `/item`'s slot ids and
+        // the client's equipment packets know it by, its name.
+        (
+            "net/minecraft/world/entity/EquipmentSlot",
+            "getType" | "getIndex" | "getFilterFlag" | "getName" | "isArmor",
+        ) if api_constant(rt, a(0)) => {
+            const SLOTS: [(&str, i32, i32); 7] = [
+                ("HAND", 0, 0),
+                ("HAND", 1, 5),
+                ("HUMANOID_ARMOR", 0, 1),
+                ("HUMANOID_ARMOR", 1, 2),
+                ("HUMANOID_ARMOR", 2, 3),
+                ("HUMANOID_ARMOR", 3, 4),
+                ("ANIMAL_ARMOR", 0, 6),
+            ];
+            let (kind, index, flag) = *SLOTS.get(rt.get_field(a(0), "$ordinal").i() as usize)?;
+            match name {
+                "getType" => {
+                    let field = rt.static_key(&format!(
+                        "net/minecraft/world/entity/EquipmentSlot$Type.{kind}"
+                    ));
+                    crate::api::get_static(rt, field)
+                }
+                // `getIndex()`, or `getIndex(base)`: past a base of the caller's.
+                "getIndex" => V::I(index + if args.len() > 1 { a(1).i() } else { 0 }),
+                "getFilterFlag" => V::I(flag),
+                "isArmor" => V::I(i32::from(kind != "HAND")),
+                _ => {
+                    let lower = constant(rt, a(0)).to_ascii_lowercase();
+                    rt.string(&lower)
+                }
+            }
+        }
+        // The group a slot's modifiers are of: the one of its own name.
+        ("net/minecraft/world/entity/EquipmentSlotGroup", "bySlot") => {
+            let slot = constant(rt, a(0));
+            let field = rt.static_key(&format!(
+                "net/minecraft/world/entity/EquipmentSlotGroup.{slot}"
+            ));
+            crate::api::get_static(rt, field)
         }
         // A vanilla enum's name in data (`StringRepresentable.getSerializedName`, named on the
         // interface or on its class): its constant's, as vanilla spells it.
@@ -6506,6 +6567,16 @@ mod tests {
         rt.with_host(&mut host, |rt| {
             let me = crate::network::local_player(rt);
             assert_eq!(stands(rt, me), (false, [-1, 64, 0]));
+            // The block their feet are in, by its coordinates, through any of a player's
+            // classes (`Entity` declares them).
+            let block = [
+                "net/minecraft/world/entity/Entity.getBlockX.()I",
+                "net/minecraft/world/entity/player/Player.getBlockY.()I",
+                "net/minecraft/client/player/LocalPlayer.getBlockZ.()I",
+            ]
+            .map(|key| crate::api::call(rt, key, &[me]).i());
+            assert_eq!(block, [-1, 64, 0]);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
         let mut rt = Rt::new();
         let mut host = crate::host::MemoryHost {
@@ -7304,12 +7375,88 @@ mod tests {
         ));
     }
 
+    /// An equipment slot's facts as 1.21.1's constants are constructed (read from its class
+    /// file): the chest slot is the third of the humanoid armour's, number 3 to the game's slot
+    /// ids, named "chest", and its modifiers' group is `CHEST`; the off hand is a hand.
+    #[test]
+    fn an_equipment_slot_knows_its_kind_and_its_index() {
+        crate::install();
+        let mut rt = Rt::new();
+        let c = crate::api::call;
+        let chest =
+            crate::api::get_static(&mut rt, "net/minecraft/world/entity/EquipmentSlot.CHEST");
+        let off =
+            crate::api::get_static(&mut rt, "net/minecraft/world/entity/EquipmentSlot.OFFHAND");
+        let ints = |rt: &mut Rt, slot: V| {
+            [
+                c(
+                    rt,
+                    "net/minecraft/world/entity/EquipmentSlot.getIndex.()I",
+                    &[slot],
+                )
+                .i(),
+                c(
+                    rt,
+                    "net/minecraft/world/entity/EquipmentSlot.getIndex.(I)I",
+                    &[slot, V::I(36)],
+                )
+                .i(),
+                c(
+                    rt,
+                    "net/minecraft/world/entity/EquipmentSlot.getFilterFlag.()I",
+                    &[slot],
+                )
+                .i(),
+                c(
+                    rt,
+                    "net/minecraft/world/entity/EquipmentSlot.isArmor.()Z",
+                    &[slot],
+                )
+                .i(),
+            ]
+        };
+        assert_eq!(ints(&mut rt, chest), [2, 38, 3, 1]);
+        assert_eq!(ints(&mut rt, off), [1, 37, 5, 0]);
+        let name = c(
+            &mut rt,
+            "net/minecraft/world/entity/EquipmentSlot.getName.()Ljava/lang/String;",
+            &[chest],
+        );
+        assert_eq!(rt.str_of(name), Some("chest"));
+        let kind = c(
+            &mut rt,
+            "net/minecraft/world/entity/EquipmentSlot.getType.()Lnet/minecraft/world/entity/EquipmentSlot$Type;",
+            &[chest],
+        );
+        let armor = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/world/entity/EquipmentSlot$Type.HUMANOID_ARMOR",
+        );
+        assert!(kind == armor && kind.r() != 0);
+        let group = c(
+            &mut rt,
+            "net/minecraft/world/entity/EquipmentSlotGroup.bySlot.(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/entity/EquipmentSlotGroup;",
+            &[chest],
+        );
+        let chest_group = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/world/entity/EquipmentSlotGroup.CHEST",
+        );
+        assert!(group == chest_group && group.r() != 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn the_vanilla_class_tables_are_sorted_for_their_searches() {
-        use crate::vanilla_classes::{BLOCKS, CLASSES, ITEMS};
+        use crate::vanilla_classes::{BLOCKS, CLASSES, DECLARED, ITEMS};
         assert!(BLOCKS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(ITEMS.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(CLASSES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(
+            DECLARED
+                .iter()
+                .all(|methods| methods.windows(2).all(|w| w[0] < w[1]))
+        );
     }
 
     #[test]
