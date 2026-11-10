@@ -38,6 +38,8 @@ fn zero(desc: &str) -> V {
 /// class that another module made and keeps under names of its own (a tag key, one object for
 /// each registry and location) holds none of them and is that module's to answer for: taken for
 /// a record, every two of them were equal with a hash of 0, and a map keyed by tags held one.
+/// One that holds nothing yet (made, its constructor not run) is a record still, its components
+/// unset.
 fn made_here(rt: &Rt, v: V, class: &str) -> bool {
     if v.r() == 0 || rt.class_of(v) != class {
         return false;
@@ -46,7 +48,9 @@ fn made_here(rt: &Rt, v: V, class: &str) -> bool {
         return false;
     };
     match components(class) {
-        Some(all) if !all.is_empty() => all.iter().any(|(name, _)| fields.contains_key(name)),
+        Some(all) if !all.is_empty() && !fields.is_empty() => {
+            all.iter().any(|(name, _)| fields.contains_key(name))
+        }
         _ => true,
     }
 }

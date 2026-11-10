@@ -890,9 +890,28 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/lang/Character" => {
             let c = char::from_u32(a(0).i() as u32).unwrap_or('\0');
             Some(match name {
-                "isDigit" => V::I(c.is_ascii_digit() as i32),
-                "isLetter" | "isAlphabetic" => V::I(c.is_alphabetic() as i32),
-                "isLetterOrDigit" => V::I(c.is_alphanumeric() as i32),
+                // By the character's general category, as Java's: a digit of any script, a
+                // letter of any (`Alphabetic` is wider: marks and letter numbers too).
+                "isDigit" => V::I((general_category(a(0).i()) == 9) as i32),
+                "isLetter" => V::I(matches!(general_category(a(0).i()), 1..=5) as i32),
+                "isAlphabetic" => V::I(c.is_alphabetic() as i32),
+                "isLetterOrDigit" => V::I(matches!(general_category(a(0).i()), 1..=5 | 9) as i32),
+                "getType" => V::I(i32::from(general_category(a(0).i()))),
+                "isDefined" => V::I((general_category(a(0).i()) != 0) as i32),
+                "isTitleCase" => V::I((general_category(a(0).i()) == 3) as i32),
+                "isISOControl" => V::I(matches!(a(0).i(), 0..=0x1F | 0x7F..=0x9F) as i32),
+                "isIdentifierIgnorable" => V::I(identifier_ignorable(a(0).i()) as i32),
+                "isJavaIdentifierStart" | "isJavaLetter" => {
+                    V::I(java_identifier(a(0).i(), false) as i32)
+                }
+                "isJavaIdentifierPart" | "isJavaLetterOrDigit" => {
+                    V::I(java_identifier(a(0).i(), true) as i32)
+                }
+                "isUnicodeIdentifierStart" => V::I(unicode_identifier(a(0).i(), false) as i32),
+                "isUnicodeIdentifierPart" => V::I(unicode_identifier(a(0).i(), true) as i32),
+                "isBmpCodePoint" => V::I((a(0).i() >> 16 == 0) as i32),
+                "isSupplementaryCodePoint" => V::I((0x10000..=0x10FFFF).contains(&a(0).i()) as i32),
+                "isValidCodePoint" => V::I((0..=0x10FFFF).contains(&a(0).i()) as i32),
                 "isWhitespace" => V::I(java_whitespace(c) as i32),
                 "isSpaceChar" => V::I((c.is_whitespace() && !c.is_control()) as i32),
                 "isUpperCase" => V::I(c.is_uppercase() as i32),
@@ -2463,6 +2482,115 @@ fn for_input(s: &str, radix: i32) -> String {
         format!("For input string: \"{s}\"")
     } else {
         format!("For input string: \"{s}\" under radix {radix}")
+    }
+}
+
+/// `Character.getType`: a character's general category as Java numbers them
+/// (`UPPERCASE_LETTER` 1 ... `FINAL_QUOTE_PUNCTUATION` 30; 0 unassigned). ASCII by rule, the rest
+/// by the Unicode tables the regular expressions read.
+fn general_category(cp: i32) -> u8 {
+    const CLASSES: [(&str, u8); 29] = [
+        ("Lu", 1),
+        ("Ll", 2),
+        ("Lt", 3),
+        ("Lm", 4),
+        ("Lo", 5),
+        ("Mn", 6),
+        ("Me", 7),
+        ("Mc", 8),
+        ("Nd", 9),
+        ("Nl", 10),
+        ("No", 11),
+        ("Zs", 12),
+        ("Zl", 13),
+        ("Zp", 14),
+        ("Cc", 15),
+        ("Cf", 16),
+        ("Co", 18),
+        ("Pd", 20),
+        ("Ps", 21),
+        ("Pe", 22),
+        ("Pc", 23),
+        ("Po", 24),
+        ("Sm", 25),
+        ("Sc", 26),
+        ("Sk", 27),
+        ("So", 28),
+        ("Pi", 29),
+        ("Pf", 30),
+        ("Cn", 0),
+    ];
+    if (0xD800..0xE000).contains(&cp) {
+        return 19;
+    }
+    let Some(c) = u32::try_from(cp).ok().and_then(char::from_u32) else {
+        return 0;
+    };
+    if c.is_ascii() {
+        return match c {
+            'A'..='Z' => 1,
+            'a'..='z' => 2,
+            '0'..='9' => 9,
+            ' ' => 12,
+            '\0'..='\x1f' | '\x7f' => 15,
+            '-' => 20,
+            '(' | '[' | '{' => 21,
+            ')' | ']' | '}' => 22,
+            '_' => 23,
+            '+' | '<' | '=' | '>' | '|' | '~' => 25,
+            '$' => 26,
+            '^' | '`' => 27,
+            _ => 24,
+        };
+    }
+    static TABLES: std::sync::OnceLock<Vec<(regex::Regex, u8)>> = std::sync::OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        CLASSES
+            .iter()
+            .filter_map(|(class, n)| {
+                Some((regex::Regex::new(&format!(r"^\p{{{class}}}$")).ok()?, *n))
+            })
+            .collect()
+    });
+    let mut text = [0u8; 4];
+    let text = c.encode_utf8(&mut text);
+    tables
+        .iter()
+        .find(|(re, _)| re.is_match(text))
+        .map_or(0, |(_, n)| *n)
+}
+
+/// `Character.isIdentifierIgnorable`: the controls that are no whitespace, and the format
+/// characters.
+fn identifier_ignorable(cp: i32) -> bool {
+    matches!(cp, 0..=8 | 0xE..=0x1B | 0x7F..=0x9F) || general_category(cp) == 16
+}
+
+/// `Character.isJavaIdentifierStart` (`part` false) and `isJavaIdentifierPart`: a letter, a
+/// letter number, a currency symbol or a connecting punctuation mark; in a part also a digit, a
+/// combining or non-spacing mark, or an ignorable character.
+fn java_identifier(cp: i32, part: bool) -> bool {
+    match general_category(cp) {
+        1..=5 | 10 | 23 | 26 => true,
+        6 | 8 | 9 => part,
+        _ => part && identifier_ignorable(cp),
+    }
+}
+
+/// `Character.isUnicodeIdentifierStart` (`part` false) and `isUnicodeIdentifierPart`: a letter,
+/// a letter number or one of Unicode's `Other_ID_Start`; in a part also a connecting punctuation
+/// mark, a digit, a mark, an ignorable character or one of `Other_ID_Continue`.
+fn unicode_identifier(cp: i32, part: bool) -> bool {
+    if matches!(cp, 0x1885 | 0x1886 | 0x2118 | 0x212E | 0x309B | 0x309C) {
+        return true;
+    }
+    match general_category(cp) {
+        1..=5 | 10 => true,
+        6 | 8 | 9 | 23 => part,
+        _ => {
+            part && (identifier_ignorable(cp)
+                || matches!(cp, 0xB7 | 0x387 | 0x1369..=0x1371 | 0x19DA))
+        }
     }
 }
 
@@ -4514,6 +4642,79 @@ mod tests {
         assert_eq!(on(rt, "java/lang/String.lastIndexOf.(II)I", &[aaa, V::I('a' as i32), V::I(-5)]), -1);
         assert_eq!(on(rt, "java/lang/String.indexOf.(Ljava/lang/String;I)I", &[abc, empty, V::I(7)]), 3);
         assert_eq!(on(rt, "java/lang/String.lastIndexOf.(Ljava/lang/String;I)I", &[abab, ab, V::I(0)]), 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A character's general category (`getType`) and what follows from it, checked against a
+    /// Java 21 for every code point it defines: a letter and a digit of any script, what starts
+    /// and continues a Java and a Unicode identifier (a JSON5 parser reads unquoted keys by the
+    /// latter: unanswered, a config a mod had just written failed to read back).
+    #[test]
+    fn a_characters_category_and_identifier_rules_are_javas() {
+        let mut rt = Rt::new();
+        // (code point, `getType`, then whether: a letter, a digit, a Java identifier's start and
+        // part, a Unicode identifier's start and part, ignorable in one), as Java 21 answers.
+        let cases: [(i32, i32, [bool; 7]); 11] = [
+            ('A' as i32, 1, [true, false, true, true, true, true, false]),
+            (0x663, 9, [false, true, false, true, false, true, false]),
+            (
+                '$' as i32,
+                26,
+                [false, false, true, true, false, false, false],
+            ),
+            (
+                '_' as i32,
+                23,
+                [false, false, true, true, false, true, false],
+            ),
+            (0xB7, 24, [false, false, false, false, false, true, false]),
+            (0x200B, 16, [false, false, false, true, false, true, true]),
+            (0x2160, 10, [false, false, true, true, true, true, false]),
+            (0x300, 6, [false, false, false, true, false, true, false]),
+            (0x1885, 6, [false, false, false, true, true, true, false]),
+            (0x1F600, 28, [false; 7]),
+            (' ' as i32, 12, [false; 7]),
+        ];
+        const ASKED: [&str; 7] = [
+            "isLetter",
+            "isDigit",
+            "isJavaIdentifierStart",
+            "isJavaIdentifierPart",
+            "isUnicodeIdentifierStart",
+            "isUnicodeIdentifierPart",
+            "isIdentifierIgnorable",
+        ];
+        for (cp, category, answers) in cases {
+            assert_eq!(
+                c(&mut rt, "java/lang/Character.getType.(I)I", &[V::I(cp)]),
+                V::I(category),
+                "U+{cp:04X}"
+            );
+            for (name, expected) in ASKED.iter().zip(answers) {
+                let key = rt.static_key(&format!("java/lang/Character.{name}.(I)Z"));
+                assert_eq!(
+                    c(&mut rt, key, &[V::I(cp)]),
+                    V::I(expected as i32),
+                    "{name} of U+{cp:04X}"
+                );
+            }
+        }
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Character.isISOControl.(C)Z",
+                &[V::I(0x85)]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Character.isSupplementaryCodePoint.(I)Z",
+                &[V::I(0x1F600)]
+            ),
+            V::I(1)
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

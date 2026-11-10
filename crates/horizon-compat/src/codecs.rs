@@ -155,6 +155,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         },
         ("net/minecraft/nbt/NbtOps", "INSTANCE") => crate::ops::nbt_ops(rt),
         ("com/mojang/serialization/JsonOps", "INSTANCE" | "COMPRESSED") => rt.intern("compat:json-ops".into(), |rt| rt.new_object("com/mojang/serialization/JsonOps")),
+        // DFU's ops over Java's own values: maps, lists, strings and boxes.
+        (JAVA_OPS, "INSTANCE") => rt.intern("compat:java-ops".into(), |rt| rt.new_object(JAVA_OPS)),
         ("net/minecraft/resources/ResourceLocation", "CODEC") => native(rt, "resource_location"),
         ("net/minecraft/core/BlockPos", "CODEC") => native(rt, "block_pos"),
         // `{dimension, pos}`, as vanilla's record codec reads and writes it.
@@ -818,6 +820,305 @@ pub fn encode_json(rt: &mut Rt, c: V, value: V) -> Result<V, String> {
     let written = encode(rt, c, value);
     FOR_JSON.set(was);
     Ok(json_tree(rt, &written?))
+}
+
+const JAVA_OPS: &str = "com/mojang/serialization/JavaOps";
+const DYNAMIC_OPS: &str = "com/mojang/serialization/DynamicOps";
+const CONVERT_TO: &str = "com/mojang/serialization/DynamicOps.convertTo.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Ljava/lang/Object;";
+const CREATE_STRING: &str =
+    "com/mojang/serialization/DynamicOps.createString.(Ljava/lang/String;)Ljava/lang/Object;";
+const CREATE_NUMERIC: &str =
+    "com/mojang/serialization/DynamicOps.createNumeric.(Ljava/lang/Number;)Ljava/lang/Object;";
+const CREATE_BOOLEAN: &str =
+    "com/mojang/serialization/DynamicOps.createBoolean.(Z)Ljava/lang/Object;";
+const CREATE_BYTE: &str = "com/mojang/serialization/DynamicOps.createByte.(B)Ljava/lang/Object;";
+const CREATE_LIST: &str =
+    "com/mojang/serialization/DynamicOps.createList.(Ljava/util/stream/Stream;)Ljava/lang/Object;";
+const CREATE_MAP: &str =
+    "com/mojang/serialization/DynamicOps.createMap.(Ljava/util/stream/Stream;)Ljava/lang/Object;";
+const GET_STREAM: &str = "com/mojang/serialization/DynamicOps.getStream.(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+const GET_MAP_VALUES: &str = "com/mojang/serialization/DynamicOps.getMapValues.(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+const GET_NUMBER: &str = "com/mojang/serialization/DynamicOps.getNumberValue.(Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+
+/// What a `DynamicOps` object reads and writes: the tags (`NbtOps`, and what the runtime takes
+/// for it), Gson's tree (`JsonOps`), Java's own maps, lists and boxes (DFU's `JavaOps`), or
+/// values of a mod's own (an ops class of the mod's: CristelLib's for Jankson), made and read
+/// through that ops' methods.
+#[derive(Clone, Copy, PartialEq)]
+enum Format {
+    Tags,
+    Json,
+    Java,
+    Own,
+}
+
+fn format_of(rt: &Rt, ops: V) -> Format {
+    let class = rt.class_of(ops);
+    if class.contains("JsonOps") {
+        Format::Json
+    } else if class == JAVA_OPS {
+        Format::Java
+    } else if ops.r() != 0 && rt.is_mod_class(class) {
+        Format::Own
+    } else {
+        Format::Tags
+    }
+}
+
+/// What [`encode`] wrote, in the format of `ops` ([`Format`]; not the tags').
+fn written_as(rt: &mut Rt, ops: V, format: Format, n: &Nbt) -> V {
+    match format {
+        Format::Java => java_tree(rt, n),
+        Format::Own => own_tree(rt, ops, n),
+        _ => json_tree(rt, n),
+    }
+}
+
+/// What [`encode`] wrote as `JavaOps` has it: a map of strings, a list, a string, a `Boolean`,
+/// each number in its own box.
+fn java_tree(rt: &mut Rt, n: &Nbt) -> V {
+    let boxed = |rt: &mut Rt, v: V, kind: char| crate::mixin::box_value(rt, v, kind);
+    match n {
+        Nbt::String(s) if s == JSON_TRUE || s == JSON_FALSE => {
+            boxed(rt, V::I((s == JSON_TRUE) as i32), 'Z')
+        }
+        Nbt::String(s) => rt.string(s),
+        Nbt::Byte(b) => boxed(rt, V::I(i32::from(*b)), 'B'),
+        Nbt::Short(s) => boxed(rt, V::I(i32::from(*s)), 'S'),
+        Nbt::Int(i) => boxed(rt, V::I(*i), 'I'),
+        Nbt::Long(l) => boxed(rt, V::J(*l), 'J'),
+        Nbt::Float(f) => boxed(rt, V::F(*f), 'F'),
+        Nbt::Double(d) => boxed(rt, V::D(*d), 'D'),
+        Nbt::List(l) => {
+            let items = l.iter().map(|e| java_tree(rt, e)).collect();
+            jutil::new_list(rt, items)
+        }
+        Nbt::Compound(c) => {
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+            for (k, v) in c {
+                let (k, v) = (rt.string(k), java_tree(rt, v));
+                jutil::table_put(rt, m, k, v);
+            }
+            m
+        }
+        Nbt::ByteArray(a) => {
+            let items = a
+                .iter()
+                .map(|b| boxed(rt, V::I(i32::from(*b)), 'B'))
+                .collect();
+            jutil::new_list(rt, items)
+        }
+        Nbt::IntArray(a) => {
+            let items = a.iter().map(|i| boxed(rt, V::I(*i), 'I')).collect();
+            jutil::new_list(rt, items)
+        }
+        Nbt::LongArray(a) => {
+            let items = a.iter().map(|l| boxed(rt, V::J(*l), 'J')).collect();
+            jutil::new_list(rt, items)
+        }
+    }
+}
+
+/// What [`encode`] wrote, made by a mod's own ops: each string, number and boolean by its
+/// `create...`, a list of what it made of the elements (`createList(stream)`), a map of pairs of
+/// what it made of the keys and values (`createMap(stream)`).
+fn own_tree(rt: &mut Rt, ops: V, n: &Nbt) -> V {
+    let numeric = |rt: &mut Rt, v: V, kind: char| {
+        let n = crate::mixin::box_value(rt, v, kind);
+        rt.call_functional(CREATE_NUMERIC, ops, &[n])
+    };
+    let listed = |rt: &mut Rt, items: Vec<V>| {
+        let stream = rt.alloc("java/util/stream/Stream", Data::Stream(items));
+        rt.call_functional(CREATE_LIST, ops, &[stream])
+    };
+    match n {
+        Nbt::String(s) if s == JSON_TRUE || s == JSON_FALSE => {
+            rt.call_functional(CREATE_BOOLEAN, ops, &[V::I((s == JSON_TRUE) as i32)])
+        }
+        Nbt::String(s) => {
+            let s = rt.string(s);
+            rt.call_functional(CREATE_STRING, ops, &[s])
+        }
+        Nbt::Byte(b) => numeric(rt, V::I(i32::from(*b)), 'B'),
+        Nbt::Short(s) => numeric(rt, V::I(i32::from(*s)), 'S'),
+        Nbt::Int(i) => numeric(rt, V::I(*i), 'I'),
+        Nbt::Long(l) => numeric(rt, V::J(*l), 'J'),
+        Nbt::Float(f) => numeric(rt, V::F(*f), 'F'),
+        Nbt::Double(d) => numeric(rt, V::D(*d), 'D'),
+        Nbt::List(l) => {
+            let items = l.iter().map(|e| own_tree(rt, ops, e)).collect();
+            listed(rt, items)
+        }
+        Nbt::Compound(c) => {
+            let mut pairs = Vec::with_capacity(c.len());
+            for (k, v) in c {
+                let k = rt.string(k);
+                let (k, v) = (
+                    rt.call_functional(CREATE_STRING, ops, &[k]),
+                    own_tree(rt, ops, v),
+                );
+                pairs.push(pair(rt, k, v));
+            }
+            let stream = rt.alloc("java/util/stream/Stream", Data::Stream(pairs));
+            rt.call_functional(CREATE_MAP, ops, &[stream])
+        }
+        Nbt::ByteArray(a) => {
+            let items = a
+                .iter()
+                .map(|b| numeric(rt, V::I(i32::from(*b)), 'B'))
+                .collect();
+            listed(rt, items)
+        }
+        Nbt::IntArray(a) => {
+            let items = a.iter().map(|i| numeric(rt, V::I(*i), 'I')).collect();
+            listed(rt, items)
+        }
+        Nbt::LongArray(a) => {
+            let items = a.iter().map(|l| numeric(rt, V::J(*l), 'J')).collect();
+            listed(rt, items)
+        }
+    }
+}
+
+/// What a codec is handed to read, as JSON: a tag or Gson's tree as they are; `JavaOps`' maps,
+/// lists, strings and boxes; and a value of a mod's own ops as that ops converts it to tags
+/// (`ops.convertTo(NbtOps.INSTANCE, input)`).
+fn input_json(rt: &mut Rt, ops: V, input: V) -> Json {
+    match format_of(rt, ops) {
+        Format::Own => {
+            let tags = crate::ops::nbt_ops(rt);
+            let tag = rt.call_functional(CONVERT_TO, ops, &[tags, input]);
+            crate::recipes::to_json(rt, tag)
+        }
+        Format::Java => java_json(rt, input),
+        _ => crate::recipes::to_json(rt, input),
+    }
+}
+
+/// A value of `JavaOps` as JSON: a map by its keys' text, a list or an array, a string, a
+/// `Boolean`, a number in its box (or held raw).
+fn java_json(rt: &mut Rt, v: V) -> Json {
+    let number = |n: V| match n {
+        V::I(i) => Json::from(i),
+        V::J(j) => Json::from(j),
+        V::F(f) => Json::from(f64::from(f)),
+        V::D(d) => Json::from(d),
+        _ => Json::Null,
+    };
+    if !matches!(v, V::R(_)) {
+        return number(v);
+    }
+    if v.r() == 0 {
+        return Json::Null;
+    }
+    if let Some(s) = rt.str_of(v) {
+        return Json::String(s.to_owned());
+    }
+    match rt.class_of(v) {
+        "java/lang/Boolean" => return Json::Bool(rt.get_field(v, "value").i() != 0),
+        "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte"
+        | "java/lang/Float" | "java/lang/Double" => {
+            return number(rt.get_field(v, "value"));
+        }
+        _ => {}
+    }
+    match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+        Some(Data::Table(_)) if rt.class_of(v).ends_with("Map") => {
+            let mut o = Map::new();
+            for (k, e) in jutil::table_pairs(rt, v) {
+                let key = match java_json(rt, k) {
+                    Json::String(s) => s,
+                    other => other.to_string(),
+                };
+                let e = java_json(rt, e);
+                o.insert(key, e);
+            }
+            Json::Object(o)
+        }
+        Some(Data::List(_) | Data::Array(_) | Data::Table(_)) => {
+            let items = jutil::elements(rt, v);
+            Json::Array(items.into_iter().map(|e| java_json(rt, e)).collect())
+        }
+        _ => crate::recipes::to_json(rt, v),
+    }
+}
+
+/// `DynamicOps`' default methods on an ops class of a mod's own, which has the abstract ones:
+/// each number made through `createNumeric`, a boolean as a byte, and a list or a map converted
+/// to another ops' element by element (`convertList`, `convertMap`). None for another method.
+fn own_ops_default(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let ops = a(0);
+    let numeric = |rt: &mut Rt, kind: char| {
+        let n = crate::mixin::box_value(rt, a(1), kind);
+        rt.call_functional(CREATE_NUMERIC, ops, &[n])
+    };
+    Some(match method {
+        "createByte" => numeric(rt, 'B'),
+        "createShort" => numeric(rt, 'S'),
+        "createInt" => numeric(rt, 'I'),
+        "createLong" => numeric(rt, 'J'),
+        "createFloat" => numeric(rt, 'F'),
+        "createDouble" => numeric(rt, 'D'),
+        "createBoolean" => rt.call_functional(CREATE_BYTE, ops, &[V::I((a(1).i() != 0) as i32)]),
+        "getBooleanValue" => {
+            let n = rt.call_functional(GET_NUMBER, ops, &[a(1)]);
+            match result_of(rt, n) {
+                Ok(n) => {
+                    let b = crate::mixin::unbox(rt, n, 'I').i() != 0;
+                    let b = crate::mixin::box_value(rt, V::I(b as i32), 'Z');
+                    success(rt, b)
+                }
+                Err(e) => error(rt, &e),
+            }
+        }
+        "emptyList" => {
+            let none = rt.alloc("java/util/stream/Stream", Data::Stream(Vec::new()));
+            rt.call_functional(CREATE_LIST, ops, &[none])
+        }
+        "emptyMap" => {
+            let none = rt.alloc("java/util/stream/Stream", Data::Stream(Vec::new()));
+            rt.call_functional(CREATE_MAP, ops, &[none])
+        }
+        // `createMap(Map)`: of its entries as pairs.
+        "createMap" if desc.starts_with("(Ljava/util/Map;)") => {
+            let pairs = jutil::table_pairs(rt, a(1))
+                .into_iter()
+                .map(|(k, v)| pair(rt, k, v))
+                .collect();
+            let stream = rt.alloc("java/util/stream/Stream", Data::Stream(pairs));
+            rt.call_functional(CREATE_MAP, ops, &[stream])
+        }
+        "convertList" => {
+            let (to, read) = (a(1), rt.call_functional(GET_STREAM, ops, &[a(2)]));
+            let items = result_of(rt, read)
+                .map(|s| jutil::elements(rt, s))
+                .unwrap_or_default();
+            let mut out = Vec::with_capacity(items.len());
+            for e in items {
+                out.push(rt.call_functional(CONVERT_TO, ops, &[to, e]));
+            }
+            let stream = rt.alloc("java/util/stream/Stream", Data::Stream(out));
+            rt.call_functional(CREATE_LIST, to, &[stream])
+        }
+        "convertMap" => {
+            let (to, read) = (a(1), rt.call_functional(GET_MAP_VALUES, ops, &[a(2)]));
+            let entries = result_of(rt, read)
+                .map(|s| jutil::elements(rt, s))
+                .unwrap_or_default();
+            let mut out = Vec::with_capacity(entries.len());
+            for e in entries {
+                let (k, v) = (rt.get_field(e, "$first"), rt.get_field(e, "$second"));
+                let k = rt.call_functional(CONVERT_TO, ops, &[to, k]);
+                let v = rt.call_functional(CONVERT_TO, ops, &[to, v]);
+                out.push(pair(rt, k, v));
+            }
+            let stream = rt.alloc("java/util/stream/Stream", Data::Stream(out));
+            rt.call_functional(CREATE_MAP, to, &[stream])
+        }
+        "compressMaps" => V::I(0),
+        _ => return None,
+    })
 }
 
 /// JSON a codec of the runtime's own writes, as what [`encode`] gives: the tags' form of it
@@ -1567,6 +1868,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if is_codec(rt, receiver) {
         return codec_method(rt, method, desc, args);
     }
+    // An ops class of a mod's own asked for one of `DynamicOps`' default methods.
+    if owner == DYNAMIC_OPS && format_of(rt, receiver) == Format::Own {
+        return own_ops_default(rt, method, desc, args);
+    }
     if crate::ops::takes(rt, owner, receiver) {
         return crate::ops::call(rt, method, desc, args);
     }
@@ -1842,8 +2147,9 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
         "withAlternative" => codec(rt, "compat:codec/alt", vec![c, a(1), V::NULL]),
         "promotePartial" | "withLifecycle" | "stable" | "deprecated" | "mapResult" => c,
         "parse" => {
-            // `parse(ops, input)`: the input is a value the mod holds (a tag, a JSON value).
-            let input = crate::recipes::to_json(rt, a(2));
+            // `parse(ops, input)`: the input is a value the mod holds (a tag, a JSON value, a
+            // value of the ops' own).
+            let input = input_json(rt, a(1), a(2));
             match decode(rt, c, &input) {
                 Ok(v) => success(rt, v),
                 Err(e) => error(rt, &e),
@@ -1862,7 +2168,7 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
             }
         }
         "decode" => {
-            let input = crate::recipes::to_json(rt, a(2));
+            let input = input_json(rt, a(1), a(2));
             match decode(rt, c, &input) {
                 Ok(v) => {
                     let rest = a(2);
@@ -1882,12 +2188,18 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
             a(3)
         }
         // `encodeStart(ops, value)`, `encode(value, ops, prefix)`: Gson's tree for `JsonOps`
-        // (onto the members of a prefix that is an object), else NBT (`NbtOps`); a `RegistryOps`
-        // is the ops it is over.
+        // (onto the members of a prefix that is an object), Java's own values for `JavaOps`,
+        // what a mod's own ops makes of it, else NBT (`NbtOps`); a `RegistryOps` is the ops it
+        // is over.
         "encodeStart" | "encode" => {
             let (ops, value, prefix) = if method == "encodeStart" { (a(1), a(2), V::NULL) } else { (a(2), a(1), a(3)) };
-            if rt.class_of(ops).contains("JsonOps") {
-                return Some(match encode_json(rt, c, value) {
+            let format = format_of(rt, ops);
+            if format != Format::Tags {
+                // A boolean is one in each of these formats, as in JSON.
+                let was = FOR_JSON.replace(true);
+                let written = encode(rt, c, value);
+                FOR_JSON.set(was);
+                return Some(match written.map(|n| written_as(rt, ops, format, &n)) {
                     Ok(tree) => {
                         let object = "com/google/gson/JsonObject";
                         let tree = if rt.class_of(prefix) == object && rt.class_of(tree) == object {
@@ -2658,6 +2970,167 @@ mod tests {
             ),
             count
         );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A codec writes to and reads from the other ops: `JavaOps`' maps, lists and boxes, and an
+    /// ops class of a mod's own, whose values that ops makes (`createString`, `createNumeric`,
+    /// `createMap`...) and converts back (`convertTo`, with `DynamicOps`' default `convertMap`).
+    /// (A value written for a mod's ops was a tag, which the mod then asked for its own
+    /// element's methods: CristelLib's Jankson config ended its constructor.)
+    #[test]
+    fn a_codec_writes_and_reads_through_other_ops() {
+        const START: &str = "com/mojang/serialization/Codec.encodeStart.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+        const PARSE: &str = "com/mojang/serialization/Codec.parse.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+        /// A mod's ops, `test/TextOps`: its element a `test/Element` of a text (`$text`: a
+        /// string in quotes, a number or boolean as written) or of members (`$members`: pairs).
+        fn text_ops(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            // Another object's method (the tags' ops it converts to) is the runtime's.
+            if rt.class_of(args[0]) != "test/TextOps" {
+                return api::call(rt, key, args);
+            }
+            let element = |rt: &mut Rt, text: String| {
+                let e = rt.new_object("test/Element");
+                let t = rt.string(&text);
+                rt.put_field(e, "$text", t);
+                e
+            };
+            match short.split('.').next().unwrap_or("") {
+                "createString" => {
+                    let s = rt.str_of(args[1]).unwrap_or("").to_owned();
+                    element(rt, format!("\"{s}\""))
+                }
+                "createNumeric" => {
+                    let n = crate::mixin::unbox(rt, args[1], 'I').i();
+                    element(rt, n.to_string())
+                }
+                "createBoolean" => element(rt, (args[1].i() != 0).to_string()),
+                "createMap" => {
+                    let e = rt.new_object("test/Element");
+                    let pairs = jutil::elements(rt, args[1]);
+                    let pairs = jutil::new_list(rt, pairs);
+                    rt.put_field(e, "$members", pairs);
+                    e
+                }
+                "getMapValues" => {
+                    let pairs = jutil::elements(rt, rt.get_field(args[1], "$members"));
+                    let stream = rt.alloc("java/util/stream/Stream", Data::Stream(pairs));
+                    success(rt, stream)
+                }
+                // As a real ops' own: a map through the default `convertMap`, a text by what it is.
+                "convertTo" => {
+                    let (to, input) = (args[1], args[2]);
+                    if rt.get_field(input, "$members").r() != 0 {
+                        return c(
+                            rt,
+                            "com/mojang/serialization/DynamicOps.convertMap.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Ljava/lang/Object;",
+                            &[args[0], to, input],
+                        );
+                    }
+                    let text = rt
+                        .str_of(rt.get_field(input, "$text"))
+                        .unwrap_or("")
+                        .to_owned();
+                    if let Some(s) = text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+                        let s = rt.string(s);
+                        c(rt, CREATE_STRING, &[to, s])
+                    } else if let Ok(n) = text.parse::<i32>() {
+                        c(
+                            rt,
+                            "com/mojang/serialization/DynamicOps.createInt.(I)Ljava/lang/Object;",
+                            &[to, V::I(n)],
+                        )
+                    } else {
+                        c(rt, CREATE_BOOLEAN, &[to, V::I((text == "true") as i32)])
+                    }
+                }
+                other => panic!("the ops was asked {other}"),
+            }
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(text_ops);
+        rt.supers.insert("test/TextOps", "java/lang/Object");
+        let (string, int, boolean) = (
+            st(&mut rt, "com/mojang/serialization/Codec.STRING"),
+            st(&mut rt, "com/mojang/serialization/Codec.INT"),
+            st(&mut rt, "com/mojang/serialization/Codec.BOOL"),
+        );
+        let counts = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.unboundedMap.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/codecs/UnboundedMapCodec;",
+            &[string, int],
+        );
+        let flags = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.unboundedMap.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/codecs/UnboundedMapCodec;",
+            &[string, boolean],
+        );
+        let map = |rt: &mut Rt, entries: &[(&str, V)]| {
+            let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+            for (k, v) in entries {
+                let k = rt.string(k);
+                jutil::table_put(rt, m, k, *v);
+            }
+            m
+        };
+        let (two, yes) = (
+            crate::mixin::box_value(&mut rt, V::I(2), 'I'),
+            crate::mixin::box_value(&mut rt, V::I(1), 'Z'),
+        );
+
+        // The mod's own ops: its elements, made by it, and read back through it.
+        let ops = rt.new_object("test/TextOps");
+        let value = map(&mut rt, &[("iron", two)]);
+        let r = c(&mut rt, START, &[counts, ops, value]);
+        let written = result_of(&mut rt, r).unwrap();
+        assert_eq!(rt.class_of(written), "test/Element");
+        let members = jutil::elements(&rt, rt.get_field(written, "$members"));
+        let text = |rt: &Rt, e: V| {
+            rt.str_of(rt.get_field(e, "$text"))
+                .unwrap_or("?")
+                .to_owned()
+        };
+        let (k, v) = (
+            rt.get_field(members[0], "$first"),
+            rt.get_field(members[0], "$second"),
+        );
+        assert_eq!(
+            (text(&rt, k), text(&rt, v)),
+            ("\"iron\"".to_owned(), "2".to_owned())
+        );
+        let r = c(&mut rt, PARSE, &[counts, ops, written]);
+        let read = result_of(&mut rt, r).unwrap();
+        let iron = rt.string("iron");
+        let held = jutil::table_get(&mut rt, read, iron).unwrap();
+        assert_eq!(rt.get_field(held, "value"), V::I(2));
+        // A boolean is the ops' own boolean, not a byte.
+        let value = map(&mut rt, &[("glow", yes)]);
+        let r = c(&mut rt, START, &[flags, ops, value]);
+        let written = result_of(&mut rt, r).unwrap();
+        let members = jutil::elements(&rt, rt.get_field(written, "$members"));
+        assert_eq!(text(&rt, rt.get_field(members[0], "$second")), "true");
+
+        // `JavaOps`: a map of a `Boolean`, and a map read back from one (Jade reads its
+        // defaults from an empty map).
+        let java = st(&mut rt, "com/mojang/serialization/JavaOps.INSTANCE");
+        let r = c(&mut rt, START, &[flags, java, value]);
+        let written = result_of(&mut rt, r).unwrap();
+        assert_eq!(rt.class_of(written), "java/util/LinkedHashMap");
+        let glow = rt.string("glow");
+        let held = jutil::table_get(&mut rt, written, glow).unwrap();
+        assert_eq!(
+            (rt.class_of(held), rt.get_field(held, "value")),
+            ("java/lang/Boolean", V::I(1))
+        );
+        let r = c(&mut rt, PARSE, &[flags, java, written]);
+        let read = result_of(&mut rt, r).unwrap();
+        let back = jutil::table_get(&mut rt, read, glow).unwrap();
+        assert_eq!(rt.get_field(back, "value"), V::I(1));
+        let empty = map(&mut rt, &[]);
+        let r = c(&mut rt, PARSE, &[counts, java, empty]);
+        let read = result_of(&mut rt, r).unwrap();
+        assert!(jutil::table_pairs(&rt, read).is_empty());
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

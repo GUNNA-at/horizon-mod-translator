@@ -10231,6 +10231,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Left unanswered of the two lists: `Codec.BYTE_BUFFER`, `ByteBufCodecs.GAME_PROFILE`,
     `readCount` and `writeCount` (two jars each).
   - Tests: 794 compat, 16 compat-core, 33 translator.
+- [x] 2026-11-10 Part 168: launch 12 (the build of Part 166: 933 s for the round, 111 crates):
+  the whole pack shows a world. The game was ready 308 s after it started, in the overworld in
+  creative mode; `time query gametime` and Create's `/create trains` answered in chat, and the
+  window drew the world, the hand, the hotbar and the mods' own HUD pieces with the sixteen
+  sprite arrays of Part 165. 290 mods declared 28,217 blocks and items (0 refused), 114 mob
+  effects and 157 creative tabs; resident memory peaked at 10 GB while the models were baked and
+  settled near 4.7 GB. Four constructors failed (Indigo and GuideME, left for later; CristelLib;
+  Lithostitched, new) and 35 listeners ended with an error. What this Part fixes of it, and of
+  what the pack calls:
+  - A codec writes and reads through the other ops. `JavaOps` (maps, lists, strings and boxes):
+    Jade reads its defaults with `codec.parse(JavaOps.INSTANCE, Map.of())`, which was "Not a map:
+    null". And an ops class of a mod's own: its values are made by its own `createString`,
+    `createNumeric`, `createBoolean`, `createList` and `createMap`, and read back by its
+    `convertTo`, with `DynamicOps`' default methods (`convertMap`, `createInt`...) answered for
+    it. CristelLib writes its JSON5 configs through its Jankson ops: alone, its constructor now
+    ends without an error, the file written with its comments and read back.
+  - `Character`'s categories are Java's: `getType`, a letter and a digit of any script, what
+    starts and continues a Java and a Unicode identifier, `isISOControl`, `isIdentifierIgnorable`.
+    Checked against a Java 21 for every code point: the same for all it defines but three whose
+    category or case Unicode changed since. (Jankson reads unquoted keys with
+    `isUnicodeIdentifierPart`, which had no answer.)
+  - `Gson.toJson(tree, writer)` writes into any writer, not a `StringBuilder` alone.
+  - A record that holds nothing yet answers as a record again: Part 164 took every object
+    without one of its components for another module's, and the coverage probe's bare objects
+    with them (516 accessors counted missing in a measurement of Part 167).
+  - Tests: 796 compat, 16 compat-core, 33 translator.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

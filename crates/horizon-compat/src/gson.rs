@@ -2051,13 +2051,22 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
             let s = write(rt, v, style);
             rt.string(&s)
         }
-        // Into a `StringBuilder`.
+        // A tree into a `StringBuilder`, or into a writer (a file's, a `StringWriter`).
         ("toJson", "(Lcom/google/gson/JsonElement;Ljava/lang/Appendable;)V" | "(Ljava/lang/Object;Ljava/lang/Appendable;)V")
-            if is_element_class(rt.class_of(a(1))) && matches!(rt.class_of(a(2)), "java/lang/StringBuilder" | "java/lang/StringBuffer") =>
+            if a(1).r() == 0 || is_element_class(rt.class_of(a(1))) =>
         {
-            let s = write(rt, a(1), style);
+            let tree = if a(1).r() == 0 { null(rt) } else { a(1) };
+            let s = write(rt, tree, style);
             let s = rt.string(&s);
-            crate::api::call(rt, "java/lang/StringBuilder.append.(Ljava/lang/String;)Ljava/lang/StringBuilder;", &[a(2), s]);
+            let append = if matches!(
+                rt.class_of(a(2)),
+                "java/lang/StringBuilder" | "java/lang/StringBuffer"
+            ) {
+                "java/lang/StringBuilder.append.(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+            } else {
+                "java/io/Writer.write.(Ljava/lang/String;)V"
+            };
+            crate::api::call(rt, append, &[a(2), s]);
             V::Void
         }
         // Into a `JsonWriter` of the mod's: through the writer's own methods.
