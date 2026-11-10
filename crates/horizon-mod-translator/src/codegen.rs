@@ -26,6 +26,13 @@ const FELL: usize = usize::MAX - 3;
 const LONG_BLOCK: usize = 64 << 10;
 /// About how much of a long block each of its functions holds.
 const BLOCK_PIECE: usize = 24 << 10;
+/// A method of this much bytecode or more is cut into functions of several blocks each
+/// ([`ranges`]), whatever its blocks' lengths: `Ignis_Model.animate` came out as one function of
+/// 1.8 MB over 92 blocks, none of them long, and the compiler was longer over its crate alone
+/// than over the pack's other 560 together.
+const BIG_METHOD: usize = 4 << 10;
+/// About how much text of a big method each of its functions holds.
+const RANGE_TEXT: usize = 32 << 10;
 /// A part's classes hold about this much bytecode at most, so that a part fits a crate
 /// ([`crate::split`]): dense code translates to some fifty times its size, and forty classes of
 /// keyframes made a part of 26 MB.
@@ -63,8 +70,12 @@ fn cut(
     bodies: &[String],
     piece: usize,
     (locals, stack): (usize, usize),
+    held: bool,
     out: &mut String,
 ) -> String {
+    // Called from the method itself, which owns its locals and stack, or from a function of a
+    // big method's ([`ranges`]), which already holds them by reference.
+    let frame = if held { "l, s" } else { "&mut l, &mut s" };
     let mut arm = String::from(" let mut at = (0usize, thrown_at);");
     let mut pieces: Vec<String> = vec![String::new()];
     for b in bodies {
@@ -83,10 +94,52 @@ fn cut(
         );
         let _ = write!(
             arm,
-            " at.0 = {LEFT}; let r = {name}(rt, args, &mut l, &mut s, &mut at); if at.0 == {LEFT} {{ return r; }} thrown_at = at.1; if at.0 != {FELL} {{ pc = at.0; continue; }}"
+            " at.0 = {LEFT}; let r = {name}(rt, args, {frame}, &mut at); if at.0 == {LEFT} {{ return r; }} thrown_at = at.1; if at.0 != {FELL} {{ pc = at.0; continue; }}"
         );
     }
     arm
+}
+
+/// The arms of a big method `f` (`arms`: each block's start and its arm of the method's `match`),
+/// as arms that each call a function holding several of the blocks, written to `out`. A function
+/// runs the blocks of its range from the one `at` names, going round among them, until the code
+/// goes to a block outside the range, which it leaves in `at`, or returns ([`LEFT`] stays there).
+fn ranges(
+    f: &str,
+    arms: &[(usize, String)],
+    text: usize,
+    (locals, stack): (usize, usize),
+    out: &mut String,
+) -> String {
+    let (mut main, mut from, mut k) = (String::new(), 0, 0);
+    while from < arms.len() {
+        let (mut to, mut size) = (from, 0);
+        while to < arms.len() && (to == from || size + arms[to].1.len() <= text) {
+            size += arms[to].1.len();
+            to += 1;
+        }
+        let name = format!("{f}__r{k}");
+        let _ = writeln!(
+            out,
+            "#[inline(never)]\nfn {name}(rt: &mut Rt, args: &[V], l: &mut [V; {locals}], s: &mut horizon_compat::Stack<{stack}>, at: &mut (usize, usize)) -> V {{\n    let (mut pc, mut thrown_at): (usize, usize) = *at;\n    at.0 = {LEFT};\n    loop {{\n        match pc {{"
+        );
+        for (_, arm) in &arms[from..to] {
+            out.push_str(arm);
+        }
+        let _ = writeln!(
+            out,
+            "            _ => break,\n        }}\n    }}\n    *at = (pc, thrown_at);\n    V::Void\n}}\n"
+        );
+        let _ = writeln!(
+            main,
+            "            {}..={} => {{ let mut at = (pc, thrown_at); let r = {name}(rt, args, &mut l, &mut s, &mut at); if at.0 == {LEFT} {{ return r; }} pc = at.0; thrown_at = at.1; }}",
+            arms[from].0,
+            arms[to - 1].0
+        );
+        from = to;
+        k += 1;
+    }
+    main
 }
 
 /// FNV-1a, for short stable suffixes on generated names.
@@ -343,6 +396,10 @@ pub struct Program<'a> {
     /// A basic block of more text than the first is cut into functions of about the second
     /// ([`cut`]): [`LONG_BLOCK`] and [`BLOCK_PIECE`] unless a test asks for less.
     pub long_block: (usize, usize),
+    /// How much bytecode makes a method a big one, cut into functions of several blocks, and
+    /// about how much text each holds ([`ranges`]): [`BIG_METHOD`] and [`RANGE_TEXT`] unless a
+    /// test asks for less.
+    pub big_method: (usize, usize),
     /// Methods (`name.desc`) that ask who called them (`StackWalker.getCallerClass`): calls to
     /// them record the calling class first. Everything else keeps no call stack.
     caller_sensitive: BTreeSet<String>,
@@ -612,6 +669,7 @@ impl<'a> Program<'a> {
             metadata: Vec::new(),
             scan_files: Vec::new(),
             long_block: (LONG_BLOCK, BLOCK_PIECE),
+            big_method: (BIG_METHOD, RANGE_TEXT),
             caller_sensitive: classes
                 .iter()
                 .flat_map(|c| c.methods.iter().map(move |m| (c, m)))
@@ -1580,7 +1638,14 @@ impl<'a> Program<'a> {
         // A long block is cut into functions ([`cut`]) where nothing is woven: woven code names
         // what this function holds.
         let cuts = cur.weaves.is_empty();
+        // And a big method into functions of several blocks each ([`ranges`]).
+        let split = cuts && code.bytes.len() >= self.big_method.0;
+        let sizes = (
+            (code.max_locals as usize).max(1),
+            usize::from(code.max_stack.max(1)),
+        );
         let (mut block, mut block_at, mut pieces) = (Vec::new(), 0, String::new());
+        let mut arms: Vec<(usize, String)> = Vec::new();
         self.cur = Some(cur);
         for w in &head {
             let code = match w.kind {
@@ -1621,31 +1686,36 @@ impl<'a> Program<'a> {
             }
             // An arm per basic block: an instruction joined to the one before goes on in its arm.
             if !joined.contains(&i.at) {
-                let _ = write!(s, "            {} => {{", i.at);
                 block_at = i.at;
             }
             block.push(body);
             if !joined.contains(&next) {
+                let mut arm = format!("            {block_at} => {{");
                 if cuts && block.iter().map(String::len).sum::<usize>() > self.long_block.0 {
-                    let sizes = (
-                        (code.max_locals as usize).max(1),
-                        usize::from(code.max_stack.max(1)),
-                    );
-                    s.push_str(&cut(
+                    arm.push_str(&cut(
                         &f,
                         block_at,
                         &block,
                         self.long_block.1,
                         sizes,
+                        split,
                         &mut pieces,
                     ));
                 } else {
                     for body in &block {
-                        let _ = write!(s, " {body}");
+                        let _ = write!(arm, " {body}");
                     }
                 }
+                arm.push_str(" }\n");
+                arms.push((block_at, arm));
                 block.clear();
-                let _ = writeln!(s, " }}");
+            }
+        }
+        if split {
+            s.push_str(&ranges(&f, &arms, self.big_method.1, sizes, &mut pieces));
+        } else {
+            for (_, arm) in &arms {
+                s.push_str(arm);
             }
         }
         // Unwinding: the first handler covering the throwing instruction whose

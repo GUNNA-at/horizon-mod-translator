@@ -9842,6 +9842,19 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `CharMatcher`, `Ascii`, `Converter`, `MoreObjects.ToStringHelper`, commons' `Fraction`.
   - Not checked against a JVM yet (the differential fixture has no library on its class path): the pack's
     next launch is the test. The translator's tests pass.
+- [x] 2026-11-10 Part 152: a big method is cut into functions, and the pack builds on nine jobs. With the
+  memory problem gone (Part 146) nine compilers fit where four ran: the pack's other 564 crates built in 25
+  minutes, and then one compiler worked 20 more on Cataclysm's seventh crate alone.
+  - That crate holds `Ignis_Model.animate`: one function of 1.8 MB over 92 blocks, none past the 64 KB at
+    which a block is cut. A method of 4 KB of bytecode or more is now cut into functions of about 32 KB,
+    several blocks each (`codegen.rs`, `ranges`): each runs the blocks of its range, going round among them,
+    until the code goes to a block outside it or returns. A long block inside one is still cut in its turn.
+    Methods a mixin weaves into stay whole (`AllBlocks.<clinit>`, 1 MB).
+  - Of the pack's 906,474 functions, 109 were past 128 KB and 22 past 200 KB.
+  - The differential test runs every method of its fixture cut this way (60 bytes of bytecode make a big
+    method there, 900 bytes of text a function): all its cases give the JVM's results, the JDK's own code
+    among them.
+  - Not measured yet: the build after it.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

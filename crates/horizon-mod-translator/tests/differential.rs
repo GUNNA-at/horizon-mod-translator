@@ -206,10 +206,16 @@ fn translated_fixture_matches_the_jvm() {
     program.services = horizon_mod_translator::services(&jar).unwrap();
     // Small enough that the fixture's longer blocks are cut into functions, and its short ones not.
     program.long_block = (600, 200);
+    // And a method of any length counts as a big one, cut into functions of a few blocks each.
+    program.big_method = (60, 900);
     let module = program.emit();
     assert!(
         module.contains("#[inline(never)]\nfn j_"),
         "no block of the fixture was cut"
+    );
+    assert!(
+        module.contains("__r1(rt: &mut Rt"),
+        "no method of the fixture was cut into ranges"
     );
 
     // The generated crate.
