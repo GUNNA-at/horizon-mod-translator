@@ -332,4 +332,48 @@ public class Fixture {
         for (int[] row : g) for (int v : row) s += v;
         return s + g.length * 100 + (n > 0 ? g[0].length : 0);
     }
+
+    /** A list, a set and a map of the fixture's own, each on the JDK's abstract base: what they
+     *  do not answer themselves is the base's code over what they do. One part by its number
+     *  (`part` from 1), or all of them folded together for 0. */
+    public static int ownCollections(int part) {
+        final int n = 3;
+        java.util.List<Integer> squares = new java.util.AbstractList<Integer>() {
+            public Integer get(int i) { return i * i + n; }
+            public int size() { return 6; }
+        };
+        java.util.Set<String> names = new java.util.AbstractSet<String>() {
+            public java.util.Iterator<String> iterator() { return java.util.List.of("a", "bb", "ccc").iterator(); }
+            public int size() { return 3; }
+        };
+        java.util.Map<String, Integer> lengths = new java.util.AbstractMap<String, Integer>() {
+            public java.util.Set<java.util.Map.Entry<String, Integer>> entrySet() { return java.util.Set.of(java.util.Map.entry("one", 3 + n)); }
+        };
+        int walked = 0;
+        for (int v : squares) walked = walked * 31 + v;
+        int[] parts = {
+            walked,
+            squares.indexOf(9 + n) + squares.lastIndexOf(4 + n) * 3,
+            (squares.contains(25 + n) ? 7 : 0) + (squares.isEmpty() ? 1 : 0),
+            squares.subList(1, 4).size() + squares.subList(2, 5).get(1),
+            squares.hashCode(),
+            squares.equals(java.util.List.of(n, 1 + n, 4 + n, 9 + n, 16 + n, 25 + n)) ? 11 : 0,
+            java.util.List.of(n, 1 + n, 4 + n, 9 + n, 16 + n, 25 + n).equals(squares) ? 11 : 0,
+            squares.toString().length(),
+            new java.util.ArrayList<Integer>(squares).size(),
+            squares.toArray().length,
+            names.contains("bb") ? 5 : 0,
+            names.hashCode(),
+            names.equals(java.util.Set.of("a", "bb", "ccc")) ? 13 : 0,
+            names.toString().length(),
+            lengths.get("one"),
+            lengths.size() + (lengths.containsKey("one") ? 17 : 0) + (lengths.containsValue(3 + n) ? 19 : 0),
+            lengths.hashCode(),
+            lengths.keySet().size() + lengths.values().size(),
+        };
+        if (part > 0) return parts[part - 1];
+        int acc = 0;
+        for (int p : parts) acc = acc * 31 + p;
+        return acc;
+    }
 }

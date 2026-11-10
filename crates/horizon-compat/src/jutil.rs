@@ -624,6 +624,123 @@ fn table_entries(rt: &Rt, m: V) -> Vec<(V, V)> {
     }
 }
 
+thread_local! {
+    /// Whether a mod's collection is being read ([`own_elements`]): what it calls meanwhile is
+    /// answered as it is, not read in turn.
+    static READING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// What a call on the runtime's collections reads its first argument for and leaves as it is: one
+/// of a mod's own class there is read like the arguments after it. Any other call's first argument
+/// is its receiver or a collection it changes, which stays the mod's.
+const READS_FIRST: [&str; 20] = [
+    "stream",
+    "parallelStream",
+    "forEach",
+    "copyOf",
+    "unmodifiableCollection",
+    "unmodifiableList",
+    "unmodifiableSet",
+    "unmodifiableMap",
+    "newArrayList",
+    "newHashSet",
+    "newLinkedHashSet",
+    "newLinkedList",
+    "newArrayDeque",
+    "max",
+    "min",
+    "frequency",
+    "enumeration",
+    "nCopies",
+    "getOrDefault",
+    "containsAll",
+];
+
+/// `args` with each collection or map of a mod's own class replaced by one of the runtime's
+/// holding what it holds now; None when there is none among them (nearly always).
+fn own_as_native(rt: &mut Rt, name: &str, args: &[V]) -> Option<Vec<V>> {
+    let from = usize::from(!READS_FIRST.contains(&name));
+    let own = |rt: &Rt, v: V| {
+        let cid = rt.cid(v);
+        cid != 0
+            && cid & crate::LAMBDA == 0
+            && matches!(
+                rt.heap.get(v.r() as usize).map(|o| &o.data),
+                Some(Data::Fields(_))
+            )
+    };
+    if READING.get() || !args.iter().skip(from).any(|&v| own(rt, v)) {
+        return None;
+    }
+    let mut out = args.to_vec();
+    let mut any = false;
+    for slot in out.iter_mut().skip(from) {
+        if !own(rt, *slot) {
+            continue;
+        }
+        if rt.instance_of_static(*slot, "java/util/Collection") {
+            let items = own_elements(rt, *slot);
+            *slot = new_list(rt, items);
+            any = true;
+        } else if rt.instance_of_static(*slot, "java/util/Map") {
+            let entries =
+                rt.call_functional("java/util/Map.entrySet.()Ljava/util/Set;", *slot, &[]);
+            let entries = if own(rt, entries) {
+                own_elements(rt, entries)
+            } else {
+                elements(rt, entries)
+            };
+            let map = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+            for e in entries {
+                let (k, v) = match rt.heap.get(e.r() as usize).map(|o| &o.data) {
+                    Some(Data::List(kv)) if kv.len() == 2 => (kv[0], kv[1]),
+                    _ => (
+                        rt.call_functional(
+                            "java/util/Map$Entry.getKey.()Ljava/lang/Object;",
+                            e,
+                            &[],
+                        ),
+                        rt.call_functional(
+                            "java/util/Map$Entry.getValue.()Ljava/lang/Object;",
+                            e,
+                            &[],
+                        ),
+                    ),
+                };
+                table_put(rt, map, k, v);
+            }
+            *slot = map;
+            any = true;
+        }
+    }
+    any.then_some(out)
+}
+
+/// What a collection of a mod's own class holds, in its iterator's order: asked as any code asks
+/// (`iterator()`, `hasNext()`, `next()`), up to a number no collection has.
+pub(crate) fn own_elements(rt: &mut Rt, collection: V) -> Vec<V> {
+    let was = READING.replace(true);
+    let mut out = Vec::new();
+    let it = rt.call_functional(
+        "java/lang/Iterable.iterator.()Ljava/util/Iterator;",
+        collection,
+        &[],
+    );
+    while it.r() != 0 && rt.thrown.is_none() && out.len() < 1 << 26 {
+        if rt
+            .call_functional("java/util/Iterator.hasNext.()Z", it, &[])
+            .i()
+            == 0
+            || rt.thrown.is_some()
+        {
+            break;
+        }
+        out.push(rt.call_functional("java/util/Iterator.next.()Ljava/lang/Object;", it, &[]));
+    }
+    READING.set(was);
+    out
+}
+
 /// The elements of any collection-like value: a list, a set's members, an array, a stream.
 pub fn elements(rt: &Rt, v: V) -> Vec<V> {
     match rt.heap.get(v.r() as usize).map(|o| (&o.data, o.class)) {
@@ -1420,6 +1537,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if !util_owner(owner) {
         return None;
     }
+    // A collection or a map of a mod's own class among the arguments is read into one of the
+    // runtime's first ([`own_as_native`]): what the runtime's collections take from another
+    // (`new ArrayList<>(c)`, `addAll`, `equals`), they then take from that.
+    let read = own_as_native(rt, name, args);
+    let args: &[V] = read.as_deref().unwrap_or(args);
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
     if name == "<init>" {
         let this = a(0);
         if crate::heaps::heap_class(owner) {

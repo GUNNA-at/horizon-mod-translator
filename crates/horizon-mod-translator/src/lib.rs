@@ -197,13 +197,28 @@ pub const JDK_CODE: &[&str] = &[
     "java/net/URISyntaxException",
     "java/text/FieldPosition",
     "java/text/ParsePosition",
+    // The collections' abstract bases: a mod's own list, set or map is one of these with a
+    // method or two of its own (`get` and `size`), and everything else it answers is this code.
+    "java/util/AbstractCollection",
+    "java/util/AbstractList",
+    "java/util/AbstractMap",
+    "java/util/AbstractQueue",
+    "java/util/AbstractSequentialList",
+    "java/util/AbstractSet",
     "java/util/Base64",
     "java/util/StringTokenizer",
 ];
 
+/// Classes nested in [`JDK_CODE`]'s that stay the runtime's own: a map's entries, which the
+/// runtime holds as a pair whichever class makes them.
+const JDK_NATIVE: &[&str] = &[
+    "java/util/AbstractMap$SimpleEntry",
+    "java/util/AbstractMap$SimpleImmutableEntry",
+];
+
 /// Whether a class of the Java runtime is code to translate as a library's ([`JDK_CODE`]).
 pub fn jdk_code(class: &str) -> bool {
-    JDK_CODE.iter().any(|p| match class.strip_prefix(p) {
+    !JDK_NATIVE.contains(&class) && JDK_CODE.iter().any(|p| match class.strip_prefix(p) {
         Some(rest) => p.ends_with('/') || rest.is_empty() || rest.starts_with('$'),
         None => false,
     })

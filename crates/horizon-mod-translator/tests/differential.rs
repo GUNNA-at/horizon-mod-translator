@@ -45,6 +45,14 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("library", "(I)I", &["0", "3", "-7"]),
     ("rawBoxes", "(I)I", &["0", "2"]),
     ("adapted", "(I)I", &["0", "3", "-5"]),
+    (
+        "ownCollections",
+        "(I)I",
+        &[
+            "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16",
+            "17", "18", "0",
+        ],
+    ),
 ];
 
 fn has(tool: &str) -> bool {
@@ -281,9 +289,13 @@ fn translated_fixture_matches_the_jvm() {
         notes.contains("tables Some((15, I(-1))) Some(true) true"),
         "{notes}"
     );
-    for (e, a) in expected.lines().zip(actual.lines()) {
-        assert_eq!(a, e, "{notes}");
-    }
+    let wrong: Vec<String> = expected
+        .lines()
+        .zip(actual.lines())
+        .filter(|(e, a)| a != e)
+        .map(|(e, a)| format!("{a} (the JVM: {e})"))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:#?}\n{notes}");
     assert_eq!(expected.lines().count(), CASES.iter().map(|c| c.2.len()).sum::<usize>(), "{expected}");
     assert_eq!(expected.lines().count(), actual.lines().count());
     eprintln!("{actual}");

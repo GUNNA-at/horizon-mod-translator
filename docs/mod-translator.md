@@ -10015,6 +10015,21 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - A mod alone is checked in half a minute (a scratch harness: its bundle built against the repo's
     runtime, loaded without the game, its registrations counted), where a round on the pack takes forty.
   - Tests: 777 compat, 15 compat-core, 31 translator; the differential tests.
+- [x] 2026-11-10 Part 158: a mod's own collections. 109 classes of the pack are a list, a set, a map
+  or a queue built on the JDK's abstract bases (`AbstractList` 42, `AbstractSet` 32, `AbstractCollection`
+  17, `AbstractMap` 13, `AbstractQueue` 5): a method or two of their own (`get` and `size`), and the
+  rest the base's code over those. Nothing answered the bases: Mekanism alone made 87 calls of
+  `AbstractList`'s constructor that went nowhere.
+  - The bases are taken from the player's Java runtime as code, as `java.awt.Color` is (their nested
+    iterators and views with them; `AbstractMap`'s two entry classes stay the runtime's pair).
+  - A collection or a map of a mod's own class handed to one of the runtime's is read through its
+    iterator into one of the runtime's first: `new ArrayList<>(c)`, `addAll`, `containsAll`,
+    `List.of(...).equals(c)`, `copyOf`, and the methods its interface alone has code for (`stream`,
+    `forEach`).
+  - The differential fixture has a list, a set and a map of its own on those bases: walked, searched,
+    cut into sublists, hashed, compared both ways with the runtime's, printed, copied; the 18 results
+    match the JVM's.
+  - Tests: 777 compat, 15 compat-core, 31 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
