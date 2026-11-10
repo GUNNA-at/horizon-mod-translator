@@ -83,6 +83,91 @@ fn sockets(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 
 const LOCKS: &str = "java/util/concurrent/locks/";
 const LATCH: &str = "java/util/concurrent/CountDownLatch";
+const SYNCHRONIZER: &str = "java/util/concurrent/locks/AbstractQueuedSynchronizer";
+
+/// The kind of what a method with descriptor `desc` returns.
+fn return_kind(desc: &str) -> char {
+    crate::jlang::return_kind(desc)
+}
+
+/// `AbstractQueuedSynchronizer`, under a lock or a latch of a mod's own (polylib carries
+/// Sentry's reusable count latch): its state, and its acquiring and releasing, which ask the
+/// mod's class whether they may (`tryAcquire`, `tryReleaseShared`...) and never queue anyone,
+/// there being one thread. An acquire the class refuses is a wait ([`wait`]).
+fn synchronizer(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let asks = |rt: &mut Rt, what: &'static str| rt.call_functional(what, this, &[a(1)]);
+    Some(match name {
+        "getState" => V::I(rt.get_field(this, "$state").i()),
+        "setState" => {
+            rt.put_field(this, "$state", V::I(a(1).i()));
+            V::Void
+        }
+        "compareAndSetState" => {
+            let same = rt.get_field(this, "$state").i() == a(1).i();
+            if same {
+                rt.put_field(this, "$state", V::I(a(2).i()));
+            }
+            V::I(i32::from(same))
+        }
+        "acquire" | "acquireInterruptibly" | "tryAcquireNanos" => {
+            let had = asks(
+                rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryAcquire.(I)Z",
+            )
+            .i() != 0;
+            if !had && rt.thrown.is_none() {
+                wait(rt);
+            }
+            if name == "tryAcquireNanos" {
+                V::I(i32::from(had))
+            } else {
+                V::Void
+            }
+        }
+        "acquireShared" | "acquireSharedInterruptibly" | "tryAcquireSharedNanos" => {
+            let had = asks(
+                rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryAcquireShared.(I)I",
+            )
+            .i() >= 0;
+            if !had && rt.thrown.is_none() {
+                wait(rt);
+            }
+            if name == "tryAcquireSharedNanos" {
+                V::I(i32::from(had))
+            } else {
+                V::Void
+            }
+        }
+        "release" => V::I(
+            asks(
+                rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryRelease.(I)Z",
+            )
+            .i(),
+        ),
+        "releaseShared" => V::I(
+            asks(
+                rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryReleaseShared.(I)Z",
+            )
+            .i(),
+        ),
+        "hasQueuedThreads" | "hasContended" | "hasQueuedPredecessors" | "isQueued" => V::I(0),
+        "getQueueLength" => V::I(0),
+        "setExclusiveOwnerThread" => {
+            rt.put_field(this, "$owner", a(1));
+            V::Void
+        }
+        "getExclusiveOwnerThread" => match rt.get_field(this, "$owner") {
+            V::Void => V::NULL,
+            thread => thread,
+        },
+        _ => return None,
+    })
+}
 
 /// `java.util.concurrent`'s locks, latches and semaphores, on the one thread there is: a lock
 /// is always free and held by whoever asks, a read or write lock is the lock itself, and nothing
@@ -91,6 +176,22 @@ const LATCH: &str = "java/util/concurrent/CountDownLatch";
 fn locks(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
+    if owner == SYNCHRONIZER
+        && let Some(v) = synchronizer(rt, name, args)
+    {
+        return Some(v);
+    }
+    // A `StampedLock`'s stamps: every lock is had at once, and every stamp is good.
+    if owner == "java/util/concurrent/locks/StampedLock" {
+        match (name, return_kind(desc)) {
+            ("isWriteLocked" | "isReadLocked", _) => return Some(V::I(0)),
+            (_, 'J') => return Some(V::J(1)),
+            (_, 'Z') => return Some(V::I(1)),
+            ("unlockWrite" | "unlockRead" | "unlock", _) => return Some(V::Void),
+            ("asReadWriteLock", _) => return Some(this),
+            _ => {}
+        }
+    }
     Some(match name {
         "<init>" => {
             if owner == LATCH || owner.ends_with("Semaphore") {
@@ -169,6 +270,42 @@ fn params(desc: &str) -> Vec<&str> {
 /// The class a descriptor's method returns, if it returns an object.
 fn returned(desc: &str) -> Option<&str> {
     desc.rsplit(')').next()?.strip_prefix('L')?.strip_suffix(';')
+}
+
+const THREAD_BUILDER: &str = "java/lang/Thread$Builder";
+
+/// A thread builder (`Thread.ofVirtual()`, `ofPlatform()`): the name it gives, and the threads
+/// it makes, which are threads as any a mod makes ([`thread`]); what it would set of their
+/// scheduling has nothing to act on.
+pub(crate) fn thread_builder(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    Some(match name {
+        "name" => {
+            rt.put_field(this, "$name", a(1));
+            this
+        }
+        "daemon"
+        | "priority"
+        | "group"
+        | "inheritInheritableThreadLocals"
+        | "uncaughtExceptionHandler"
+        | "stackSize" => this,
+        "unstarted" | "start" => {
+            let made = rt.new_object(THREAD);
+            rt.put_field(made, "$target", a(1));
+            let named = rt.get_field(this, "$name");
+            if rt.str_of(named).is_some() {
+                rt.put_field(made, "$name", named);
+            }
+            if name == "start" {
+                thread(rt, "start", "()V", &[made]);
+            }
+            made
+        }
+        "factory" => rt.new_object("java/util/concurrent/ThreadFactory"),
+        _ => return None,
+    })
 }
 
 /// `java.lang.Thread`. One runtime runs on one thread, the game's: `currentThread` is that one
@@ -264,6 +401,10 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         "isInterrupted" | "interrupted" => V::I(in_started_thread() as i32),
         "sleep" => wait(rt),
         "holdsLock" => V::I(1),
+        // No handler but a mod's own, which is asked nothing here: what ends a thread's body
+        // is told of where it ends.
+        "getDefaultUncaughtExceptionHandler" | "getUncaughtExceptionHandler" => V::NULL,
+        "ofVirtual" | "ofPlatform" => rt.new_object(THREAD_BUILDER),
         "getStackTrace" => crate::jlang::stack_frames(rt),
         "getThreadGroup" => rt.intern("compat:thread-group".into(), |rt| rt.new_object("java/lang/ThreadGroup")),
         "getContextClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
@@ -1866,6 +2007,164 @@ mod tests {
                 &mut rt,
                 "java/util/concurrent/CountDownLatch.await.(JLjava/util/concurrent/TimeUnit;)Z",
                 &[latch, V::J(5), V::NULL]
+            ),
+            V::I(0)
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
+    /// A synchronizer keeps its state; a stamped lock's stamps are always good; a builder's
+    /// thread carries its name and body.
+    #[test]
+    fn a_synchronizer_keeps_its_state_and_a_stamp_is_always_good() {
+        let mut rt = Rt::new();
+        let sync = rt.new_object("t/Sync");
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/AbstractQueuedSynchronizer.setState.(I)V",
+            &[sync, V::I(3)],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.compareAndSetState.(II)Z",
+                &[sync, V::I(2), V::I(9)]
+            ),
+            V::I(0)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.compareAndSetState.(II)Z",
+                &[sync, V::I(3), V::I(9)]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.getState.()I",
+                &[sync]
+            ),
+            V::I(9)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.hasQueuedThreads.()Z",
+                &[sync]
+            ),
+            V::I(0)
+        );
+        let lock = rt.new_object("java/util/concurrent/locks/StampedLock");
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/StampedLock.<init>.()V",
+            &[lock],
+        );
+        let stamp = c(
+            &mut rt,
+            "java/util/concurrent/locks/StampedLock.tryOptimisticRead.()J",
+            &[lock],
+        );
+        assert_ne!(stamp, V::J(0));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/StampedLock.validate.(J)Z",
+                &[lock, stamp]
+            ),
+            V::I(1)
+        );
+        let write = c(
+            &mut rt,
+            "java/util/concurrent/locks/StampedLock.writeLock.()J",
+            &[lock],
+        );
+        c(
+            &mut rt,
+            "java/util/concurrent/locks/StampedLock.unlockWrite.(J)V",
+            &[lock, write],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/locks/StampedLock.isWriteLocked.()Z",
+                &[lock]
+            ),
+            V::I(0)
+        );
+        // A thread from a builder, and one from a factory of the runtime's own.
+        let builder = c(
+            &mut rt,
+            "java/lang/Thread.ofVirtual.()Ljava/lang/Thread$Builder$OfVirtual;",
+            &[],
+        );
+        let name = rt.string("worker");
+        let named = c(
+            &mut rt,
+            "java/lang/Thread$Builder$OfVirtual.name.(Ljava/lang/String;)Ljava/lang/Thread$Builder$OfVirtual;",
+            &[builder, name],
+        );
+        assert_eq!(named, builder);
+        let made = c(
+            &mut rt,
+            "java/lang/Thread$Builder.unstarted.(Ljava/lang/Runnable;)Ljava/lang/Thread;",
+            &[builder, V::NULL],
+        );
+        let got = c(
+            &mut rt,
+            "java/lang/Thread.getName.()Ljava/lang/String;",
+            &[made],
+        );
+        assert_eq!(rt.str_of(got), Some("worker"));
+        let factory = c(
+            &mut rt,
+            "java/lang/Thread$Builder.factory.()Ljava/util/concurrent/ThreadFactory;",
+            &[builder],
+        );
+        let from_factory = c(
+            &mut rt,
+            "java/util/concurrent/ThreadFactory.newThread.(Ljava/lang/Runnable;)Ljava/lang/Thread;",
+            &[factory, V::NULL],
+        );
+        assert_eq!(rt.class_of(from_factory), THREAD);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Thread.getDefaultUncaughtExceptionHandler.()Ljava/lang/Thread$UncaughtExceptionHandler;",
+                &[]
+            ),
+            V::NULL
+        );
+        // A pool of the runtime's own has nothing waiting.
+        let pool = c(
+            &mut rt,
+            "java/util/concurrent/Executors.newFixedThreadPool.(I)Ljava/util/concurrent/ExecutorService;",
+            &[V::I(4)],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/ThreadPoolExecutor.getActiveCount.()I",
+                &[pool]
+            ),
+            V::I(0)
+        );
+        let queue = c(
+            &mut rt,
+            "java/util/concurrent/ThreadPoolExecutor.getQueue.()Ljava/util/concurrent/BlockingQueue;",
+            &[pool],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/concurrent/BlockingQueue.size.()I",
+                &[queue]
             ),
             V::I(0)
         );

@@ -418,6 +418,72 @@ pub fn profile() -> Vec<(String, String, u32, std::time::Duration)> {
     out
 }
 
+/// How often a thread tells what its hooks cost ([`profiled`]).
+const PROFILE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+
+thread_local! {
+    /// Each hook's calls, time and objects made on this thread since it last told of them.
+    static HOOK_COSTS: std::cell::RefCell<std::collections::HashMap<&'static str, (u32, std::time::Duration, u64)>> = Default::default();
+    static COSTS_TOLD: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs the work `f` of the game's hook `hook`. With `HORIZON_COMPAT_PROFILE` set, what it
+/// took and how many objects it made are kept, and every twenty seconds the thread tells
+/// which hooks and which listeners cost it most since it last did: where a slow tick of a
+/// whole pack goes, measured.
+pub fn profiled<R>(rt: &mut Rt, hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {
+    if !profiling() {
+        return f(rt);
+    }
+    let (started, made) = (std::time::Instant::now(), rt.made);
+    let r = f(rt);
+    let took = started.elapsed();
+    HOOK_COSTS.with(|c| {
+        let mut c = c.borrow_mut();
+        let e = c.entry(hook).or_default();
+        e.0 += 1;
+        e.1 += took;
+        e.2 += rt.made - made;
+    });
+    let since = COSTS_TOLD.with(|t| t.get());
+    match since {
+        None => COSTS_TOLD.with(|t| t.set(Some(started))),
+        Some(told) if told.elapsed() >= PROFILE_EVERY => {
+            COSTS_TOLD.with(|t| t.set(Some(std::time::Instant::now())));
+            tell_costs(told.elapsed());
+        }
+        Some(_) => {}
+    }
+    r
+}
+
+fn tell_costs(over: std::time::Duration) {
+    let thread = std::thread::current();
+    let thread = thread.name().unwrap_or("a thread").to_owned();
+    let mut hooks: Vec<_> = HOOK_COSTS.with(|c| c.borrow_mut().drain().collect());
+    hooks.sort_by_key(|h| std::cmp::Reverse(h.1.1));
+    let all: std::time::Duration = hooks.iter().map(|h| h.1.1).sum();
+    eprintln!(
+        "horizon-compat: profile of {thread}: {:.1} s in its hooks over {:.1} s",
+        all.as_secs_f64(),
+        over.as_secs_f64()
+    );
+    for (hook, (calls, took, made)) in hooks.iter().take(12) {
+        eprintln!(
+            "    hook {:>9.1} ms {calls:>7} x {hook} ({made} objects)",
+            took.as_secs_f64() * 1e3
+        );
+    }
+    let mut listeners: Vec<_> = COSTS.with(|c| c.borrow_mut().drain().collect());
+    listeners.sort_by_key(|l| std::cmp::Reverse(l.1.1));
+    for ((event, listener), (calls, took)) in listeners.iter().take(16) {
+        eprintln!(
+            "    listener {:>9.1} ms {calls:>7} x {listener} on {event}",
+            took.as_secs_f64() * 1e3
+        );
+    }
+}
+
 /// What the name of a place in a method the runtime runs itself starts with: a mixin's static
 /// injector into the method listens for the place, as the translator lists it among its class's
 /// subscribers (`hz/inject:<owner>.<method>@<place>`). An instance one runs on the game's

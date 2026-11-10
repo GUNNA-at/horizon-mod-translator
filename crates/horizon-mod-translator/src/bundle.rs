@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 134] = [
+const COMPAT: [(&str, &str); 135] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
@@ -143,6 +143,7 @@ const COMPAT: [(&str, &str); 134] = [
     ("nightconfig.rs", include_str!("../../horizon-compat/src/nightconfig.rs")),
     ("mod_configs.rs", include_str!("../../horizon-compat/src/mod_configs.rs")),
     ("annotations.rs", include_str!("../../horizon-compat/src/annotations.rs")),
+    ("atomics.rs", include_str!("../../horizon-compat/src/atomics.rs")),
     ("invoke.rs", include_str!("../../horizon-compat/src/invoke.rs")),
     ("worldgen.rs", include_str!("../../horizon-compat/src/worldgen.rs")),
     ("mod_entities.rs", include_str!("../../horizon-compat/src/mod_entities.rs")),
@@ -5804,7 +5805,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
                  /// ([`Rt::host_call`]), as the JVM runs an event's listeners inside the call that posted it. Where it\n\
                  /// doesn't wait (a call that can't take a hook), the hook does nothing (`R::default()`, which\n\
                  /// leaves it to the game), and says so once.\n\
-                 pub fn hook_runtime<R: Default>(hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {{\n    if runtime_busy() {{\n        thread_local! {{\n            static TOLD: std::cell::RefCell<Vec<(&'static str, bool)>> = const {{ std::cell::RefCell::new(Vec::new()) }};\n        }}\n        let mut f = Some(f);\n        let at = RUNTIME_AT.with(|at| at.get());\n        let ran = horizon_compat::reenter(at, |rt| f.take().map(|f| f(rt))).flatten();\n        let first = TOLD.with(|t| !t.borrow().contains(&(hook, ran.is_some())) && {{ t.borrow_mut().push((hook, ran.is_some())); true }});\n        if let Some(r) = ran {{\n            if first && Rt::tracing() {{\n                eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; run there\");\n            }}\n            return r;\n        }}\n        if first {{\n            eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; skipped\");\n        }}\n        return R::default();\n    }}\n    with_runtime(f)\n}}\n\n\
+                 pub fn hook_runtime<R: Default>(hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {{\n    if runtime_busy() {{\n        thread_local! {{\n            static TOLD: std::cell::RefCell<Vec<(&'static str, bool)>> = const {{ std::cell::RefCell::new(Vec::new()) }};\n        }}\n        let mut f = Some(f);\n        let at = RUNTIME_AT.with(|at| at.get());\n        let ran = horizon_compat::reenter(at, |rt| f.take().map(|f| f(rt))).flatten();\n        let first = TOLD.with(|t| !t.borrow().contains(&(hook, ran.is_some())) && {{ t.borrow_mut().push((hook, ran.is_some())); true }});\n        if let Some(r) = ran {{\n            if first && Rt::tracing() {{\n                eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; run there\");\n            }}\n            return r;\n        }}\n        if first {{\n            eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; skipped\");\n        }}\n        return R::default();\n    }}\n    with_runtime(|rt| horizon_compat::neo::profiled(rt, hook, f))\n}}\n\n\
                  /// A question about the mod's classes and registrations alone (a block's block entity type, an\n\
                  /// item's use duration, a block's state for a placement): the runtime answers it, or the probe\n\
                  /// runtime while the runtime is busy (a block the mod's own code places asks from inside its call).\n\

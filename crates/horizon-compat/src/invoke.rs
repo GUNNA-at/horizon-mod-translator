@@ -276,6 +276,8 @@ pub(crate) fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
                 rt.put_field(h, "$type", t);
                 h
             }
+            "arrayElementVarHandle" => crate::atomics::array_handle(rt, a(0)),
+            "byteArrayViewVarHandle" => crate::atomics::bytes_handle(rt, a(0), a(1)),
             // `insertArguments(target, pos, values...)`: the target with those bound at `pos`.
             "insertArguments" => {
                 let values = crate::jutil::elements(rt, a(2));
@@ -289,6 +291,10 @@ pub(crate) fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
             "unreflectGetter" => handle(rt, "getter", a(1)),
             "unreflectSetter" => handle(rt, "setter", a(1)),
             "unreflect" | "unreflectSpecial" => handle(rt, "method", a(1)),
+            "findVarHandle" | "findStaticVarHandle" => {
+                crate::atomics::field_handle(rt, a(1), a(2), a(3), name == "findStaticVarHandle")
+            }
+            "unreflectVarHandle" => crate::atomics::reflected_handle(rt, a(1)),
             "unreflectConstructor" => {
                 let class = rt.get_field(a(1), "$class");
                 let class = class_name(rt, class);
@@ -377,6 +383,7 @@ pub(crate) fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V])
             _ => return None,
         },
         METHOD_TYPE => method_type_call(rt, name, desc, args)?,
+        crate::atomics::VAR_HANDLE => crate::atomics::var_handle_call(rt, name, desc, args)?,
         _ => return None,
     })
 }

@@ -816,7 +816,7 @@ fn serialized_lambda_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 /// A primitive boxed as what declares it says (`kind`: a field's or an array's type, a
 /// method's return type): a `boolean` as a `Boolean`, a `char` as a `Character`. The runtime
 /// holds those, a `byte` and a `short` as an int, which alone says `Integer`.
-fn box_as(rt: &mut Rt, v: V, kind: char) -> V {
+pub(crate) fn box_as(rt: &mut Rt, v: V, kind: char) -> V {
     match (v, kind) {
         (V::I(_), 'Z' | 'B' | 'S' | 'C') => crate::mixin::box_value(rt, v, kind),
         _ => box_raw(rt, v),
@@ -864,6 +864,38 @@ fn parameter_classes(rt: &mut Rt, desc: &str) -> V {
         at += len;
     }
     rt.alloc("[Ljava/lang/Class;", Data::Array(out))
+}
+
+const PARAMETER: &str = "java/lang/reflect/Parameter";
+const MODULE: &str = "java/lang/Module";
+
+/// The `Parameter`s of method or constructor `of`, one for each class of `types` (an array).
+fn parameters(rt: &mut Rt, of: V, types: V) -> V {
+    let mut out = Vec::new();
+    for (i, ty) in crate::jutil::elements(rt, types).into_iter().enumerate() {
+        let p = rt.new_object(PARAMETER);
+        for (field, v) in [("$type", ty), ("$index", V::I(i as i32)), ("$of", of)] {
+            rt.put_field(p, field, v);
+        }
+        out.push(p);
+    }
+    rt.alloc("[Ljava/lang/reflect/Parameter;", Data::Array(out))
+}
+
+/// When tracing: `what`, once (something the runtime answers short of what a JVM would, which
+/// the unmapped calls' own trace would not show).
+fn told_once(what: &str) {
+    if !Rt::tracing() {
+        return;
+    }
+    thread_local!(static TOLD: std::cell::RefCell<std::collections::HashSet<String>> = Default::default());
+    let first = TOLD.with(|t| {
+        let mut told = t.borrow_mut();
+        told.len() < 300 && told.insert(what.to_owned())
+    });
+    if first {
+        eprintln!("horizon-compat: {what}");
+    }
 }
 
 /// A `Constructor` of class object `class` with descriptor `desc`.
@@ -1750,9 +1782,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     None if n.starts_with("java/") || n.starts_with('[') || !n.contains('/') => {
                         rt.alloc("[Ljava/lang/reflect/Field;", Data::Array(Vec::new()))
                     }
-                    None => return None,
+                    // A class of the game's or of a library's, whose fields no table here
+                    // lists: none, and told of once when tracing, where a walk over nothing
+                    // (`for (Field f : null)`) would end the mod's code instead.
+                    None => {
+                        told_once(&format!(
+                            "the fields of {n} are not listed here ({name} gives none)"
+                        ));
+                        rt.alloc("[Ljava/lang/reflect/Field;", Data::Array(Vec::new()))
+                    }
                 }
             }
+            // The mods' classes are all of one module without a name, as on a class path.
+            "getModule" => rt.intern("compat:module".into(), |rt| rt.new_object(MODULE)),
             // An array class (`int[].class`, `[I`) and what it holds; the primitives' own.
             "isArray" => V::I(rt.str_of(a(0)).is_some_and(|n| n.starts_with('[')) as i32),
             "getComponentType" => match rt.str_of(a(0)).and_then(|n| n.strip_prefix('[')).map(|d| descriptor_class(d).to_owned()) {
@@ -2122,6 +2164,92 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     .map_or(1, |m| m.0);
                 V::I(i32::from(access & 0x0007))
             }
+            "getGenericParameterTypes" => {
+                let desc = text(rt, rt.get_field(a(0), "$desc"));
+                parameter_classes(rt, &desc)
+            }
+            "getParameters" => {
+                let desc = text(rt, rt.get_field(a(0), "$desc"));
+                let types = parameter_classes(rt, &desc);
+                parameters(rt, a(0), types)
+            }
+            "getExceptionTypes" | "getGenericExceptionTypes" => {
+                rt.alloc("[Ljava/lang/Class;", Data::Array(Vec::new()))
+            }
+            "getName" => {
+                let class = text(rt, rt.get_field(a(0), "$class")).replace('/', ".");
+                rt.string(&class)
+            }
+            "isAccessible" | "canAccess" => V::I(1),
+            "isSynthetic" | "isVarArgs" => V::I(0),
+            "isAnnotationPresent"
+            | "getAnnotation"
+            | "getDeclaredAnnotation"
+            | "getAnnotations"
+            | "getDeclaredAnnotations"
+            | "getAnnotationsByType"
+            | "getDeclaredAnnotationsByType" => {
+                let (class, desc) = (
+                    text(rt, rt.get_field(a(0), "$class")).replace('.', "/"),
+                    text(rt, rt.get_field(a(0), "$desc")),
+                );
+                let params = &desc[..desc.find(')').map_or(desc.len(), |i| i + 1)];
+                let found = crate::annotations::on_method(rt, &class, "<init>", params);
+                crate::annotations::query(rt, name, found, a(1))?
+            }
+            _ => return None,
+        }),
+        // A parameter of a method or a constructor: its place and its type. A class file keeps
+        // its name only when compiled to (`-parameters`), which mods' are not: `arg0`, as the
+        // JVM then names it.
+        PARAMETER => Some(match name {
+            "getName" => {
+                let i = rt.get_field(a(0), "$index").i();
+                rt.string(&format!("arg{i}"))
+            }
+            "getType" | "getParameterizedType" => rt.get_field(a(0), "$type"),
+            "getDeclaringExecutable" => rt.get_field(a(0), "$of"),
+            "isNamePresent" | "isImplicit" | "isSynthetic" | "isVarArgs" | "getModifiers" => {
+                V::I(0)
+            }
+            "isAnnotationPresent" => V::I(0),
+            "getAnnotation" | "getDeclaredAnnotation" => V::NULL,
+            "getAnnotations"
+            | "getDeclaredAnnotations"
+            | "getAnnotationsByType"
+            | "getDeclaredAnnotationsByType" => rt.alloc(
+                "[Ljava/lang/annotation/Annotation;",
+                Data::Array(Vec::new()),
+            ),
+            "toString" => {
+                let (ty, i) = (
+                    text(rt, rt.get_field(a(0), "$type")),
+                    rt.get_field(a(0), "$index").i(),
+                );
+                rt.string(&format!(
+                    "{} arg{i}",
+                    crate::jtypes::type_name(&descriptor_of(&ty))
+                ))
+            }
+            _ => return None,
+        }),
+        // The one module: unnamed, open to everything, as the class path's is.
+        MODULE => Some(match name {
+            "isNamed" => V::I(0),
+            "getName" | "getDescriptor" | "getLayer" => V::NULL,
+            "isOpen" | "isExported" | "canRead" | "canUse" => V::I(1),
+            "addOpens" | "addExports" | "addReads" | "addUses" => a(0),
+            "getClassLoader" => rt.intern("compat:class-loader".into(), |rt| {
+                rt.new_object("java/lang/ClassLoader")
+            }),
+            "getPackages" => crate::jutil::new_set_of(rt, &[]),
+            "getResourceAsStream" => {
+                let path = text(rt, a(1));
+                jar_resource(rt, &path, false)
+            }
+            "isAnnotationPresent" => V::I(0),
+            "getAnnotation" | "getDeclaredAnnotation" => V::NULL,
+            "toString" => rt.string("unnamed module @1"),
             _ => return None,
         }),
         // A field a mod looks up by name: reading it reads the object's field, or with no object
@@ -2198,7 +2326,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "getDeclaringClass" => rt.get_field(a(0), "$class"),
             "setAccessible" => V::Void,
-            "trySetAccessible" | "canAccess" => V::I(1),
+            "trySetAccessible" | "canAccess" | "isAccessible" => V::I(1),
+            // One the compiler made (`$VALUES`, `this$0`), and an enum's constant.
+            "isSynthetic" | "isEnumConstant" => {
+                let (class, name_of, _) = field_parts(rt, a(0));
+                let access = find_field(rt, &class, name_of).map_or(0, |(access, _)| access);
+                V::I(i32::from(
+                    access
+                        & if name == "isSynthetic" {
+                            0x1000
+                        } else {
+                            0x4000
+                        }
+                        != 0,
+                ))
+            }
             "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
                 let (class, field, _) = field_parts(rt, a(0));
                 let found = crate::annotations::on_field(rt, &class, field);
@@ -2280,6 +2422,83 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::I((rt.get_field(a(0), "$access").i() & 0x1040 != 0) as i32)
             }
             "isDefault" | "isVarArgs" => V::I(0),
+            "isAccessible" => V::I(1),
+            "getParameters" => {
+                let types = rt.get_field(a(0), "$params");
+                parameters(rt, a(0), types)
+            }
+            "getExceptionTypes" | "getGenericExceptionTypes" => {
+                rt.alloc("[Ljava/lang/Class;", Data::Array(Vec::new()))
+            }
+            // `public static int pkg.Tools.twice(int)`, as the JDK writes a method.
+            "toString" | "toGenericString" => {
+                let (class, method, desc) = (
+                    text(rt, rt.get_field(a(0), "$class")).replace('/', "."),
+                    text(rt, rt.get_field(a(0), "$name")),
+                    text(rt, rt.get_field(a(0), "$desc")),
+                );
+                let params: Vec<String> = crate::jutil::elements(rt, rt.get_field(a(0), "$params"))
+                    .iter()
+                    .map(|p| {
+                        crate::jtypes::type_name(&descriptor_of(
+                            rt.str_of(*p).unwrap_or("java/lang/Object"),
+                        ))
+                    })
+                    .collect();
+                let returned = if desc.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "{} ",
+                        crate::jtypes::type_name(desc.rsplit(')').next().unwrap_or("V"))
+                    )
+                };
+                let access = rt.get_field(a(0), "$access").i();
+                let mut written = String::new();
+                for (bit, word) in [
+                    (0x0001, "public"),
+                    (0x0004, "protected"),
+                    (0x0002, "private"),
+                    (0x0400, "abstract"),
+                    (0x0008, "static"),
+                    (0x0010, "final"),
+                    (0x0020, "synchronized"),
+                    (0x0100, "native"),
+                ] {
+                    if access & bit != 0 {
+                        written.push_str(word);
+                        written.push(' ');
+                    }
+                }
+                rt.string(&format!(
+                    "{written}{returned}{class}.{method}({})",
+                    params.join(",")
+                ))
+            }
+            "hashCode" => {
+                let (class, method) = (
+                    text(rt, rt.get_field(a(0), "$class")).replace('/', "."),
+                    text(rt, rt.get_field(a(0), "$name")),
+                );
+                V::I(string_hash(&class) ^ string_hash(&method))
+            }
+            "equals" => {
+                let same = |rt: &Rt, f: &'static str| {
+                    text(rt, rt.get_field(a(0), f)) == text(rt, rt.get_field(a(1), f))
+                };
+                let params = |rt: &Rt, m: V| -> Vec<String> {
+                    crate::jutil::elements(rt, rt.get_field(m, "$params"))
+                        .iter()
+                        .map(|p| rt.str_of(*p).unwrap_or("").to_owned())
+                        .collect()
+                };
+                V::I(
+                    (rt.class_of(a(1)) == "java/lang/reflect/Method"
+                        && same(rt, "$class")
+                        && same(rt, "$name")
+                        && params(rt, a(0)) == params(rt, a(1))) as i32,
+                )
+            }
             "isAnnotationPresent" | "getAnnotation" | "getDeclaredAnnotation" | "getAnnotations" | "getDeclaredAnnotations" | "getAnnotationsByType" | "getDeclaredAnnotationsByType" => {
                 let class = text(rt, rt.get_field(a(0), "$class")).replace('.', "/");
                 let method = text(rt, rt.get_field(a(0), "$name"));
@@ -2300,6 +2519,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // transactions (Create: New Age's energy) check `this.thread != Thread.currentThread()`.
         // A thread a mod starts runs its body there at once.
         "java/lang/Thread" => crate::jsystem::thread(rt, name, desc, args),
+        "java/lang/Thread$Builder"
+        | "java/lang/Thread$Builder$OfVirtual"
+        | "java/lang/Thread$Builder$OfPlatform" => crate::jsystem::thread_builder(rt, name, args),
         // The mods' class loader: one for all of them. It finds the files of their jars by their
         // paths from a jar's root, and a class by its name as `Class.forName` does.
         "java/lang/ClassLoader" => Some(match name {
@@ -5215,6 +5437,161 @@ mod tests {
         assert_eq!(
             (rt.class_of(boxed), rt.get_field(boxed, "value")),
             ("java/lang/Integer", V::I(8))
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
+    /// What reflection says of a method's parameters, of a field the compiler made, of the
+    /// module every class is in, and of the fields of a class no table lists.
+    #[test]
+    fn reflection_answers_the_smaller_questions() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            match (class, what) {
+                (crate::MEMBERS, "t/Tools") => {
+                    Some(rt.string("9 twice (ILjava/lang/String;)J\n1 <init> (I)V"))
+                }
+                ("t/Tools", "fields") => {
+                    Some(rt.string("4120 $VALUES [Lt/Tools;\n16409 FIRST Lt/Tools;\n2 count I\n"))
+                }
+                _ => None,
+            }
+        }
+        let c = crate::api::call;
+        let mut rt = Rt::new();
+        rt.supers.insert("t/Tools", "java/lang/Object");
+        rt.reflect = Some(reflect);
+        let class = rt.class_literal("t/Tools");
+        let (name, int, string) = (
+            rt.string("twice"),
+            rt.class_literal("int"),
+            rt.class_literal("java/lang/String"),
+        );
+        let params = rt.alloc("[Ljava/lang/Class;", Data::Array(vec![int, string]));
+        let twice = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+            &[class, name, params],
+        );
+        let given = c(
+            &mut rt,
+            "java/lang/reflect/Method.getParameters.()[Ljava/lang/reflect/Parameter;",
+            &[twice],
+        );
+        let given = crate::jutil::elements(&rt, given);
+        assert_eq!(given.len(), 2);
+        let second = c(
+            &mut rt,
+            "java/lang/reflect/Parameter.getName.()Ljava/lang/String;",
+            &[given[1]],
+        );
+        assert_eq!(rt.str_of(second), Some("arg1"));
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Parameter.getType.()Ljava/lang/Class;",
+                &[given[1]]
+            ),
+            string
+        );
+        let text_of = c(
+            &mut rt,
+            "java/lang/reflect/Method.toString.()Ljava/lang/String;",
+            &[twice],
+        );
+        assert_eq!(
+            rt.str_of(text_of),
+            Some("public static long t.Tools.twice(int,java.lang.String)")
+        );
+        // A constructor's parameters, and that it carries no annotation.
+        let ints = rt.alloc("[Ljava/lang/Class;", Data::Array(vec![int]));
+        let made = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredConstructor.([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;",
+            &[class, ints],
+        );
+        let of = c(
+            &mut rt,
+            "java/lang/reflect/Constructor.getParameters.()[Ljava/lang/reflect/Parameter;",
+            &[made],
+        );
+        assert_eq!(rt.array_len(of), 1);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Constructor.isAnnotationPresent.(Ljava/lang/Class;)Z",
+                &[made, string]
+            ),
+            V::I(0)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Constructor.isAccessible.()Z",
+                &[made]
+            ),
+            V::I(1)
+        );
+        // Fields: one the compiler made, an enum's constant, a plain one.
+        for (field, synthetic, constant) in [("$VALUES", 1, 0), ("FIRST", 0, 1), ("count", 0, 0)] {
+            let name = rt.string(field);
+            let f = c(
+                &mut rt,
+                "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+                &[class, name],
+            );
+            assert_eq!(
+                c(&mut rt, "java/lang/reflect/Field.isSynthetic.()Z", &[f]),
+                V::I(synthetic),
+                "{field}"
+            );
+            assert_eq!(
+                c(&mut rt, "java/lang/reflect/Field.isEnumConstant.()Z", &[f]),
+                V::I(constant),
+                "{field}"
+            );
+        }
+        // The one module, unnamed and open.
+        let module = c(
+            &mut rt,
+            "java/lang/Class.getModule.()Ljava/lang/Module;",
+            &[class],
+        );
+        assert_eq!(
+            c(&mut rt, "java/lang/Module.isNamed.()Z", &[module]),
+            V::I(0)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Module.getName.()Ljava/lang/String;",
+                &[module]
+            ),
+            V::NULL
+        );
+        let package = rt.string("t");
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/Module.isOpen.(Ljava/lang/String;)Z",
+                &[module, package]
+            ),
+            V::I(1)
+        );
+        // The fields of a class of the game's are listed nowhere here: none, where nothing
+        // would end a walk over them.
+        let game = rt.class_literal("net/minecraft/world/level/block/Blocks");
+        let none = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredFields.()[Ljava/lang/reflect/Field;",
+            &[game],
+        );
+        assert_eq!(
+            (rt.class_of(none), rt.array_len(none)),
+            ("[Ljava/lang/reflect/Field;", 0)
         );
         assert!(
             rt.thrown.is_none() && rt.unmapped.is_empty(),

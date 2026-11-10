@@ -10718,6 +10718,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     its own count. Blocking queues have their methods (`put`, `offer` and `poll` with a
     timeout, `drainTo`, `remainingCapacity`), `ArrayBlockingQueue` and `SynchronousQueue`
     are queues, and one made with a capacity takes no more than that.
+- [x] 2026-11-10 Part 183: atomics, `VarHandle`s and more of reflection.
+  - What launches 17 to 19 asked of `java.util.concurrent` and of reflection and got no
+    answer to. The atomics are a module of their own now (`atomics.rs`): a value read,
+    changed and written back is atomic on the one thread a runtime has, so an atomic, an
+    atomic array's element, the field a field updater or a `VarHandle` names, an array's
+    element under `arrayElementVarHandle` and the bytes of a `byteArrayViewVarHandle` are
+    each a place that is read and written, and one function has every operation on it: `get`
+    and `set` under each access mode's name, the exchanges, the arithmetic, the bitwise ones,
+    and the updates through a function (`updateAndGet`, `accumulateAndGet`: an
+    `AtomicLong.updateAndGet` was the first thing unmapped here). Flywheel's bit set of
+    changed instances is such a handle over a `long[]`, Steam 'n' Rails reads Create's
+    registrate through `findStaticVarHandle`, and Kotlin's coroutines keep their states with
+    field updaters.
+  - A compare-and-set compares objects by identity, as the JVM does, where it compared them
+    by `equals`; boxes and strings of equal value still pass, as the JVM's cached boxes and
+    interned strings pass there. `AtomicInteger.longValue()` answers a `long`.
+  - Reflection: a method's and a constructor's `Parameter`s (named `arg0`..., as the JVM
+    names them without `-parameters`), a method's text, hash and equality, a constructor's
+    annotations, whether a field is synthetic or an enum's constant, and the one unnamed
+    module every class is in. The fields of a class of the game's are listed in no table
+    here: `getDeclaredFields` answers none and says so once when tracing, where a walk over
+    nothing ended the mod's code.
+  - Threads and locks: a thread builder (`Thread.ofVirtual()`), a thread from a factory of
+    the runtime's own, a mod's own executor on `AbstractExecutorService` (Lucene's, in
+    GuideME and Ars Nouveau), a pool's counts and queue, `ForkJoinPool`, a mod's lock on
+    `AbstractQueuedSynchronizer` (it asks the mod's class whether it may, and queues nobody)
+    and `StampedLock`, whose stamps are always good.
+  - With `HORIZON_COMPAT_PROFILE` set, each thread tells every twenty seconds which of the
+    game's hooks and which listeners cost it most, in time and in objects made: launch 19
+    ticks the server once in 270 ms, and something in each tick makes 516,000 objects.
+  - 71 parts of three cases compared with the JVM in the fixture (`atomics`,
+    `reflectionMore`), with the two of Part 182.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

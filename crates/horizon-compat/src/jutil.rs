@@ -1897,6 +1897,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         return Some(rt.alloc("java/util/stream/Stream", Data::Stream(items)));
     }
+    // The atomics, their arrays and their field updaters ([`crate::atomics`]).
+    if let Some(class) = owner.strip_prefix("java/util/concurrent/atomic/")
+        && let Some(v) = crate::atomics::call(rt, class, name, desc, args)
+    {
+        return Some(v);
+    }
     // fastutil's `trim()`: the table's storage, which a runtime table sizes itself.
     if owner.starts_with("it/unimi/dsi/fastutil/") && name == "trim" {
         return Some(V::I(1));
@@ -2938,65 +2944,6 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                     V::J(sum)
                 }
                 "toString" => rt.string(&sum.to_string()),
-                _ => return None,
-            }
-        }
-        // Atomics: one `value` field.
-        ("java/util/concurrent/atomic/AtomicInteger" | "java/util/concurrent/atomic/AtomicLong" | "java/util/concurrent/atomic/AtomicBoolean" | "java/util/concurrent/atomic/AtomicReference", n) => {
-            let this = a(0);
-            let zero = match owner {
-                o if o.ends_with("Long") => V::J(0),
-                o if o.ends_with("Reference") => V::NULL,
-                _ => V::I(0),
-            };
-            let cur = match rt.get_field(this, "value") {
-                V::Void => zero,
-                v => v,
-            };
-            match n {
-                "<init>" => {
-                    rt.put_field(this, "value", args.get(1).copied().unwrap_or(zero));
-                    V::Void
-                }
-                "get" | "intValue" | "longValue" | "getPlain" | "getAcquire" | "getOpaque" => cur,
-                "set" | "lazySet" | "setPlain" | "setRelease" | "setOpaque" => {
-                    rt.put_field(this, "value", a(1));
-                    V::Void
-                }
-                "getAndSet" => {
-                    rt.put_field(this, "value", a(1));
-                    cur
-                }
-                "compareAndSet" | "weakCompareAndSet" | "weakCompareAndSetPlain" | "weakCompareAndSetVolatile" | "weakCompareAndSetAcquire" | "weakCompareAndSetRelease" => {
-                    let same = cur == a(1) || (owner.ends_with("Reference") && equals(rt, cur, a(1)));
-                    if same {
-                        rt.put_field(this, "value", a(2));
-                    }
-                    V::I(same as i32)
-                }
-                // The value before, set when it was the one expected (Create makes a contraption's
-                // client side lazily: `compareAndExchangeRelease(null, made)`).
-                "compareAndExchange" | "compareAndExchangeAcquire" | "compareAndExchangeRelease" => {
-                    let same = cur == a(1) || (owner.ends_with("Reference") && equals(rt, cur, a(1)));
-                    if same {
-                        rt.put_field(this, "value", a(2));
-                    }
-                    cur
-                }
-                "incrementAndGet" | "getAndIncrement" | "decrementAndGet" | "getAndDecrement" | "addAndGet" | "getAndAdd" => {
-                    let delta = match n {
-                        "addAndGet" | "getAndAdd" => a(1),
-                        n if n.contains("ecrement") => if owner.ends_with("Long") { V::J(-1) } else { V::I(-1) },
-                        _ => if owner.ends_with("Long") { V::J(1) } else { V::I(1) },
-                    };
-                    let next = match (cur, delta) {
-                        (V::J(x), V::J(d)) => V::J(x.wrapping_add(d)),
-                        (V::I(x), V::I(d)) => V::I(x.wrapping_add(d)),
-                        _ => cur,
-                    };
-                    rt.put_field(this, "value", next);
-                    if n.starts_with("getAnd") { cur } else { next }
-                }
                 _ => return None,
             }
         }

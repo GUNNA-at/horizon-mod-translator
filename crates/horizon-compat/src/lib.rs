@@ -14,6 +14,7 @@ pub const FILES: &str = "hz/files";
 pub const MEMBERS: &str = "hz/members";
 
 pub mod annotations;
+pub mod atomics;
 pub mod api;
 pub mod api_common;
 pub mod attachments;

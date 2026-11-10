@@ -554,6 +554,7 @@ const CHRONO_NANOS: [i128; 16] = [
 const THREAD_POOL: &str = "java/util/concurrent/ThreadPoolExecutor";
 const SCHEDULED_POOL: &str = "java/util/concurrent/ScheduledThreadPoolExecutor";
 const FORK_JOIN_POOL: &str = "java/util/concurrent/ForkJoinPool";
+const ABSTRACT_EXECUTOR: &str = "java/util/concurrent/AbstractExecutorService";
 const SCHEDULED_FUTURE: &str = "java/util/concurrent/ScheduledFuture";
 const THREAD_FACTORY_BUILDER: &str = "com/google/common/util/concurrent/ThreadFactoryBuilder";
 const TICKET_TYPE: &str = "net/minecraft/server/level/TicketType";
@@ -2300,11 +2301,102 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         {
             V::Void
         }
+        // An executor of a mod's own on `AbstractExecutorService` (Lucene's, which runs each
+        // task where it is given): what that class has for it. A task submitted runs through
+        // the mod's own `execute`, and is done when that returns.
+        (ABSTRACT_EXECUTOR, "<init>") => V::Void,
+        (o, "submit" | "invokeAll")
+            if is_executor(o)
+                && !is_executor(rt.class_of(a(0)))
+                && rt.instance_of(a(0), ABSTRACT_EXECUTOR) =>
+        {
+            let callable =
+                name == "invokeAll" || desc.starts_with("(Ljava/util/concurrent/Callable;)");
+            let run = |rt: &mut Rt, task: V| {
+                let value = if callable {
+                    rt.call_functional(
+                        "java/util/concurrent/Callable.call.()Ljava/lang/Object;",
+                        task,
+                        &[],
+                    )
+                } else {
+                    rt.call_functional(
+                        "java/util/concurrent/Executor.execute.(Ljava/lang/Runnable;)V",
+                        a(0),
+                        &[task],
+                    );
+                    if desc.starts_with("(Ljava/lang/Runnable;Ljava/lang/Object;)") {
+                        a(2)
+                    } else {
+                        V::NULL
+                    }
+                };
+                crate::jutil::completed_future(rt, value)
+            };
+            if name == "submit" {
+                run(rt, a(1))
+            } else {
+                let mut done = Vec::new();
+                for task in crate::jutil::elements(rt, a(1)) {
+                    done.push(run(rt, task));
+                    if rt.thrown.is_some() {
+                        break;
+                    }
+                }
+                crate::jutil::new_list(rt, done)
+            }
+        }
         (o, n) if is_executor(o) && is_executor(rt.class_of(a(0))) => match n {
             "execute" => {
                 rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
                 V::Void
             }
+            "invokeAll" => {
+                let mut done = Vec::new();
+                for task in crate::jutil::elements(rt, a(1)) {
+                    let value = rt.call_functional(
+                        "java/util/concurrent/Callable.call.()Ljava/lang/Object;",
+                        task,
+                        &[],
+                    );
+                    if rt.thrown.is_some() {
+                        break;
+                    }
+                    done.push(crate::jutil::completed_future(rt, value));
+                }
+                crate::jutil::new_list(rt, done)
+            }
+            // Nothing waits in a pool that runs each task where it is given.
+            "getActiveCount"
+            | "getPoolSize"
+            | "getLargestPoolSize"
+            | "getQueuedSubmissionCount"
+            | "getQueuedTaskCount"
+            | "getRunningThreadCount"
+            | "getStealCount" => {
+                if desc.ends_with(")J") {
+                    V::J(0)
+                } else {
+                    V::I(0)
+                }
+            }
+            "getTaskCount" | "getCompletedTaskCount" => V::J(0),
+            "getCorePoolSize" | "getMaximumPoolSize" | "getParallelism" => V::I(1),
+            "getQueue" => match rt.get_field(a(0), "$queue") {
+                queue if queue.r() != 0 => queue,
+                _ => {
+                    let queue = rt.new_object("java/util/concurrent/LinkedBlockingQueue");
+                    crate::api::call(
+                        rt,
+                        "java/util/concurrent/LinkedBlockingQueue.<init>.()V",
+                        &[queue],
+                    );
+                    rt.put_field(a(0), "$queue", queue);
+                    queue
+                }
+            },
+            "purge" => V::Void,
+            "remove" => V::I(0),
             "submit" => {
                 let value = if desc.starts_with("(Ljava/util/concurrent/Callable;)") {
                     rt.call_functional("java/util/concurrent/Callable.call.()Ljava/lang/Object;", a(1), &[])
@@ -2335,6 +2427,19 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             "isDone" => V::I(rt.get_field(a(0), "$cancelled").i()),
             _ => return None,
         },
+        // A factory of the runtime's own (`Executors.defaultThreadFactory()`, a builder's): a
+        // thread around the body, for whoever starts it.
+        ("java/util/concurrent/ThreadFactory", "newThread")
+            if rt.class_of(a(0)) == "java/util/concurrent/ThreadFactory" =>
+        {
+            let thread = rt.new_object("java/lang/Thread");
+            crate::api::call(
+                rt,
+                "java/lang/Thread.<init>.(Ljava/lang/Runnable;)V",
+                &[thread, a(1)],
+            );
+            thread
+        }
         // Guava's `ThreadFactoryBuilder`: the factory it builds names threads no one starts here.
         (THREAD_FACTORY_BUILDER, n) => match n {
             "<init>" => V::Void,

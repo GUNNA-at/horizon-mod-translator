@@ -513,6 +513,117 @@ public class Fixture {
         return r;
     }
 
+    // Atomics, their arrays, field updaters and `VarHandle`s (Flywheel's bit set of changed
+    // instances is one over a `long[]`, Kotlin's coroutines keep their states with updaters):
+    // one part by its number, or all of them folded together for 0.
+    static class Counted {
+        volatile int hits;
+        volatile long total;
+        volatile String label = "a";
+        int plain = 3;
+        boolean on;
+        double ratio = 1.5;
+        static int shared = 5;
+        static Object held;
+    }
+    public static long atomics(int part) {
+        java.util.concurrent.atomic.AtomicInteger i = new java.util.concurrent.atomic.AtomicInteger(5);
+        java.util.concurrent.atomic.AtomicLong l = new java.util.concurrent.atomic.AtomicLong();
+        java.util.concurrent.atomic.AtomicReference<String> r = new java.util.concurrent.atomic.AtomicReference<>("x");
+        java.util.concurrent.atomic.AtomicBoolean b = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicIntegerArray ia = new java.util.concurrent.atomic.AtomicIntegerArray(4);
+        java.util.concurrent.atomic.AtomicLongArray la = new java.util.concurrent.atomic.AtomicLongArray(new long[] { 7, 8, 9 });
+        java.util.concurrent.atomic.AtomicReferenceArray<String> ra = new java.util.concurrent.atomic.AtomicReferenceArray<>(3);
+        Counted c = new Counted();
+        Counted.shared = 5;
+        Counted.held = null;
+        long[] parts = new long[18];
+        try {
+            parts[0] = i.updateAndGet(v -> v * 3) + i.getAndUpdate(v -> v + 1) * 100L + i.accumulateAndGet(4, (x, y) -> x * y) * 10000L + i.getAndAccumulate(2, Integer::sum) * 1000000L;
+            parts[1] = i.get() + i.longValue() * 2 + (long) i.floatValue() + (i.compareAndSet(66, 7) ? 1000 : 0) + (i.compareAndSet(66, 9) ? 5000 : 0)
+                + i.incrementAndGet() * 10000L + i.getAndAdd(-3) * 1000000L + i.intValue() * 100000000L + i.toString().length();
+            parts[2] = l.updateAndGet(v -> v - 9) + l.addAndGet(1L << 40) + l.getAndIncrement() + l.decrementAndGet() + l.accumulateAndGet(3, Math::max)
+                + l.intValue() + l.toString().length() + (l.compareAndSet(3, 1) ? 0 : 7) + (long) l.doubleValue();
+            parts[3] = (r.compareAndSet("x", "y") ? 1 : 0) + (r.compareAndSet("x", "z") ? 10 : 0) + r.getAndSet("w").charAt(0) * 100 + r.updateAndGet(s -> s + "!").length() * 100000
+                + r.accumulateAndGet("?", String::concat).length() * 1000000 + (r.toString().equals("w!?") ? 50000000 : 0) + r.getAndUpdate(s -> null).length()
+                + (r.get() == null ? 3 : 0) + (r.compareAndExchange(null, "q") == null ? 400000000L : 0);
+            parts[4] = (b.compareAndSet(false, true) ? 1 : 0) + (b.getAndSet(false) ? 2 : 0) + (b.get() ? 4 : 0) + (b.toString().equals("false") ? 8 : 0) + (b.weakCompareAndSetPlain(false, true) ? 16 : 0);
+            ia.set(1, 5);
+            parts[5] = ia.length() + ia.incrementAndGet(1) * 10 + ia.getAndAdd(2, 7) * 100 + ia.addAndGet(2, 1) * 1000 + ia.updateAndGet(3, v -> v - 4) * 10000L
+                + ia.accumulateAndGet(0, 9, (x, y) -> x + y * 2) * 100000L + (ia.compareAndSet(1, 6, 60) ? 1000000 : 0) + ia.get(1) * 10000000L + ia.toString().length();
+            parts[6] = la.get(2) + la.getAndSet(0, 70) * 10 + la.decrementAndGet(1) * 100 + la.length() * 1000 + la.updateAndGet(0, v -> v / 7) * 10000 + la.toString().length() * 100000;
+            ra.set(0, "a");
+            parts[7] = (ra.compareAndSet(1, null, "b") ? 1 : 0) + (ra.compareAndSet(1, null, "c") ? 10 : 0) + ra.getAndSet(0, "z").charAt(0) + ra.length() * 1000
+                + (ra.get(2) == null ? 10000 : 0) + ra.updateAndGet(1, s -> s + s).length() * 100000 + ra.toString().length() * 1000000;
+            java.util.concurrent.atomic.AtomicIntegerFieldUpdater<Counted> hits = java.util.concurrent.atomic.AtomicIntegerFieldUpdater.newUpdater(Counted.class, "hits");
+            java.util.concurrent.atomic.AtomicLongFieldUpdater<Counted> total = java.util.concurrent.atomic.AtomicLongFieldUpdater.newUpdater(Counted.class, "total");
+            java.util.concurrent.atomic.AtomicReferenceFieldUpdater<Counted, String> label =
+                java.util.concurrent.atomic.AtomicReferenceFieldUpdater.newUpdater(Counted.class, String.class, "label");
+            parts[8] = hits.incrementAndGet(c) + hits.getAndAdd(c, 5) * 10 + (hits.compareAndSet(c, 6, 40) ? 100 : 0) + c.hits * 1000 + hits.updateAndGet(c, v -> v + 2) * 100000L + hits.get(c) * 10000000L;
+            parts[9] = total.addAndGet(c, 1L << 33) + total.getAndIncrement(c) + c.total + (total.compareAndSet(c, (1L << 33) + 1, 5) ? 3 : 0) + total.accumulateAndGet(c, 4, (x, y) -> x * y);
+            parts[10] = (label.compareAndSet(c, "a", "b") ? 1 : 0) + label.getAndSet(c, "cc").length() * 10 + c.label.length() * 100 + label.updateAndGet(c, s -> s + "d").length() * 1000 + label.get(c).charAt(2);
+            java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.lookup();
+            java.lang.invoke.VarHandle plain = lookup.findVarHandle(Counted.class, "plain", int.class);
+            java.lang.invoke.VarHandle shared = lookup.findStaticVarHandle(Counted.class, "shared", int.class);
+            java.lang.invoke.VarHandle held = lookup.findStaticVarHandle(Counted.class, "held", Object.class);
+            java.lang.invoke.VarHandle on = lookup.findVarHandle(Counted.class, "on", boolean.class);
+            java.lang.invoke.VarHandle ratio = lookup.findVarHandle(Counted.class, "ratio", double.class);
+            parts[11] = (int) plain.get(c) + (int) plain.getAndAdd(c, 4) * 10 + (plain.compareAndSet(c, 7, 20) ? 100 : 0) + c.plain * 1000 + (int) plain.getVolatile(c) * 100000
+                + (int) plain.getAndSet(c, 1) * 10000000L;
+            shared.set(11);
+            parts[12] = (int) shared.get() + Counted.shared * 100 + (int) shared.getAndBitwiseOr(4) * 10000 + Counted.shared * 1000000L + (int) shared.compareAndExchange(15, 2) * 100000000L;
+            Object first = "first";
+            parts[13] = (held.compareAndSet(null, first) ? 1 : 0) + (held.get() == first ? 10 : 0) + (Counted.held == first ? 100 : 0) + (held.getAndSet(c) == first ? 1000 : 0) + (held.get() == c ? 10000 : 0);
+            parts[14] = ((boolean) on.get(c) ? 1 : 0) + (on.compareAndSet(c, false, true) ? 10 : 0) + (c.on ? 100 : 0) + (long) ((double) ratio.getAndAdd(c, 2.25) * 1000) + (long) (c.ratio * 1000000);
+            java.lang.invoke.VarHandle longs = java.lang.invoke.MethodHandles.arrayElementVarHandle(long[].class);
+            java.lang.invoke.VarHandle texts = java.lang.invoke.MethodHandles.arrayElementVarHandle(String[].class);
+            long[] words = new long[3];
+            String[] names = { "p", null };
+            parts[15] = (long) longs.getAndBitwiseOr(words, 1, 1L << 40) + ((long) longs.getVolatile(words, 1) >> 40) + (longs.compareAndSet(words, 0, 0L, 9L) ? 10 : 0) + words[0] * 100
+                + (long) longs.getAndAdd(words, 2, 5L) + words[2] * 1000 + (long) longs.getAndBitwiseAnd(words, 0, 8L) * 100000 + words[0] * 10000000;
+            parts[16] = (texts.compareAndSet(names, 1, null, "q") ? 1 : 0) + ((String) texts.get(names, 1)).charAt(0) * 10 + ((String) texts.getAndSet(names, 0, "r")).charAt(0) * 10000 + names[0].charAt(0) * 10000000L;
+            java.lang.invoke.VarHandle ints = java.lang.invoke.MethodHandles.byteArrayViewVarHandle(int[].class, java.nio.ByteOrder.LITTLE_ENDIAN);
+            java.lang.invoke.VarHandle bigLongs = java.lang.invoke.MethodHandles.byteArrayViewVarHandle(long[].class, java.nio.ByteOrder.BIG_ENDIAN);
+            java.lang.invoke.VarHandle shorts = java.lang.invoke.MethodHandles.byteArrayViewVarHandle(short[].class, java.nio.ByteOrder.BIG_ENDIAN);
+            java.lang.invoke.VarHandle doubles = java.lang.invoke.MethodHandles.byteArrayViewVarHandle(double[].class, java.nio.ByteOrder.LITTLE_ENDIAN);
+            byte[] bytes = new byte[24];
+            ints.set(bytes, 1, 0x01020384);
+            bigLongs.set(bytes, 8, 0x1122334455667788L);
+            shorts.set(bytes, 5, (short) -2);
+            doubles.set(bytes, 16, 2.5);
+            parts[17] = (int) ints.get(bytes, 1) + bytes[1] * 3 + bytes[4] * 5 + (long) bigLongs.get(bytes, 8) % 1000003 + bytes[8] * 7 + bytes[15] * 11
+                + (short) shorts.get(bytes, 5) * 13 + bytes[6] * 17 + (long) ((double) doubles.get(bytes, 16) * 100) + (int) ints.get(bytes, 12) % 1009;
+        } catch (Throwable e) {
+            return -1;
+        }
+        if (part > 0) return parts[part - 1];
+        long acc = 0;
+        for (long p : parts) acc = acc * 31 + p;
+        return acc;
+    }
+
+    // More of reflection and of threads: a method's parameters and its text, the one module,
+    // a thread from a builder.
+    public static int reflectionMore(int k) {
+        try {
+            java.lang.reflect.Method twice = Tools.class.getMethod("twice", int.class);
+            java.lang.reflect.Parameter[] given = twice.getParameters();
+            int r = given.length + given[0].getType().getName().length() * 10 + twice.toString().length() * 100 + (given[0].getName().equals("arg0") ? 100000 : 0);
+            r += (Tools.class.getModule().isNamed() ? 0 : 1000000) + twice.getExceptionTypes().length + (twice.equals(Tools.class.getMethod("twice", int.class)) ? 10000000 : 0);
+            r += twice.toString().equals("public static int Fixture$Tools.twice(int)") ? 20000000 : 0;
+            Thread made = Thread.ofVirtual().name("worker").unstarted(() -> { });
+            r += made.getName().length() * 1000 + (Thread.getDefaultUncaughtExceptionHandler() == null ? 40000000 : 0);
+            java.util.concurrent.locks.StampedLock lock = new java.util.concurrent.locks.StampedLock();
+            long stamp = lock.tryOptimisticRead();
+            r += (lock.validate(stamp) ? 100000000 : 0) + (lock.isWriteLocked() ? 1 : 0);
+            long write = lock.writeLock();
+            lock.unlockWrite(write);
+            return r + k;
+        } catch (Throwable e) {
+            return -1;
+        }
+    }
+
     // Blocking queues, on one thread: a full one takes no more, a wait for what is there is none.
     public static int blockingQueues(int k) {
         java.util.concurrent.ArrayBlockingQueue<Integer> q = new java.util.concurrent.ArrayBlockingQueue<>(3);

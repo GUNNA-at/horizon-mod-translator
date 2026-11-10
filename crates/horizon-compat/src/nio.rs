@@ -30,6 +30,11 @@ pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     )
 }
 
+/// Whether byte order `order` is `LITTLE_ENDIAN`.
+pub(crate) fn is_little(rt: &Rt, order: V) -> bool {
+    rt.get_field(order, LITTLE).i() != 0
+}
+
 /// A byte order's constant: `BIG_ENDIAN`, or `LITTLE_ENDIAN` (`little`).
 pub(crate) fn order(rt: &mut Rt, little: bool) -> V {
     let name = if little {
