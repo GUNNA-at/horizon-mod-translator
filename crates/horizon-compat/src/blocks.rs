@@ -1500,6 +1500,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || matches!(
             (owner, name),
             ("net/minecraft/world/level/block/SignBlock", "getWoodType")
+                | ("net/minecraft/world/level/block/BannerBlock", "byColor")
                 | ("net/minecraft/world/level/block/BedBlock", "getConnectedDirection")
                 | ("net/minecraft/world/level/block/ChestBlock", "getConnectedDirection")
                 | ("net/minecraft/world/level/block/FaceAttachedHorizontalDirectionalBlock", "getConnectedDirection")
@@ -2117,6 +2118,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let all = vanilla_enum_values(rt, o)?;
             let class: &'static str = rt.static_key(&format!("[L{o};"));
             Some(rt.alloc(class, Data::Array(all)))
+        }
+        // `BannerBlock.byColor(color)`: the standing banner of that colour (Amendments takes each
+        // one's item for its ceiling banners).
+        ("net/minecraft/world/level/block/BannerBlock", "byColor") => {
+            let color = rt
+                .str_of(rt.get_field(a(0), "$name"))
+                .unwrap_or("WHITE")
+                .to_owned();
+            let key = rt.static_key(&format!(
+                "net/minecraft/world/level/block/Blocks.{color}_BANNER"
+            ));
+            Some(api::get_static(rt, key))
         }
         (DYE_COLOR, _) => dye_call(rt, name, args),
         // `RailShape.isAscending()`: the four that climb.
@@ -3448,7 +3461,9 @@ pub fn item_declarations(rt: &mut Rt) -> Vec<(String, String)> {
             let rarity = rt.get_field(props, "$rarity");
             if props.r() != 0 && rarity.r() != 0 {
                 let r = rt.str_of(rt.get_field(rarity, "$name")).unwrap_or("COMMON").to_ascii_lowercase();
-                if r != "common" {
+                // (A rarity a mod added to the enum is none the game knows: its item is declared
+                // without one.)
+                if matches!(r.as_str(), "uncommon" | "rare" | "epic") {
                     fields.push(format!("\"rarity\": \"{r}\""));
                 }
             }
@@ -3474,6 +3489,27 @@ mod tests {
 
     fn props(rt: &mut Rt) -> V {
         api::call(rt, OF, &[])
+    }
+
+    /// `BannerBlock.byColor`: the standing banner of the colour, which has an item of its own.
+    #[test]
+    fn a_banner_by_its_colour_is_that_colours_banner() {
+        crate::install();
+        let mut rt = Rt::new();
+        let red = api::get_static(&mut rt, "net/minecraft/world/item/DyeColor.RED");
+        let banner = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/BannerBlock.byColor.(Lnet/minecraft/world/item/DyeColor;)Lnet/minecraft/world/level/block/Block;",
+            &[red],
+        );
+        assert_eq!(rt.str_of(banner), Some("minecraft:red_banner"));
+        let item = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/Block.asItem.()Lnet/minecraft/world/item/Item;",
+            &[banner],
+        );
+        assert_eq!(rt.str_of(item), Some("minecraft:red_banner"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod's sign made with a wood type (SecurityCraft's secret signs) answers it through

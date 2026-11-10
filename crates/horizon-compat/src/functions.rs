@@ -87,6 +87,13 @@ pub(crate) fn bound(rt: &mut Rt, key: &str, receiver: V) -> V {
     combinator(rt, "compat:fn/bound", vec![k, receiver])
 }
 
+/// A method of its argument called with one more, fixed argument (`style ->
+/// style.withColor(colour)`): `key` is the method's.
+pub(crate) fn with(rt: &mut Rt, key: &str, extra: V) -> V {
+    let k = rt.string(key);
+    combinator(rt, "compat:fn/with", vec![k, extra])
+}
+
 /// A record component's accessor (`name`) as a function of the record.
 pub(crate) fn component(rt: &mut Rt, name: &str) -> V {
     let n = rt.string(name);
@@ -274,6 +281,11 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
         }
         // One object's method as a function (`atlas::getSprite`): [key, receiver], on the receiver
         // with the arguments.
+        "compat:fn/with" => {
+            let k = rt.str_of(part(0)).unwrap_or("").to_owned();
+            let k: &'static str = rt.static_key(&k);
+            crate::api::call(rt, k, &[args.first().copied().unwrap_or_default(), part(1)])
+        }
         "compat:fn/bound" => {
             let k = rt.str_of(part(0)).unwrap_or("").to_owned();
             let k: &'static str = rt.static_key(&k);

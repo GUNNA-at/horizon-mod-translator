@@ -3082,8 +3082,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
 }
 
-/// The client's screens learn of the mods' menu screens (`RegisterMenuScreensEvent`), once, after
-/// the client's setup.
+/// The client's screens learn of the mods' menu screens (`RegisterMenuScreensEvent`), once, as
+/// the client is made (`MenuScreens.init`, from `ClientHooks.initClientHooks`).
 pub fn register_screens(rt: &mut Rt) {
     let ev = rt.new_object(REGISTER_SCREENS);
     crate::neo::post(rt, REGISTER_SCREENS, ev);

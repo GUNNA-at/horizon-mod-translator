@@ -84,8 +84,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if let Some(v) = is_fake(rt, a(0)).then(|| player_call(rt, name, desc, args)).flatten() {
         return Some(v);
     }
-    // One `FakePlayer` inherits (a mod's subclass calls them through it): `ServerPlayer`'s.
-    (owner == FAKE_PLAYER).then(|| crate::api::call(rt, inherited(key), args))
+    // One `FakePlayer` inherits (a mod's subclass calls them through it): `ServerPlayer`'s. Asked
+    // once: what `ServerPlayer` has no answer for is asked of the receiver's own class next, which
+    // is this one again (so a method nothing maps went round until the stack ran out).
+    if owner != FAKE_PLAYER {
+        return None;
+    }
+    thread_local! {
+        static ASKED: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    }
+    if ASKED.get() == Some(key) {
+        return None;
+    }
+    let outer = ASKED.replace(Some(key));
+    let answer = crate::api::call(rt, inherited(key), args);
+    ASKED.set(outer);
+    Some(answer)
 }
 
 /// `key`, a `FakePlayer` method's, as `ServerPlayer`'s.
@@ -442,6 +456,33 @@ mod tests {
 
     fn hand(rt: &mut Rt, which: &str) -> V {
         crate::api_common::get_static(rt, "net/minecraft/world/InteractionHand", which).unwrap()
+    }
+
+    /// `chunkPosition()` of what has a block position is the chunk that position is in, by
+    /// whichever class the call names it.
+    #[test]
+    fn an_entitys_chunk_is_its_block_positions() {
+        let mut rt = runtime();
+        let mut h = MemoryHost::default();
+        rt.with_host(&mut h, |rt| {
+            let p = made(rt, 2);
+            crate::api::call(rt, SET_POS, &[p, V::D(-20.5), V::D(64.0), V::D(35.2)]);
+            for owner in [
+                "net/minecraft/world/entity/Entity",
+                "net/minecraft/world/entity/player/Player",
+            ] {
+                let key = rt.static_key(&format!(
+                    "{owner}.chunkPosition.()Lnet/minecraft/world/level/ChunkPos;"
+                ));
+                let chunk = crate::api::call(rt, key, &[p]);
+                assert_eq!(
+                    (rt.get_field(chunk, "x"), rt.get_field(chunk, "z")),
+                    (V::I(-2), V::I(2)),
+                    "{owner}"
+                );
+            }
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
     }
 
     /// What a fake player holds is its own: the acting player's hands and inventory stay as they

@@ -569,6 +569,36 @@ fn holder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
         // A biome: its climate, from its data.
         (BIOME, "getBaseTemperature") => rt.get_field(a(0), "$temperature"),
         (BIOME, "hasPrecipitation") => rt.get_field(a(0), "$precipitation"),
+        // Whether it rains or snows at a position (`warmEnoughToRain`: 0.15 and over): by the
+        // biome's temperature, which falls with height above 80 (vanilla's 0.05 a 40 blocks;
+        // its small noise on top of that is not here).
+        (BIOME, "warmEnoughToRain" | "coldEnoughToSnow" | "getPrecipitationAt") => {
+            let y = crate::api::pos_of(rt, a(1))[1] as f32;
+            let base = rt.get_field(a(0), "$temperature").f();
+            let temperature = if y > 80.0 {
+                base - (y - 80.0) * 0.05 / 40.0
+            } else {
+                base
+            };
+            let warm = temperature >= 0.15;
+            match name {
+                "warmEnoughToRain" => V::I(warm as i32),
+                "coldEnoughToSnow" => V::I(!warm as i32),
+                _ => {
+                    let kind = match (rt.get_field(a(0), "$precipitation").i() != 0, warm) {
+                        (false, _) => ("NONE", 0),
+                        (true, true) => ("RAIN", 1),
+                        (true, false) => ("SNOW", 2),
+                    };
+                    crate::api::api_enum(
+                        rt,
+                        "net/minecraft/world/level/biome/Biome$Precipitation",
+                        kind.0,
+                        kind.1,
+                    )
+                }
+            }
+        }
         // `PlacedFeature.place(level, generator, random, pos)` from the mod's code: the host's
         // generator places it on its region, drawing from the feature's stream.
         (PLACED, "place" | "placeWithBiomeCheck") if rt.get_field(a(0), "$json").r() != 0 => {

@@ -152,12 +152,22 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     false
 }
 
-/// commons-lang's and DataFixerUpper's pairs (the runtime keeps both as `$left`, `$right`).
+/// commons-lang's, DataFixerUpper's and fastutil's pairs (the runtime keeps them all as `$left`,
+/// `$right`).
 fn is_pair(class: &str) -> bool {
     matches!(
         class,
         "org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair"
-    )
+    ) || fast_pair(class)
+}
+
+/// Whether `class` is one of fastutil's pairs: `Pair` itself, or a pair of its typed packages
+/// (`ints/IntIntPair`, `objects/ObjectIntImmutablePair`...).
+pub(crate) fn fast_pair(class: &str) -> bool {
+    class == "it/unimi/dsi/fastutil/Pair"
+        || (class.starts_with("it/unimi/dsi/fastutil/")
+            && class.ends_with("Pair")
+            && !class.contains("Sorted"))
 }
 
 /// `v.hashCode()` as Java answers it: the object's own `hashCode` when its mod class overrides it.

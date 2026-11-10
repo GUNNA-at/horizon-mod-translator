@@ -228,6 +228,36 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return None;
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // Its enums' `values()` and `valueOf(name)` (a `switch` over one builds its table from
+    // `values().length`: unanswered, the table had one place and the second case fell outside).
+    if let Some((class, names)) = ENUMS.iter().find(|(c, _)| *c == owner) {
+        match name {
+            "values" if desc.starts_with("()[") => {
+                let all: Vec<V> = names
+                    .iter()
+                    .enumerate()
+                    .map(|(i, n)| crate::api::api_enum(rt, class, n, i as i32))
+                    .collect();
+                let array = rt.static_key(&format!("[L{class};"));
+                return Some(rt.alloc(array, Data::Array(all)));
+            }
+            "valueOf" if desc.starts_with("(Ljava/lang/String;)") => {
+                let wanted = rt.str_of(a(0)).unwrap_or("").to_owned();
+                return Some(match names.iter().position(|n| *n == wanted) {
+                    Some(i) => crate::api::api_enum(rt, class, names[i], i as i32),
+                    None => crate::jlang::throw_with(
+                        rt,
+                        "java/lang/IllegalArgumentException",
+                        &format!(
+                            "No enum constant {}.{wanted}",
+                            class.replace(['/', '$'], ".")
+                        ),
+                    ),
+                });
+            }
+            _ => {}
+        }
+    }
     let commented = owner.contains("Commented") || owner.contains("toml/");
     let config_class: &'static str = if commented { COMMENTED } else { "com/electronwill/nightconfig/core/Config" };
     // Static factories first: their first argument is no config.

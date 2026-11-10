@@ -53,6 +53,17 @@ fn visibility(rt: &mut Rt, i: usize) -> V {
     api::api_enum(rt, VISIBILITY, VISIBILITIES[i], i as i32)
 }
 
+/// One of vanilla's creative tabs as the registry hands it out (`BuiltInRegistries
+/// .CREATIVE_MODE_TAB.get(CreativeModeTabs.BUILDING_BLOCKS)`): one object a tab. None for an id
+/// that is no vanilla tab's.
+pub(crate) fn vanilla_tab(rt: &mut Rt, id: &str) -> Option<V> {
+    let path = id.strip_prefix("minecraft:")?;
+    VANILLA_TABS
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(path))
+        .then(|| rt.intern(format!("vanilla-tab/{path}"), |rt| rt.new_object(TAB)))
+}
+
 /// Static fields this module owns: `TabVisibility` and vanilla's tab keys.
 pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     match owner {
@@ -252,6 +263,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             this
         }
         (TAB, "getDisplayName") => rt.get_field(a(0), "$title"),
+        // The stacks a tab shows, which it holds none of until the game builds its tabs' contents
+        // (as in the game before the creative screen first opens): a mod orders its items by a
+        // vanilla tab's (SecurityCraft's `getVanillaOrderedItems`).
+        (TAB, "getDisplayItems" | "getSearchTabDisplayItems") => rt.alloc(
+            "it/unimi/dsi/fastutil/objects/ObjectLinkedOpenCustomHashSet",
+            crate::Data::List(Vec::new()),
+        ),
         (TAB, "getIconItem") => {
             let icon = rt.get_field(a(0), "$icon");
             rt.call_functional(SUPPLY, icon, &[])
@@ -305,6 +323,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (CONTENTS_EVENT, "getTab") => rt.get_field(a(0), "$tab"),
         (CONTENTS_EVENT, "getParameters") => rt.get_field(a(0), "$parameters"),
         (CONTENTS_EVENT | PARAMETERS, "hasPermissions") => V::I(0),
+        // The registries a tab's generator looks its entries up in (`parameters.holders()`:
+        // AE2's planes ask it for the enchantments, Ars Nouveau for the paintings): the one
+        // registry access there is.
+        (PARAMETERS, "holders") => rt.intern("compat:registry-access".into(), |rt| rt.new_object("net/minecraft/core/RegistryAccess")),
         (CONTENTS_EVENT | PARAMETERS, "getFlags" | "enabledFeatures") => rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")),
         ("net/minecraft/world/flag/FeatureFlagSet", "contains" | "isSubsetOf") => V::I(1),
         // `FeatureFlagSet.of(...)`: the one set of flags there is here (every feature on).

@@ -786,9 +786,16 @@ pub struct Plan {
 
 /// The name the runtime knows a place in a method it runs itself by: `hz/inject:` and the
 /// method (`owner.name`), `@` and the place as its `@At` says it (`HEAD`, `RETURN`, `TAIL`,
-/// `STORE`, `INVOKE:<name of what is called>:BEFORE` or `:AFTER`). None for a place no runtime
-/// code is asked about.
+/// `STORE`, `INVOKE:<name of what is called>:BEFORE` or `:AFTER`; `TAIL` for any place in a
+/// static initialiser). None for a place no runtime code is asked about.
 pub fn native_place(target: &str, method: &str, at: &At) -> Option<String> {
+    // A class's static initialiser is one place: the runtime has no such initialiser of its own
+    // to run a handler in the middle of, and runs the handlers when it first answers for the
+    // class, wherever in the initialiser the mixin put them (after the write of an enum's
+    // `$VALUES`, say, to add constants of its own).
+    if method == "<clinit>" {
+        return Some(format!("{NATIVE_PLACE}{target}.<clinit>@TAIL"));
+    }
     let at = match at {
         At::Head => "HEAD".to_owned(),
         At::Return { .. } => "RETURN".to_owned(),
@@ -1030,6 +1037,24 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                 let targets = plan.vanilla.entry(mixin.name.clone()).or_default();
                 if !targets.contains(&target_name) {
                     targets.push(target_name.clone());
+                }
+                // Its own static initialiser, which Mixin merges into the target's: heard at
+                // that place, so the runtime runs it when it first answers for the target (a
+                // mixin that adds constants to an enum in its `static {}`, which nothing else
+                // of the mod need touch before it asks for one by name).
+                if mixin
+                    .methods
+                    .iter()
+                    .any(|h| h.name == "<clinit>" && h.code.is_some())
+                    && let Some(place) = native_place(&target_name, "<clinit>", &At::Tail)
+                {
+                    let places = plan
+                        .native
+                        .entry(format!("{}.<clinit>.()V", mixin.name))
+                        .or_default();
+                    if !places.contains(&place) {
+                        places.push(place);
+                    }
                 }
                 // Its static injectors, by the places they name: for the runtime to call where
                 // its own code for the method passes them.
@@ -1355,6 +1380,26 @@ fn check(w: &Weave, m: &Method) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handler injected anywhere into a static initialiser listens for one place: the
+    /// runtime runs it when it first answers for the class. Another method's field access is
+    /// no place the runtime knows.
+    #[test]
+    fn any_place_in_a_static_initialiser_is_its_tail() {
+        let at = At::Field {
+            owner: "e/Kind".into(),
+            name: "$VALUES".into(),
+            desc: "[Le/Kind;".into(),
+            opcode: Some(0xb3),
+            ordinal: None,
+            after: true,
+        };
+        assert_eq!(
+            native_place("e/Kind", "<clinit>", &at).as_deref(),
+            Some("hz/inject:e/Kind.<clinit>@TAIL")
+        );
+        assert_eq!(native_place("e/Kind", "tick", &at), None);
+    }
 
     #[test]
     fn selectors_pick_methods_as_mixin_does() {

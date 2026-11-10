@@ -865,6 +865,34 @@ fn format_of(rt: &Rt, ops: V) -> Format {
     }
 }
 
+/// The values `JsonOps` makes when asked directly: nothing, an empty map or list, a string, a
+/// number or a boolean, a list of what a stream holds. None for the rest of `DynamicOps`.
+fn json_ops_method(rt: &mut Rt, method: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match method {
+        "empty" => crate::gson::null(rt),
+        "emptyMap" => crate::gson::new_object(rt),
+        "emptyList" => crate::gson::new_array(rt, Vec::new()),
+        "createString" => {
+            let text = rt.str_of(a(1)).unwrap_or("").to_owned();
+            crate::gson::string(rt, &text)
+        }
+        "createBoolean" => crate::gson::boolean(rt, a(1).i() != 0),
+        "createByte" | "createShort" | "createInt" | "createLong" | "createFloat"
+        | "createDouble" => crate::gson::number(rt, a(1)),
+        // `createNumeric(Number)`: the number its box holds.
+        "createNumeric" => {
+            let n = rt.get_field(a(1), "value");
+            crate::gson::number(rt, n)
+        }
+        "createList" => {
+            let items = jutil::elements(rt, a(1));
+            crate::gson::new_array(rt, items)
+        }
+        _ => return None,
+    })
+}
+
 /// What [`encode`] wrote, in the format of `ops` ([`Format`]; not the tags').
 fn written_as(rt: &mut Rt, ops: V, format: Format, n: &Nbt) -> V {
     match format {
@@ -1638,8 +1666,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("com/mojang/serialization/codecs/RecordCodecBuilder", "create" | "mapCodec") => {
             let instance = rt.intern("compat:codec/instance".into(), |rt| codec(rt, "compat:codec/instance", vec![]));
             let built = rt.call_functional(FUNCTION, a(0), &[instance]);
-            if rt.thrown.is_some() || !is_codec(rt, built) {
+            if rt.thrown.is_some() {
                 return Some(V::NULL);
+            }
+            // (What the builder made of something nothing maps is not known: no codec, and not
+            // null either.)
+            if !is_codec(rt, built) {
+                return Some(V::Void);
             }
             return Some(if method == "create" { codec(rt, "compat:codec/of_map", vec![built]) } else { built });
         }
@@ -1871,6 +1904,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     // An ops class of a mod's own asked for one of `DynamicOps`' default methods.
     if owner == DYNAMIC_OPS && format_of(rt, receiver) == Format::Own {
         return own_ops_default(rt, method, desc, args);
+    }
+    // `JsonOps` asked to make a value itself (a mod's own codec writing through the ops it was
+    // handed, or `JsonOps.INSTANCE.emptyMap()` as something to parse): Gson's tree.
+    if format_of(rt, receiver) == Format::Json
+        && let Some(made) = json_ops_method(rt, method, args)
+    {
+        return Some(made);
     }
     if crate::ops::takes(rt, owner, receiver) {
         return crate::ops::call(rt, method, desc, args);
@@ -3131,6 +3171,70 @@ mod tests {
         let r = c(&mut rt, PARSE, &[counts, java, empty]);
         let read = result_of(&mut rt, r).unwrap();
         assert!(jutil::table_pairs(&rt, read).is_empty());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `JsonOps` asked for a value of its own makes Gson's: an empty map is an object a codec
+    /// then reads its defaults from (Jade's settings start so: `parse(JsonOps.INSTANCE,
+    /// JsonOps.INSTANCE.emptyMap())`; answered null, "Not a map: null").
+    #[test]
+    fn json_ops_makes_its_own_values() {
+        crate::install();
+        let mut rt = Rt::new();
+        let ops = crate::api::get_static(&mut rt, "com/mojang/serialization/JsonOps.INSTANCE");
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let map = c(
+            &mut rt,
+            "com/mojang/serialization/JsonOps.emptyMap.()Ljava/lang/Object;",
+            &[ops],
+        );
+        let text = rt.string("oak");
+        let wood = c(
+            &mut rt,
+            "com/mojang/serialization/DynamicOps.createString.(Ljava/lang/String;)Ljava/lang/Object;",
+            &[ops, text],
+        );
+        let count = c(
+            &mut rt,
+            "com/mojang/serialization/DynamicOps.createInt.(I)Ljava/lang/Object;",
+            &[ops, V::I(3)],
+        );
+        let stream = rt.alloc("java/util/stream/Stream", Data::Stream(vec![wood, count]));
+        let list = c(
+            &mut rt,
+            "com/mojang/serialization/DynamicOps.createList.(Ljava/util/stream/Stream;)Ljava/lang/Object;",
+            &[ops, stream],
+        );
+        assert_eq!(crate::gson::to_serde(&rt, map), serde_json::json!({}));
+        assert_eq!(
+            crate::gson::to_serde(&rt, list),
+            serde_json::json!(["oak", 3])
+        );
+        // A record of one optional field reads its default from the empty map.
+        let int = crate::api::get_static(&mut rt, "com/mojang/serialization/Codec.INT");
+        let (name, seven) = (rt.string("n"), crate::api_common::integer(&mut rt, 7));
+        let field = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.optionalFieldOf.(Ljava/lang/String;Ljava/lang/Object;)Lcom/mojang/serialization/MapCodec;",
+            &[int, name, seven],
+        );
+        let codec = c(
+            &mut rt,
+            "com/mojang/serialization/MapCodec.codec.()Lcom/mojang/serialization/Codec;",
+            &[field],
+        );
+        let read = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.parse.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;",
+            &[codec, ops, map],
+        );
+        let n = c(
+            &mut rt,
+            "com/mojang/serialization/DataResult.getOrThrow.()Ljava/lang/Object;",
+            &[read],
+        );
+        assert!(rt.thrown.is_none());
+        assert_eq!(c(&mut rt, "java/lang/Integer.intValue.()I", &[n]), V::I(7));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

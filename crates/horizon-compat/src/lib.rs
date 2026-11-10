@@ -39,6 +39,7 @@ pub mod container_screens;
 pub mod capabilities;
 pub mod enchantments;
 pub mod energy;
+pub mod enum_ext;
 pub mod data_maps;
 pub mod block_entity_data;
 pub mod state_queries;

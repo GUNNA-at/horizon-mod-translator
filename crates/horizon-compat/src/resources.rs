@@ -231,6 +231,41 @@ pub(crate) fn jar_file(rt: &mut Rt, path: &str) -> Option<Vec<u8>> {
     file(rt, path)
 }
 
+/// Where file or folder `path` of a mod's jar is on disk, for a `Path` into the jar
+/// (`IModFile.findResource("data", "gems", "packs")`): in the mods' content folder that has it
+/// (the translator put each jar's `assets` and `data` there as they were, so a folder is there
+/// with what is under it), else among the game's cached files, where a file of the jar the
+/// bundle carries ([`jar_file`]) is written the first time it is asked for. What no jar has is a
+/// path there with nothing at it, as Java's is in a jar's file system.
+pub(crate) fn jar_path(rt: &mut Rt, path: &str) -> PathBuf {
+    let path = path.trim_matches('/');
+    if safe(path)
+        && let Some(found) = fallback_dirs()
+            .iter()
+            .chain(content_dirs_of(path))
+            .map(|d| d.join(path))
+            .find(|p| p.exists())
+    {
+        return found;
+    }
+    let kept = crate::files::game_dir(rt)
+        .join(".horizon-cache")
+        .join("mod-files")
+        .join(path);
+    // (Only beside a game: a runtime without a game's folder writes nothing.)
+    if safe(path)
+        && rt.statics.contains_key(crate::GAME_DIR)
+        && !kept.exists()
+        && let Some(bytes) = jar_file(rt, path)
+    {
+        if let Some(folder) = kept.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        let _ = std::fs::write(&kept, bytes);
+    }
+    kept
+}
+
 /// The resource files under folder `prefix` (`assets/create/models`), as paths, sorted.
 pub fn paths(rt: &Rt, prefix: &str) -> Vec<String> {
     let prefix = prefix.trim_end_matches('/');

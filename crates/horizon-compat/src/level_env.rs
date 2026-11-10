@@ -320,7 +320,17 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
         ("getBiome", "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/Holder;") => {
             let p = pos(rt, 1);
             let name = rt.host().and_then(|h| h.biome(p)).unwrap_or_else(|| "minecraft:plains".to_owned());
-            crate::neo::registry_holder(rt, "biome", &name, V::NULL)
+            // With the biome itself, one object each (`getBiome(pos).value()`: a mod asks it
+            // whether it snows there).
+            let value = match rt.interned.get(&format!("compat:biome/{name}")).copied() {
+                Some(biome) => biome,
+                None => {
+                    let biome = crate::worldgen::biome_value(rt, &name);
+                    rt.interned.insert(format!("compat:biome/{name}"), biome);
+                    biome
+                }
+            };
+            crate::neo::registry_holder(rt, "biome", &name, value)
         }
         _ => return None,
     })

@@ -1669,6 +1669,10 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
                     format!("{{ let cid = rt.recv_cid(&full); vcall_miss(rt, cid, {owner_key:?}, {nd:?}, &full) }}")
                 }
             }
+            // A mixin's own static initialiser, heard where the runtime first answers for its
+            // target ([`weave::native_place`]): the class is initialised, once, as anything else
+            // that touches it would.
+            (6, _) if m.name == "<clinit>" => format!("{{ {}V::Void }}", self.ensure(&m.owner)),
             // A static method reference to another class (`FanProcessingTypeRegistry::init`)
             // initialises the class that declares it, as `invokestatic` does. A lambda's own body
             // (`lambda$...`) lives in the class that made it, which is initialised already.

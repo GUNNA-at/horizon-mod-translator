@@ -225,6 +225,26 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         let object = rt.static_key(&format!("java/lang/Object.{rest}"));
         return call_exact(rt, object, args);
     }
+    // `chunkPosition()` of whatever has a block position (an entity of any kind, a player): the
+    // chunk that position is in, as the game keeps the two together.
+    if rest == "chunkPosition.()Lnet/minecraft/world/level/ChunkPos;"
+        && args.first().is_some_and(|v| v.r() != 0)
+    {
+        let at = rt.static_key(&format!(
+            "{owner}.blockPosition.()Lnet/minecraft/core/BlockPos;"
+        ));
+        let seen = rt.unmapped.get(at).copied().unwrap_or(0);
+        let pos = call(rt, at, args);
+        if rt.unmapped.get(at).copied().unwrap_or(0) == seen && pos.r() != 0 {
+            uncount(rt, key);
+            let p = pos_of(rt, pos);
+            return crate::api_common::chunk_pos(rt, p[0] >> 4, p[2] >> 4);
+        }
+        // (No position either: that miss is not the mod's.)
+        if rt.unmapped.get(at).copied().unwrap_or(0) != seen {
+            uncount(rt, at);
+        }
+    }
     // The game's own code for it, which the translator carried where it asks only what is mapped.
     if let Some(f) = derived(rt, key, owner, rest, args) {
         uncount(rt, key);
@@ -3278,6 +3298,13 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
     {
         return v;
     }
+    // An enum's `$VALUES`, which a mixin into the enum shadows to add constants of its own
+    // ([`crate::enum_ext`]): its constants.
+    if let Some(class) = key.strip_suffix(".$VALUES")
+        && let Some(all) = crate::jlang::enum_constants(rt, class)
+    {
+        return all;
+    }
     if let Some((o, f)) = key.split_once('.')
         && let Some(v) = crate::network::get_static(rt, o, f)
             .or_else(|| crate::worldgen::get_static(rt, o, f))
@@ -3390,6 +3417,9 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             }
         }
         k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        // `Unsafe.theUnsafe`, which a mod takes by reflection to write a field it may not
+        // ([`crate::jlang`]'s `sun.misc.Unsafe`).
+        "sun/misc/Unsafe.theUnsafe" => crate::jlang::the_unsafe(rt),
         // The data fixer's type references (`References.BLOCK_ENTITY`), by their type names.
         k if k.starts_with("net/minecraft/util/datafix/fixes/References.") => {
             let n = k.rsplit('.').next().unwrap_or("").to_ascii_lowercase();

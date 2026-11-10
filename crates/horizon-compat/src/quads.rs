@@ -231,6 +231,60 @@ pub fn handle_particle(rt: &mut Rt, model: &Model) -> V {
     crate::render::sprite_named(rt, &name)
 }
 
+/// The whole face of a block on `side` (`Direction`'s data value), untinted, on the missing
+/// sprite: its corners counter-clockwise from outside, as a cube's are.
+pub fn whole_face(side: u8) -> Quad {
+    let positions = match side {
+        0 => [
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+        ],
+        1 => [
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 1.0, 0.0],
+        ],
+        2 => [
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        3 => [
+            [0.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+        ],
+        4 => [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ],
+        _ => [
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+    };
+    Quad {
+        positions,
+        uv: [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]],
+        sprite: "minecraft:missingno".to_owned(),
+        facing: side.min(5),
+        cull: Some(side.min(5)),
+        tint_index: -1,
+        shade: true,
+        light_emission: 0,
+        colors: [0xffff_ffff; 4],
+    }
+}
+
 /// A `BakedQuad` of `q`, its vertices as vanilla's `FaceBakery` writes them (white, the face's
 /// normal, its emission as light).
 pub fn baked_quad(rt: &mut Rt, q: &Quad) -> V {

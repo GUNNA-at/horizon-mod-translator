@@ -763,10 +763,134 @@ pub(crate) fn string_hash(s: &str) -> i32 {
     s.encode_utf16().fold(0i32, |h, c| h.wrapping_mul(31).wrapping_add(c as i32))
 }
 
+const UNSAFE: &str = "sun/misc/Unsafe";
+
+/// The one `sun.misc.Unsafe`.
+pub(crate) fn the_unsafe(rt: &mut Rt) -> V {
+    rt.intern("compat:unsafe".into(), |rt| rt.new_object(UNSAFE))
+}
+
+/// `sun.misc.Unsafe`, as far as mods use it to reach a field past `final` and the access
+/// checks: a field's "offset" is a number that names the field here (its `Field`, kept), a
+/// static's base its class, and a read or write through the two is the field's own. Moonlight
+/// swaps a logger of the loader's so (`staticFieldBase`, `staticFieldOffset`,
+/// `putObjectVolatile`); answered null, the mods configured through it were not constructed.
+/// Memory by address is not here: those calls stay unanswered.
+fn unsafe_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    const FIELDS: &str = "compat:unsafe-fields";
+    Some(match name {
+        "getUnsafe" => the_unsafe(rt),
+        "staticFieldBase" => {
+            let (class, ..) = field_parts(rt, a(1));
+            rt.class_literal(&class)
+        }
+        "staticFieldOffset" | "objectFieldOffset"
+            if rt.class_of(a(1)) == "java/lang/reflect/Field" =>
+        {
+            let kept = rt.intern(FIELDS.into(), |rt| crate::jutil::new_list(rt, Vec::new()));
+            let mut fields = crate::jutil::elements(rt, kept);
+            let at = match fields.iter().position(|f| *f == a(1)) {
+                Some(at) => at,
+                None => {
+                    fields.push(a(1));
+                    if let Some(Data::List(list)) =
+                        rt.heap.get_mut(kept.r() as usize).map(|o| &mut o.data)
+                    {
+                        list.push(a(1));
+                    }
+                    fields.len() - 1
+                }
+            };
+            V::J(at as i64 + 1)
+        }
+        "allocateInstance" => {
+            let class = rt.str_of(a(1)).unwrap_or("").replace('.', "/");
+            let class = rt.static_key(&class);
+            rt.new_object(class)
+        }
+        "ensureClassInitialized" => {
+            let class = rt.str_of(a(1)).unwrap_or("").replace('.', "/");
+            rt.reflect(&class, "<clinit>", &[]);
+            V::Void
+        }
+        "throwException" => {
+            rt.thrown = Some(a(1));
+            V::Void
+        }
+        // `getObject(base, offset)`, `putInt(base, offset, value)`, their volatile and ordered
+        // forms: the field the offset names, of the object or (the base its class) the static.
+        n if (n.starts_with("get") || n.starts_with("put"))
+            && !n.contains("And")
+            && args.len() >= 3 =>
+        {
+            let kept = rt.interned.get(FIELDS).copied().unwrap_or(V::NULL);
+            let field = crate::jutil::elements(rt, kept)
+                .get((a(2).j() - 1).max(0) as usize)
+                .copied()?;
+            // A static's base is its class.
+            let object = if rt.class_of(a(1)) == "java/lang/Class" {
+                V::NULL
+            } else {
+                a(1)
+            };
+            if n.starts_with("put") {
+                field_store(rt, field, object, a(3));
+                V::Void
+            } else {
+                field_value(rt, field, object)
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// A system property every JVM defines (`System.getProperty`'s documented keys), as the game's
+/// Java would have it on this machine: mods ask the system's name to tell Windows from the
+/// rest, the user's folder for a cache of their own, the Java version. There is no JVM here: its
+/// version is the one the game ships with, and its own folders are not set. `None` for any
+/// other key.
+fn system_property(rt: &Rt, key: &str) -> Option<String> {
+    let env = |name: &str| std::env::var(name).ok();
+    Some(match key {
+        "os.name" if cfg!(target_os = "macos") => "Mac OS X".to_owned(),
+        "os.name" if cfg!(windows) => "Windows 11".to_owned(),
+        "os.name" => "Linux".to_owned(),
+        "os.arch" if cfg!(target_arch = "aarch64") => "aarch64".to_owned(),
+        "os.arch" => "amd64".to_owned(),
+        "sun.arch.data.model" => "64".to_owned(),
+        "user.home" => env("HOME").or_else(|| env("USERPROFILE"))?,
+        "user.name" => env("USER").or_else(|| env("USERNAME"))?,
+        // The working directory: the game's folder.
+        "user.dir" => crate::files::game_dir(rt).to_string_lossy().into_owned(),
+        "java.io.tmpdir" => std::env::temp_dir().to_string_lossy().into_owned(),
+        "file.separator" => std::path::MAIN_SEPARATOR.to_string(),
+        "path.separator" if cfg!(windows) => ";".to_owned(),
+        "path.separator" => ":".to_owned(),
+        "line.separator" => "\n".to_owned(),
+        "file.encoding" | "native.encoding" | "sun.jnu.encoding" | "stdout.encoding"
+        | "stderr.encoding" => "UTF-8".to_owned(),
+        "java.version" | "java.runtime.version" | "java.vm.version" => "21.0.8".to_owned(),
+        "java.specification.version" | "java.vm.specification.version" | "java.class.version" => {
+            if key == "java.class.version" {
+                "65.0".to_owned()
+            } else {
+                "21".to_owned()
+            }
+        }
+        "java.vendor" | "java.vm.vendor" => "Microsoft".to_owned(),
+        "java.vm.name" => "OpenJDK 64-Bit Server VM".to_owned(),
+        "java.runtime.name" => "OpenJDK Runtime Environment".to_owned(),
+        "java.class.path" | "java.library.path" => String::new(),
+        _ => return None,
+    })
+}
+
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
     owner.starts_with("java/lang/")
+        || owner == UNSAFE
         || owner.starts_with("java/text/")
         || owner.starts_with("org/apache/commons/lang3/")
         || owner == "org/apache/commons/text/WordUtils"
@@ -800,6 +924,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     if owner == PRINT_STREAM {
         return print_stream(rt, name, desc, args);
+    }
+    if owner == UNSAFE {
+        return unsafe_call(rt, name, args);
     }
     if !owner.starts_with("java/lang/") {
         return None;
@@ -1061,9 +1188,33 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // No `Unsafe` here: JOML is told so by its own switch, and copies its numbers field
             // by field.
             "getProperty" if rt.str_of(a(0)) == Some("joml.nounsafe") => rt.string("true"),
-            // No system properties or environment here: a property's default, else null.
-            "getProperty" if ks.len() == 2 => a(1),
-            "getProperty" | "getenv" => V::NULL,
+            // The properties every JVM has ([`system_property`]); any other is not set: its
+            // default, else null.
+            "getProperty" => match rt
+                .str_of(a(0))
+                .map(str::to_owned)
+                .and_then(|key| system_property(rt, &key))
+            {
+                Some(value) => rt.string(&value),
+                None if ks.len() == 2 => a(1),
+                None => V::NULL,
+            },
+            // The process's environment: one variable (null when it is not set), or all of
+            // them as a map.
+            "getenv" if ks.len() == 1 => {
+                match rt.str_of(a(0)).and_then(|name| std::env::var(name).ok()) {
+                    Some(value) => rt.string(&value),
+                    None => V::NULL,
+                }
+            }
+            "getenv" => {
+                let all = rt.alloc("java/util/HashMap", Data::Table(Default::default()));
+                for (name, value) in std::env::vars() {
+                    let (k, v) = (rt.string(&name), rt.string(&value));
+                    crate::jutil::table_put(rt, all, k, v);
+                }
+                all
+            }
             "lineSeparator" => rt.string("\n"),
             _ => return None,
         }),
@@ -3244,6 +3395,208 @@ mod tests {
         );
     }
 
+    /// What every JVM tells a mod of the machine: the properties it defines are there (a mod
+    /// asks the system's name and calls `startsWith` on the answer), any other is its default or
+    /// null, and the environment is the process's, one variable or all of them.
+    #[test]
+    fn the_system_has_its_properties_and_its_environment() {
+        const PROPERTY: &str =
+            "java/lang/System.getProperty.(Ljava/lang/String;)Ljava/lang/String;";
+        let mut rt = Rt::new();
+        crate::install();
+        for key in [
+            "os.name",
+            "os.arch",
+            "java.version",
+            "file.separator",
+            "line.separator",
+            "user.dir",
+            "java.io.tmpdir",
+        ] {
+            let k = rt.string(key);
+            let v = crate::api::call(&mut rt, PROPERTY, &[k]);
+            assert!(rt.str_of(v).is_some_and(|v| !v.is_empty()), "{key}");
+        }
+        let (unset, fallback) = (rt.string("gems.debug"), rt.string("off"));
+        assert_eq!(crate::api::call(&mut rt, PROPERTY, &[unset]), V::NULL);
+        let with_default = crate::api::call(
+            &mut rt,
+            "java/lang/System.getProperty.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+            &[unset, fallback],
+        );
+        assert_eq!(with_default, fallback);
+        // A variable this process has (cargo sets it for a test), by name and in the map of all.
+        let ours = std::env::var("CARGO_PKG_NAME").unwrap();
+        let name = rt.string("CARGO_PKG_NAME");
+        let one = crate::api::call(
+            &mut rt,
+            "java/lang/System.getenv.(Ljava/lang/String;)Ljava/lang/String;",
+            &[name],
+        );
+        assert_eq!(rt.str_of(one), Some(ours.as_str()));
+        let all = crate::api::call(&mut rt, "java/lang/System.getenv.()Ljava/util/Map;", &[]);
+        let in_all = crate::api::call(
+            &mut rt,
+            "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+            &[all, name],
+        );
+        assert_eq!(rt.str_of(in_all), Some(ours.as_str()));
+        let none = rt.string("GEMS_NO_SUCH_VARIABLE");
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/lang/System.getenv.(Ljava/lang/String;)Ljava/lang/String;",
+                &[none]
+            ),
+            V::NULL
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `sun.misc.Unsafe` taken by reflection writes a static past `final`, as Moonlight swaps a
+    /// logger of the loader's: the field's base is its class, its offset names it, and what is
+    /// put through them is what the field then holds.
+    #[test]
+    fn unsafe_writes_the_field_its_offset_names() {
+        const DECLARED: &str =
+            "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;";
+        const GET: &str = "java/lang/reflect/Field.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let (holder, name) = (rt.class_literal("sun/misc/Unsafe"), rt.string("theUnsafe"));
+        let field = c(&mut rt, DECLARED, &[holder, name]);
+        let the_unsafe = c(&mut rt, GET, &[field, V::NULL]);
+        assert_eq!(rt.class_of(the_unsafe), "sun/misc/Unsafe");
+        let (tracker, name) = (
+            rt.class_literal("net/neoforged/fml/config/ConfigTracker"),
+            rt.string("LOGGER"),
+        );
+        let logger = c(&mut rt, DECLARED, &[tracker, name]);
+        let base = c(
+            &mut rt,
+            "sun/misc/Unsafe.staticFieldBase.(Ljava/lang/reflect/Field;)Ljava/lang/Object;",
+            &[the_unsafe, logger],
+        );
+        assert_eq!(base, tracker);
+        let offset = c(
+            &mut rt,
+            "sun/misc/Unsafe.staticFieldOffset.(Ljava/lang/reflect/Field;)J",
+            &[the_unsafe, logger],
+        );
+        let quiet = rt.new_object("test/ShushLogger");
+        c(
+            &mut rt,
+            "sun/misc/Unsafe.putObjectVolatile.(Ljava/lang/Object;JLjava/lang/Object;)V",
+            &[the_unsafe, base, offset, quiet],
+        );
+        assert_eq!(c(&mut rt, GET, &[logger, V::NULL]), quiet);
+        assert_eq!(
+            c(
+                &mut rt,
+                "sun/misc/Unsafe.getObject.(Ljava/lang/Object;J)Ljava/lang/Object;",
+                &[the_unsafe, base, offset]
+            ),
+            quiet
+        );
+        // An object's field, by its own offset.
+        let made = rt.new_object("test/Counter");
+        let (class, name) = (rt.class_literal("test/Counter"), rt.string("count"));
+        let count = c(&mut rt, DECLARED, &[class, name]);
+        let at = c(
+            &mut rt,
+            "sun/misc/Unsafe.objectFieldOffset.(Ljava/lang/reflect/Field;)J",
+            &[the_unsafe, count],
+        );
+        assert_ne!(at, offset);
+        c(
+            &mut rt,
+            "sun/misc/Unsafe.putInt.(Ljava/lang/Object;JI)V",
+            &[the_unsafe, made, at, V::I(9)],
+        );
+        assert_eq!(rt.get_field(made, "count"), V::I(9));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// fastutil's pairs: `Pair.of` holds two objects under each of its three pairs of names,
+    /// equal pairs are equal, a typed pair's primitive half is read as itself or as its box, and
+    /// a mutable pair's setter answers the pair. (Goblin Traders collects a map from such pairs:
+    /// unanswered, every key and value was null.)
+    #[test]
+    fn fastutil_pairs_hold_two_halves() {
+        const OF: &str = "it/unimi/dsi/fastutil/Pair.of.(Ljava/lang/Object;Ljava/lang/Object;)Lit/unimi/dsi/fastutil/Pair;";
+        let mut rt = Rt::new();
+        crate::install();
+        let (trader, trades) = (rt.string("goblin"), rt.string("trades"));
+        let pair = crate::api::call(&mut rt, OF, &[trader, trades]);
+        for (name, half) in [
+            ("left", trader),
+            ("first", trader),
+            ("key", trader),
+            ("right", trades),
+            ("second", trades),
+            ("value", trades),
+        ] {
+            let key = rt.static_key(&format!(
+                "it/unimi/dsi/fastutil/Pair.{name}.()Ljava/lang/Object;"
+            ));
+            assert_eq!(crate::api::call(&mut rt, key, &[pair]), half, "{name}");
+        }
+        let same = crate::api::call(&mut rt, OF, &[trader, trades]);
+        assert!(pair != same && crate::jutil::equals(&mut rt, pair, same));
+        let ints = crate::api::call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntIntPair.of.(II)Lit/unimi/dsi/fastutil/ints/IntIntPair;",
+            &[V::I(3), V::I(7)],
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "it/unimi/dsi/fastutil/ints/IntIntPair.firstInt.()I",
+                &[ints]
+            ),
+            V::I(3)
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "it/unimi/dsi/fastutil/ints/IntIntPair.rightInt.()I",
+                &[ints]
+            ),
+            V::I(7)
+        );
+        let boxed = crate::api::call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntIntPair.second.()Ljava/lang/Integer;",
+            &[ints],
+        );
+        assert_eq!(
+            crate::api::call(&mut rt, "java/lang/Integer.intValue.()I", &[boxed]),
+            V::I(7)
+        );
+        let mutable = rt.new_object("it/unimi/dsi/fastutil/objects/ObjectObjectMutablePair");
+        crate::api::call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/objects/ObjectObjectMutablePair.<init>.(Ljava/lang/Object;Ljava/lang/Object;)V",
+            &[mutable, trader, trades],
+        );
+        let set = crate::api::call(
+            &mut rt,
+            "it/unimi/dsi/fastutil/objects/ObjectObjectMutablePair.left.(Ljava/lang/Object;)Lit/unimi/dsi/fastutil/objects/ObjectObjectMutablePair;",
+            &[mutable, trades],
+        );
+        assert_eq!(set, mutable);
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "it/unimi/dsi/fastutil/Pair.left.()Ljava/lang/Object;",
+                &[mutable]
+            ),
+            trades
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `new MutablePair<>()` holds null and null, as its fields start (Create's contraption code
     /// reads its `left` field itself), until `setLeft` puts something in.
     #[test]
@@ -5131,6 +5484,11 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             mod_log(rt, name, desc, args.get(1..).unwrap_or_default());
             if desc.ends_with(")V") { V::Void } else { V::NULL }
         }
+        // `java.util.logging`'s own way to its loggers: the one logger there is (answered null,
+        // Lucene's `Logger.getLogger(...).warning(...)` stopped the mod that carries it).
+        ("java/util/logging/Logger", "getLogger" | "getAnonymousLogger" | "getGlobal" | "getParent") => {
+            rt.intern("compat:logger".into(), |rt| rt.new_object("org/apache/logging/log4j/Logger"))
+        }
         (_, _) if logger => {
             if desc.ends_with(")V") { V::Void } else { V::NULL }
         }
@@ -5138,6 +5496,39 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:logger".into(), |rt| rt.new_object("org/apache/logging/log4j/Logger"))
         }
         ("org/apache/logging/log4j/MarkerManager", "getMarker") => a(0),
+        // fastutil's pairs (`Pair.of(a, b)`, `IntIntPair.of(1, 2)`, their immutable and mutable
+        // classes), kept as commons-lang's are: two halves, a primitive half as itself.
+        (o, "of" | "<init>") if crate::jutil::fast_pair(o) => {
+            let (p, l, r) = if name == "<init>" {
+                (a(0), a(1), a(2))
+            } else {
+                // The interface's `of` makes its immutable class.
+                let made = if o.ends_with("ImmutablePair") || o.ends_with("MutablePair") {
+                    rt.static_key(o)
+                } else if o == "it/unimi/dsi/fastutil/Pair" {
+                    "it/unimi/dsi/fastutil/objects/ObjectObjectImmutablePair"
+                } else {
+                    rt.static_key(&format!("{}ImmutablePair", o.trim_end_matches("Pair")))
+                };
+                (rt.new_object(made), a(0), a(1))
+            };
+            rt.put_field(p, "$left", l);
+            rt.put_field(p, "$right", r);
+            if name == "<init>" { V::Void } else { p }
+        }
+        // A half read (`left()`, `first()`, `key()`, and `firstInt()` of a primitive half), or
+        // set in a mutable pair (`left(v)`), which answers the pair.
+        (o, n) if crate::jutil::fast_pair(o) && matches!(n.trim_end_matches("Int").trim_end_matches("Long").trim_end_matches("Double"), "left" | "first" | "key" | "right" | "second" | "value") => {
+            let plain = n.trim_end_matches("Int").trim_end_matches("Long").trim_end_matches("Double");
+            let field = if matches!(plain, "left" | "first" | "key") { "$left" } else { "$right" };
+            if !desc.starts_with("()") {
+                rt.put_field(a(0), field, a(1));
+                return Some(a(0));
+            }
+            let held = rt.get_field(a(0), field);
+            // A primitive half asked for as an object (`IntIntPair.first()`) is its box.
+            if desc.ends_with(';') { box_raw(rt, held) } else { held }
+        }
         ("org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair", "of" | "<init>") => {
             let made = if owner.ends_with("MutablePair") { "org/apache/commons/lang3/tuple/MutablePair" } else { "org/apache/commons/lang3/tuple/Pair" };
             // `new MutablePair<>()` holds null and null, as its fields start.

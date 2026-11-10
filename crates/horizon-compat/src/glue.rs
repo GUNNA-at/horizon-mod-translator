@@ -1229,7 +1229,14 @@ pub fn render_shape(rt: &mut Rt, state: &str) -> Option<&'static str> {
     // While probing, every model the runtime stands in for has quads: a wrapper drawing another
     // block's model (a copycat's material) isn't taken for one that draws nothing.
     rt.interned.insert("compat:probing".into(), V::I(1));
-    let quads = vc(rt, crate::render::GET_QUADS_KEY, crate::render::GET_QUADS, &[model, st, V::NULL, V::NULL, data, V::NULL]);
+    // (With a random source, as every caller of `getQuads` has one: a model seeds it.)
+    let random = rt.new_object("net/minecraft/util/RandomSource");
+    let quads = vc(
+        rt,
+        crate::render::GET_QUADS_KEY,
+        crate::render::GET_QUADS,
+        &[model, st, V::NULL, random, data, V::NULL],
+    );
     rt.interned.remove("compat:probing");
     let threw = rt.thrown.is_some();
     rt.report_thrown("a swapped block model's getQuads");
@@ -3291,6 +3298,20 @@ mod tests {
             None,
             "none live there: its saved data is sent"
         );
+        // `getBlockEntity(pos, type)`: the one there as an `Optional`, when it is of that type.
+        rt.with_host(&mut overworld, |rt| {
+            const TYPED: &str = "net/minecraft/world/level/BlockGetter.getBlockEntity.(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntityType;)Ljava/util/Optional;";
+            let be = rt.block_entities[&at];
+            let (level, pos) = (rt.get_field(be, "level"), api::block_pos(rt, 2, 64, 2));
+            let own = api::call(rt, "net/minecraft/world/level/block/entity/BlockEntity.getType.()Lnet/minecraft/world/level/block/entity/BlockEntityType;", &[be]);
+            let other = rt.new_object("net/minecraft/world/level/block/entity/BlockEntityType");
+            let held = |rt: &mut Rt, ty: V| {
+                let found = api::call(rt, TYPED, &[level, pos, ty]);
+                api::call(rt, "java/util/Optional.orElse.(Ljava/lang/Object;)Ljava/lang/Object;", &[found, V::NULL])
+            };
+            assert_eq!(held(rt, own), be);
+            assert_eq!(held(rt, other), V::NULL);
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

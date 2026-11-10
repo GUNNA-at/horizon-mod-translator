@@ -8,12 +8,17 @@
 //! `registry#namespace:path`; a `ResourceLocation` is its `namespace:path` string.
 use crate::{Data, Rt, V};
 
-/// The registries `RegisterEvent` fires for, in NeoForge's order (blocks before items, items
-/// before what refers to them), then NeoForge's own (`GameData.getRegistrationOrder`: by name
-/// after the game's). Registrate registers a mod's fluid types in `fluid_type` so (Create's potion,
+/// The registries `RegisterEvent` fires for, in NeoForge's order (`GameData
+/// .getRegistrationOrder`): attributes, data component types and armour materials first, which
+/// the game's order has too late for what is constructed with them (an armour item reads its
+/// material's defence as it is made: Cataclysm's did so of a material not registered yet); then
+/// the game's order (blocks before items, items before what refers to them), then NeoForge's
+/// own, by name. Registrate registers a mod's fluid types in `fluid_type` so (Create's potion,
 /// tea, honey and chocolate), the client's extensions for them coming from there.
 pub const REGISTRIES: [&str; 31] = [
     "attribute",
+    "data_component_type",
+    "armor_material",
     "sound_event",
     "fluid",
     "mob_effect",
@@ -28,9 +33,7 @@ pub const REGISTRIES: [&str; 31] = [
     "recipe_type",
     "recipe_serializer",
     "creative_mode_tab",
-    "data_component_type",
     "enchantment_effect_component_type",
-    "armor_material",
     "worldgen/feature",
     "loot_condition_type",
     "loot_function_type",
@@ -460,6 +463,16 @@ fn at_place(rt: &mut Rt, method: &str, place: &str, with: Option<V>) {
     post(rt, &event, with);
 }
 
+/// Runs the handlers mixins inject into the static initialiser of the game's class `class`
+/// (`@Inject(method = "<clinit>")`): the runtime has no such initialiser to run them in, so
+/// whoever answers for the class runs them before its first answer ([`crate::enum_ext`]: an
+/// enum's constants).
+pub(crate) fn static_initialiser_places(rt: &mut Rt, class: &str) {
+    listen_for_places(rt);
+    // (Wherever in the initialiser a mixin injects, the translator names the place `TAIL`.)
+    at_place(rt, &format!("{PLACE}{class}.<clinit>"), "TAIL", None);
+}
+
 /// Fires what NeoForge's loading fires once the mods are constructed: `FMLConstructModEvent`
 /// (Dragons Plus makes its content in it), then `RegisterEvent` once per registry, then setup.
 pub fn fire_registrations(rt: &mut Rt) {
@@ -532,11 +545,22 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.call_functional(BAKE, callback, &[registry]);
         rt.report_thrown("BakeCallback.onBake");
     }
-    // NeoForge's "Config loading" step, then common setup and "Registration events"
-    // (capabilities), as its loading goes on. The client's own setup fires on the runtime that
-    // draws, at its first hook ([`fire_client_setup`]).
+    // NeoForge's "Config loading" step; then the client is made, and its hooks ask the mods for
+    // what they draw with ([`fire_client_init`]: `Minecraft`'s constructor, before its first
+    // resource load); then that load's first step, "Common setup" and "Sided setup", and the
+    // "Registration events" (capabilities). A mod counts on the order: one takes what is
+    // registered with it only until `FMLLoadCompleteEvent` (MrCrayfish's Framework: "Standalone
+    // models can only be registered during client initialization"), and the mods that register
+    // with it do so as the client asks for their renderers.
     crate::mod_configs::load_pending(rt);
-    fire_common_setup(rt);
+    if !rt.interned.contains_key(CLIENT_SET_UP) {
+        rt.interned.insert(CLIENT_SET_UP.into(), V::I(1));
+        as_client(rt, fire_client_init);
+        fire_common_setup(rt);
+        as_client(rt, fire_sided_setup);
+    } else {
+        fire_common_setup(rt);
+    }
     crate::capabilities::fire(rt);
     // Then the data map types (`RegistryManager.initDataMaps`).
     crate::data_maps::fire(rt);
@@ -742,6 +766,8 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         }
         // NeoForge's own fluid ingredient types (`neoforge:single`...).
         "fluid_ingredient_type" => crate::recipes::fluid_ingredient_type(rt, id).unwrap_or(V::NULL),
+        // Vanilla's creative tabs.
+        "creative_mode_tab" => crate::creative::vanilla_tab(rt, id).unwrap_or(V::NULL),
         // Enchantments are data the runtime doesn't list: a name is taken to be one, as the
         // game's data has it (`enchantments.rs`).
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),
@@ -962,6 +988,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
         || is_registry(owner)
         || owner.starts_with("org/apache/maven/artifact/versioning/")
         || owner.starts_with("cpw/mods/modlauncher/")
+        || owner == SECURE_JAR
         || matches!(owner, "net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference" | "net/minecraft/core/Holder$Direct")
         || (owner.starts_with("net/minecraft/") && matches!(name, "registryAccess" | "holderLookup" | "registryOrThrow" | "lookupOrThrow" | "registry" | "lookup"))
         || (name == "canPerformAction" && owner.starts_with("net/minecraft/world/item/"))
@@ -1056,6 +1083,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "net/neoforged/neoforgespi/language/IModInfo" => MOD_INFO,
         "org/apache/maven/artifact/versioning/ArtifactVersion" => VERSION,
         "net/neoforged/neoforgespi/language/IModFileInfo" => MOD_FILE_INFO,
+        "net/neoforged/neoforgespi/locating/IModFile" => MOD_FILE,
         "thedarkcolour/kotlinforforge/KotlinModLoadingContext$Companion" => KOTLIN_CONTEXT_COMPANION,
         "thedarkcolour/kotlinforforge/KotlinModLoadingContext" => KOTLIN_CONTEXT,
         o => o,
@@ -2030,18 +2058,117 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             .intern("compat:loading-mod-list".into(), |rt| {
                 rt.new_object(LOADING_MOD_LIST)
             }),
-        (LOADING_MOD_LIST, "getModFileById") => {
+        (LOADING_MOD_LIST | "net/neoforged/fml/ModList", "getModFileById") => {
             let id = rt.str_of(a(1)).unwrap_or("").to_owned();
             if mod_loaded(rt, &id) {
-                rt.intern(format!("compat:mod-file/{id}"), |rt| {
-                    let f = rt.new_object(MOD_FILE_INFO);
-                    let s = rt.string(&id);
-                    rt.put_field(f, "$modId", s);
-                    f
-                })
+                mod_file_info(rt, &id)
             } else {
                 V::NULL
             }
+        }
+        // Every loaded mod's metadata, and every mod's file (one for each mod here: which mods
+        // came in one jar is not kept).
+        (LOADING_MOD_LIST, "getMods") => {
+            let infos: Vec<V> = loaded_mods(rt).iter().map(|id| mod_info(rt, id)).collect();
+            crate::jutil::new_list(rt, infos)
+        }
+        (LOADING_MOD_LIST | "net/neoforged/fml/ModList", "getModFiles") => {
+            let files: Vec<V> = loaded_mods(rt)
+                .iter()
+                .map(|id| mod_file_info(rt, id))
+                .collect();
+            crate::jutil::new_list(rt, files)
+        }
+        (MOD_INFO, "getOwningFile") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            mod_file_info(rt, &id)
+        }
+        // A mod's jar, which is not there: its mods, a name, and its files where the bundle and
+        // the mods' content folders have them ([`crate::resources::jar_path`]).
+        (MOD_FILE_INFO, "getFile") | (MOD_FILE, "getSecureJar") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            let class = if name == "getSecureJar" {
+                SECURE_JAR
+            } else {
+                MOD_FILE
+            };
+            rt.intern(format!("compat:mod-jar/{class}/{id}"), |rt| {
+                let f = rt.new_object(class);
+                let s = rt.string(&id);
+                rt.put_field(f, "$modId", s);
+                f
+            })
+        }
+        (MOD_FILE_INFO, "moduleName") => rt.get_field(a(0), "$modId"),
+        (MOD_FILE_INFO, "versionString") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            let info = mod_info(rt, &id);
+            let version = rt.get_field(info, "$version");
+            rt.get_field(version, "$version")
+        }
+        // The jar's licence is not carried.
+        (MOD_FILE_INFO, "getLicense") => rt.string(""),
+        (MOD_FILE_INFO, "showAsResourcePack" | "showAsDataPack") => V::I(0),
+        (MOD_FILE, "getModFileInfo") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            mod_file_info(rt, &id)
+        }
+        (MOD_FILE, "getModInfos") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            let info = mod_info(rt, &id);
+            crate::jutil::new_list(rt, vec![info])
+        }
+        (MOD_FILE, "getFileName") | (SECURE_JAR, "name") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            rt.string(&if owner == MOD_FILE {
+                format!("{id}.jar")
+            } else {
+                id
+            })
+        }
+        // Where the jar would be among FML's mods: no file is there.
+        (MOD_FILE, "getFilePath") | (SECURE_JAR, "getPrimaryPath") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            crate::files::new_path(rt, &format!("mods/{id}.jar"))
+        }
+        // `findResource("data", "gems", "defaults.json")`, `getRootPath()`, `getPath("a", "b")`:
+        // a path to the jar's file or folder.
+        (MOD_FILE, "findResource") | (SECURE_JAR, "getPath" | "getRootPath") => {
+            let mut parts: Vec<String> = Vec::new();
+            for arg in args.iter().skip(1) {
+                match rt.str_of(*arg) {
+                    Some(one) => parts.push(one.to_owned()),
+                    None => parts.extend(
+                        crate::jutil::elements(rt, *arg)
+                            .into_iter()
+                            .map(|p| rt.str_of(p).unwrap_or("").to_owned()),
+                    ),
+                }
+            }
+            parts.retain(|p| !p.is_empty());
+            let found = crate::resources::jar_path(rt, &parts.join("/"));
+            crate::files::new_path(rt, &found.to_string_lossy())
         }
         // A jar's mods: the one asked for by id, or all a scanned jar declares (`$modIds`).
         (MOD_FILE_INFO, "getMods") => {
@@ -2266,52 +2393,75 @@ pub fn fire_common_setup(rt: &mut Rt) {
     post(rt, COMMON_SETUP, ev);
 }
 
-/// The client's own setup, once, on the runtime that draws: `EntityRenderersEvent
-/// .RegisterLayerDefinitions` and `.RegisterRenderers`, and `FMLClientSetupEvent` (Registrate
-/// registers block entity renderers there).
-pub fn fire_client_setup(rt: &mut Rt) {
-    // From here on this runtime is the client's ([`is_client`]). A copy made of it is not, until
-    // a client's hook comes to it too: the mark is one `Rt::fork` leaves behind. The setup itself
-    // ran once for the runtime and its copies: the mods' renderers, layers and key mappings are
-    // in each.
-    rt.interned.insert("side:client".into(), V::I(1));
-    if rt.interned.contains_key("compat:client-setup") {
-        return;
+/// Marks the runtime's own setup of its client as done (`Rt::interned`): once for a runtime and
+/// its copies.
+const CLIENT_SET_UP: &str = "compat:client-setup";
+
+/// Runs `f` with the runtime as the client's ([`is_client`]), as the client's part of the mods'
+/// loading runs on the client's thread, and leaves the runtime on the side it was.
+fn as_client(rt: &mut Rt, f: fn(&mut Rt)) {
+    let was = rt.interned.insert("side:client".into(), V::I(1));
+    f(rt);
+    if was.is_none() {
+        rt.interned.remove("side:client");
     }
-    rt.interned.insert("compat:client-setup".into(), V::I(1));
-    // The mods' client extensions (how their fluids, items, blocks and effects look), as the
-    // client is made, before its resources load.
-    crate::client_extensions::init(rt);
+}
+
+/// What the client asks the mods for as it is made, in the order of `Minecraft`'s constructor
+/// (NeoForge 21.1): the block and item colours, the particle providers, then
+/// `ClientHooks.initClientHooks`, all before the first resource load, where the mods' setup
+/// events come ([`fire_sided_setup`]).
+fn fire_client_init(rt: &mut Rt) {
     // The mods' block and item colour handlers (`BlockColors.createDefault` and
-    // `ItemColors.createDefault` post the events as the client is made).
+    // `ItemColors.createDefault` post the events).
     crate::colors::init(rt);
     // The mods' particle providers (`RegisterParticleProvidersEvent`, once the client has made its
     // particle engine).
     crate::particle_engine::post_register(rt);
-    // The mods' reload listeners, as the client's resource manager is made.
+    // `initClientHooks`: the mods' client extensions (how their fluids, items, blocks and effects
+    // look), the screens of their menu types (`MenuScreens.init`), their reload listeners, their
+    // entity model layers and renderers, their key mappings and the HUD's layers (vanilla's, and
+    // where each mod puts its own among them).
+    crate::client_extensions::init(rt);
+    crate::menus::register_screens(rt);
     let ev = crate::resources::client_listeners_event(rt);
     post(rt, crate::resources::CLIENT_LISTENERS_EVENT, ev);
-    // The mods' entity model layers (`LayerDefinitions.createRoots` posts it as the models load),
-    // which their renderers bake.
     let ev = rt.new_object(crate::models::REGISTER_LAYERS);
     post(rt, crate::models::REGISTER_LAYERS, ev);
     let ev = rt.new_object(REGISTER_RENDERERS);
     post(rt, REGISTER_RENDERERS, ev);
-    // The mods' key mappings (`ClientHooks.initClientHooks` posts it after the renderers).
     crate::keys::post_register(rt);
-    let ev = rt.new_object(CLIENT_SETUP);
-    post(rt, CLIENT_SETUP, ev);
-    // The mods' menu types get their screens (`MenuScreens.register` through the event).
-    crate::menus::register_screens(rt);
-    // The HUD's layers: vanilla's, and where each mod puts its own among them.
     let ev = rt.new_object(crate::gui::REGISTER_LAYERS);
     post(rt, crate::gui::REGISTER_LAYERS, ev);
+}
+
+/// NeoForge's "Sided setup" on a client: `FMLClientSetupEvent` (Registrate registers block
+/// entity renderers there), then what the resource load that goes on makes.
+fn fire_sided_setup(rt: &mut Rt) {
+    let ev = rt.new_object(CLIENT_SETUP);
+    post(rt, CLIENT_SETUP, ev);
     // The block atlas is stitched (catnip's `StitchedSprite`s take their sprites from it: Create's
     // scrolling belts).
     let atlas = crate::render::block_atlas(rt);
     let ev = rt.new_object(crate::render::ATLAS_STITCHED);
     rt.put_field(ev, "$atlas", atlas);
     post(rt, crate::render::ATLAS_STITCHED, ev);
+}
+
+/// A client's hook has come to this runtime: from here on it is the client's ([`is_client`]). A
+/// copy made of it is not, until a client's hook comes to it too: the mark is one `Rt::fork`
+/// leaves behind. The client's part of the mods' loading ([`fire_client_init`],
+/// [`fire_sided_setup`]) ran as they were loaded ([`fire_registrations`]), once for the runtime
+/// and its copies: the mods' renderers, layers and key mappings are in each. A runtime whose
+/// mods were not loaded so (a test's) hears it here.
+pub fn fire_client_setup(rt: &mut Rt) {
+    rt.interned.insert("side:client".into(), V::I(1));
+    if rt.interned.contains_key(CLIENT_SET_UP) {
+        return;
+    }
+    rt.interned.insert(CLIENT_SET_UP.into(), V::I(1));
+    fire_client_init(rt);
+    fire_sided_setup(rt);
 }
 
 /// Whether this runtime is the client's (a client's hook has come to it, and its setup has
@@ -2379,6 +2529,9 @@ const MOD_INFO: &str = "net/neoforged/fml/loading/moddiscovery/ModInfo";
 const VERSION: &str = "org/apache/maven/artifact/versioning/DefaultArtifactVersion";
 const LOADING_CONTEXT: &str = "net/neoforged/fml/ModLoadingContext";
 const LOADING_MOD_LIST: &str = "net/neoforged/fml/loading/LoadingModList";
+/// A mod's jar as FML holds it (`IModFile`), and as a module's files (`SecureJar`).
+const MOD_FILE: &str = "net/neoforged/fml/loading/moddiscovery/ModFile";
+const SECURE_JAR: &str = "cpw/mods/jarhandling/SecureJar";
 const MOD_FILE_INFO: &str = "net/neoforged/fml/loading/moddiscovery/ModFileInfo";
 /// The interned string naming the mod whose constructor runs (the generated `start` sets it).
 pub const ACTIVE_MOD: &str = "compat:active-mod";
@@ -2481,6 +2634,16 @@ fn active_container(rt: &mut Rt) -> V {
         .or_else(|| loaded_mods(rt).into_iter().next())
         .unwrap_or_default();
     mod_container(rt, &id)
+}
+
+/// A mod's `IModFileInfo`, one per id.
+fn mod_file_info(rt: &mut Rt, id: &str) -> V {
+    rt.intern(format!("compat:mod-file/{id}"), |rt| {
+        let f = rt.new_object(MOD_FILE_INFO);
+        let s = rt.string(id);
+        rt.put_field(f, "$modId", s);
+        f
+    })
 }
 
 /// A mod's `IModInfo`, one per id, with the version and name the translator found for it.
@@ -2683,6 +2846,91 @@ mod tests {
         let is_client = "net/neoforged/api/distmarker/Dist.isClient.()Z";
         assert_eq!(call(&mut rt, is_client, &[client]), Some(V::I(1)));
         assert_eq!(call(&mut rt, is_client, &[server]), Some(V::I(0)));
+    }
+
+    /// A mod's file by its id, as FML hands it out: a path into the jar is a file on disk where
+    /// the bundle carries the file (written beside the game the first time it is asked for), and
+    /// a path with nothing at it for what no jar has. The same file through the mod's metadata.
+    #[test]
+    fn a_mods_file_gives_paths_to_what_its_jar_holds() {
+        fn files(rt: &mut Rt, class: &str, what: &str, _args: &[V]) -> Option<V> {
+            (class == crate::FILES && what == "defaults/template.txt")
+                .then(|| crate::files::byte_array(rt, b"a template"))
+        }
+        const BY_ID: &str = "net/neoforged/fml/ModList.getModFileById.(Ljava/lang/String;)Lnet/neoforged/neoforgespi/language/IModFileInfo;";
+        const FILE: &str = "net/neoforged/neoforgespi/language/IModFileInfo.getFile.()Lnet/neoforged/neoforgespi/locating/IModFile;";
+        const FIND: &str = "net/neoforged/neoforgespi/locating/IModFile.findResource.([Ljava/lang/String;)Ljava/nio/file/Path;";
+        const EXISTS: &str =
+            "java/nio/file/Files.exists.(Ljava/nio/file/Path;[Ljava/nio/file/LinkOption;)Z";
+        let dir = std::env::temp_dir().join(format!("hz-mod-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = Rt::new();
+        rt.mods = vec!["gems".into()];
+        rt.reflect = Some(files);
+        let folder = rt.string(&dir.to_string_lossy());
+        rt.statics.insert(crate::GAME_DIR, folder);
+        let list = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/ModList.get.()Lnet/neoforged/fml/ModList;",
+            &[],
+        );
+        let (gems, absent) = (rt.string("gems"), rt.string("absent"));
+        assert_eq!(crate::api::call(&mut rt, BY_ID, &[list, absent]), V::NULL);
+        let info = crate::api::call(&mut rt, BY_ID, &[list, gems]);
+        let file = crate::api::call(&mut rt, FILE, &[info]);
+        let find = |rt: &mut Rt, parts: &[&str]| {
+            let parts: Vec<V> = parts.iter().map(|p| rt.string(p)).collect();
+            let array = rt.alloc("[Ljava/lang/String;", Data::Array(parts));
+            let path = crate::api::call(rt, FIND, &[file, array]);
+            let none = rt.alloc("[Ljava/nio/file/LinkOption;", Data::Array(Vec::new()));
+            (path, crate::api::call(rt, EXISTS, &[path, none]).i() != 0)
+        };
+        let (template, there) = find(&mut rt, &["defaults", "template.txt"]);
+        assert!(there, "{:?}", rt.str_of(template));
+        let text = crate::api::call(
+            &mut rt,
+            "java/nio/file/Files.readString.(Ljava/nio/file/Path;)Ljava/lang/String;",
+            &[template],
+        );
+        assert_eq!(rt.str_of(text), Some("a template"));
+        let (none, there) = find(&mut rt, &["defaults", "none.txt"]);
+        assert!(
+            !there
+                && rt
+                    .str_of(none)
+                    .is_some_and(|p| p.ends_with("defaults/none.txt"))
+        );
+        // Through the mod's container, as a platform library asks.
+        let container = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/ModList.getModContainerById.(Ljava/lang/String;)Ljava/util/Optional;",
+            &[list, gems],
+        );
+        let container = crate::api::call(
+            &mut rt,
+            "java/util/Optional.get.()Ljava/lang/Object;",
+            &[container],
+        );
+        let mod_info = crate::api::call(
+            &mut rt,
+            "net/neoforged/fml/ModContainer.getModInfo.()Lnet/neoforged/neoforgespi/language/IModInfo;",
+            &[container],
+        );
+        let owning = crate::api::call(
+            &mut rt,
+            "net/neoforged/neoforgespi/language/IModInfo.getOwningFile.()Lnet/neoforged/neoforgespi/language/IModFileInfo;",
+            &[mod_info],
+        );
+        assert_eq!(owning, info);
+        let name = crate::api::call(
+            &mut rt,
+            "net/neoforged/neoforgespi/locating/IModFile.getFileName.()Ljava/lang/String;",
+            &[file],
+        );
+        assert_eq!(rt.str_of(name), Some("gems.jar"));
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Through the dispatcher, as a translated mod calls: a Kotlin mod asks Kotlin for Forge's
@@ -3267,7 +3515,9 @@ mod tests {
             (PROCESS_IMC, 6),
             (ENQUEUE_IMC, 5),
             ("net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent", 2),
+            (CLIENT_SETUP, 2),
             (COMMON_SETUP, 2),
+            (REGISTER_RENDERERS, 2),
         ];
         for (event, id) in events {
             let listener = rt.lambda_id("java/util/function/Consumer", id, vec![seen, answers]);
@@ -3289,6 +3539,43 @@ mod tests {
         let again = call(&mut rt, MESSAGES, &[ruby]).unwrap();
         assert!(items(&rt, again).is_empty());
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// The client's part of the mods' loading (its init hooks before the common setup, its own
+    /// setup after) runs as the client's, and leaves the runtime on the side it was: a client's
+    /// hook then marks it, and nothing is posted again.
+    #[test]
+    fn the_clients_part_of_loading_runs_as_the_client() {
+        fn heard(rt: &mut Rt, id: u32, _args: &[V]) -> Option<V> {
+            let log = rt.interned["test:log"];
+            let client = V::I(is_client(rt) as i32);
+            list_mut(rt, log).extend([V::I(id as i32), client]);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let log = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.interned.insert("test:log".into(), log);
+        for (event, id) in [
+            (LOAD_COMPLETE, 4),
+            (CLIENT_SETUP, 3),
+            (COMMON_SETUP, 2),
+            (REGISTER_RENDERERS, 1),
+        ] {
+            let listener = rt.lambda_id("java/util/function/Consumer", id, vec![]);
+            rt.listeners.push((event.to_owned(), listener));
+        }
+        fire_registrations(&mut rt);
+        let heard: Vec<i32> = list_mut(&mut rt, log).iter().map(|v| v.i()).collect();
+        assert_eq!(
+            heard,
+            [1, 1, 2, 0, 3, 1, 4, 0],
+            "(listener, as the client) in order"
+        );
+        assert!(!is_client(&rt));
+        fire_client_setup(&mut rt);
+        assert!(is_client(&rt));
+        assert_eq!(list_mut(&mut rt, log).len(), 8);
     }
 
     /// NeoForge's loading order on the mod bus: construction (where Dragons Plus makes its blocks,

@@ -10297,6 +10297,94 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Coverage run 54 (Part 168): 120,505 of 132,302 API methods (91.1%), 95.6% of call sites,
     5,134 keys missing; of the libraries' 76,713 methods 88.1% (85.5% at run 53).
   - Tests: 800 compat, 16 compat-core, 33 translator; the differential tests.
+- [x] 2026-11-10 Part 170: what the pack's mods count on while they load.
+  - The client's part of the loading is in NeoForge's order. The client's hooks ask the mods
+    for what they draw with as `Minecraft` is made (colours, particle providers, then
+    `ClientHooks.initClientHooks`: client extensions, menu screens, reload listeners, layer
+    definitions, renderers, key mappings, the HUD's layers), then come `FMLCommonSetupEvent`
+    and `FMLClientSetupEvent`, the registration events, the messages between mods and
+    `FMLLoadCompleteEvent`. Until now the client's part ran after everything else, at the
+    game's first question of the client, so a mod that closes its registrations when loading
+    completes had closed them before the mods that register with it were asked (MrCrayfish's
+    Framework: "Standalone models can only be registered during client initialization"). The
+    order is read off NeoForge 21.1.256's own `Minecraft.<init>`, `CommonModLoader` and
+    `ClientHooks`. That part runs with the runtime as the client's, which is otherwise the
+    client's only from the client's first hook on.
+  - A mixin's constructor gives its target its field initialisers and nothing else, as Mixin
+    takes them: the instructions after the superclass's constructor whose lines lie outside
+    the constructor's own. A constructor written for `javac` alone was run whole in every
+    object of its target: Artifacts' `UmbrellaItemMixin(Properties)` ends `throw new
+    IllegalArgumentException()`, and the umbrella was not registered. One without line
+    numbers or a `return` gives nothing, as in Mixin (the rule is that of the install's own
+    Mixin 0.8.7, `Constructor.getRange` and `InsnRange`). It goes by the line table Java 21's
+    compiler writes: Java 25's gives the return of a constructor it made up the line of a
+    later static initialiser, and Mixin then takes the fields before it for the body.
+  - Constants mods add to the game's enums. NeoForge's way: the file a jar's metadata names
+    (`enumExtensions`), carried in the bundle; the constant is in its enum's `values()` and
+    `valueOf` after the game's own, and it is what the `EnumProxy` in the field the file names
+    answers (the pack: recipe book categories and types, rarities, arm poses, an item display
+    context; 32 constants of 6 jars). The older way: a mixin into the enum with the enum's
+    constructor as an `@Invoker`, its `$VALUES` shadowed, and a handler injected into its
+    static initialiser (anywhere in it: Cataclysm's goes after the write of `$VALUES`) or the
+    mixin's own `static {}`, which Mixin merges into the enum's (Sable's camera types). Either
+    runs when the enum's constants are first asked for: the runtime has no such initialiser
+    of its own. (Cataclysm's note block instruments: three blocks were not registered for "No
+    enum constant"; Steam 'n' Rails' minecart types: its bench cart item.)
+  - A mod's jar as FML hands it out: `ModList.getModFileById`, `IModInfo.getOwningFile`,
+    `IModFileInfo.getFile`, and `IModFile.findResource(...)`, which is a path on disk: into the
+    mods' content folder for what is under `assets` and `data`, else a file the bundle carries,
+    written among the game's cached files the first time it is asked for (18 jars of the pack
+    ask: a library's "does this mod have that file", a config template).
+  - fastutil's pairs (`Pair.of`, `IntIntPair`, their immutable and mutable classes; 11 jars).
+    Goblin Traders collects its trades from such pairs: "Multiple entries with same key:
+    null=null".
+  - `BannerBlock.byColor` (Amendments takes each banner's item for its ceiling banners: "has
+    no corresponding item"); `chunkPosition()` of whatever has a block position, by any class
+    the call names; the client says of itself what a guest's does (`isLocalServer`,
+    `isSingleplayer`, `getSingleplayerServer`: the window is a client of a server thread).
+  - A mod that several jars bundle is one file in the load order, as jar-in-jar takes one of
+    the copies. Taken apart, an order against it reached one copy and the other went first:
+    AE2WTLib and ExtendedAE both bundle AE2WTLib's API and ask to load before it, it loaded
+    before both, and both got "Cannot register terminal registration handler after terminal
+    registration already happened".
+  - Launch 13 (the build of Part 169: 2270 s, 570 crates, 1.998 GB): the world ticks on its
+    server thread (each mod's `ServerTickEvent` handler runs every tick), and what Java would
+    throw is thrown: 7,260 uncaught exceptions in 540 s, nearly all a handful of nulls and
+    stand-ins met again every tick. Each names what the runtime handed out where Java hands
+    out an object. Those mapped here:
+    - `System.getProperty` for the properties every JVM defines (`os.name`, `user.home`,
+      `java.version`...; Resourceful Lib's `os.name.startsWith(...)` stopped its constructor),
+      `System.getenv(name)` and `getenv()` as the process's own (FTB Library asked the map).
+    - `sun.misc.Unsafe` as far as it reaches a field: `theUnsafe` by reflection, a static's
+      base and a field's offset, reads and writes through them (Moonlight swaps a logger of
+      the loader's so: Amendments was not constructed).
+    - `java.util.logging.Logger.getLogger`: a logger (it was null).
+    - The registries fire in NeoForge's order: attributes, data component types and armour
+      materials first (12 of Cataclysm's armour items read a material not registered yet).
+    - `getBlockEntity(pos, type)` is an `Optional` of the one there (it was the plain lookup);
+      `Level.getBiome(pos).value()` is the biome, which says whether it rains or snows there
+      (`warmEnoughToRain`, `coldEnoughToSnow`, `getPrecipitationAt`: by its temperature and
+      the height, without vanilla's small noise above 80).
+    - While the game asks what draws a block, a model's stand-in quad is a real quad and
+      `getQuads` gets a random source (a stand-in that was no quad made the models that take
+      quads apart throw 649 times).
+    - A creative tab's `parameters.holders()`; vanilla's tabs from their registry, holding no
+      stacks until the game builds them (SecurityCraft orders its own after theirs).
+    - `JsonOps` makes values itself when asked (`emptyMap()`: Jade parses its settings from
+      one); Night Config's enums have `values()` (a `switch` over one sized its table from
+      it); a codec a record builder could not make is unknown, not null.
+    - A rarity's colour and style (`color`, `getStyleModifier`), a mod's own by what it was
+      constructed with.
+    - A fake player's method nothing maps is asked of `ServerPlayer` once (it went round
+      between the two until the stack ran out).
+  - Measured, not mapped: the pack's mixins hold 4,398 injectors into the game's own code
+    (2,113 into client classes, 2,018 into common and server ones, 267 into Mojang's libraries
+    and the loader); the commonest place (`LevelRenderer.renderLevel`) has 109, most have one
+    or two. What a mod sets up in such a handler is not set up: Better Chunk Loading's
+    per-player data (an `@Inject` at the end of `ServerPlayer`'s constructor) is null on
+    every tick, Cucumber's recipe manager (the same in `ReloadableServerResources`) "is not
+    available", Immersive Portals' server likewise.
+  - Tests: 811 compat, 16 compat-core, 36 translator; the differential and weave tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

@@ -1772,9 +1772,13 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             "getQuads" => {
                 let probing = rt.interned.contains_key("compat:probing");
                 match crate::quads::handle(rt, a(0)) {
+                    // (A whole face of the side asked, the top's for none: a quad as any other,
+                    // which a wrapper may read and change. A stand-in that was no quad made every
+                    // model that takes quads apart throw: FramedBlocks' did 650 times a launch.)
                     _ if probing => {
-                        let this = a(0);
-                        crate::jutil::new_list(rt, vec![this])
+                        let side = if a(2).r() != 0 { crate::api_common::direction_ordinal(rt, a(2)) } else { 1 };
+                        let quad = crate::quads::baked_quad(rt, &crate::quads::whole_face(side));
+                        crate::jutil::new_list(rt, vec![quad])
                     }
                     Some(model) => crate::quads::handle_quads(rt, &model, a(2)),
                     None => crate::jutil::new_list(rt, Vec::new()),

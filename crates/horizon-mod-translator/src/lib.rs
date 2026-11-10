@@ -391,6 +391,10 @@ fn own_resource(path: &str, size: u64) -> bool {
         || (pack && matches!(extension, "json" | "mcmeta" | "mcfunction" | "fsh" | "vsh" | "glsl" | "snbt" | "lang")))
 }
 
+/// Where a bundle's files have each jar's enum extensions (`<n>.json`, in the jars' order):
+/// the runtime adds the constants they declare (`horizon_compat::enum_ext`).
+const ENUM_EXTENSIONS: &str = "hz/enum-extensions/";
+
 /// The files of `jars` and of the jars they bundle that a mod may read for itself
 /// ([`own_resource`]), by path, sorted; a path two jars have is the first one's. At most 48 MB.
 pub fn jar_resources(jars: &[&Path]) -> Vec<(String, Vec<u8>)> {
@@ -417,6 +421,28 @@ fn jar_resources_within(jars: &[&Path], budget: usize) -> Vec<(String, Vec<u8>)>
             let mut bytes = Vec::new();
             if e.read_to_end(&mut bytes).is_ok() {
                 out.insert(name, bytes);
+            }
+        }
+        // The constants the jar adds to the game's enums: the file its metadata names
+        // (`enumExtensions = "META-INF/enumextensions.json"`), under a name of its own (every
+        // jar's has the same path), which the runtime reads them by.
+        let declared = zip_mods_toml(zip).and_then(|toml| {
+            toml.lines().find_map(|l| {
+                l.split_once('=')
+                    .filter(|(k, _)| k.trim() == "enumExtensions")
+                    .map(|(_, v)| bundle::toml_string(v))
+            })
+        });
+        if let Some(path) = declared
+            && let Ok(mut e) = zip.by_name(&path)
+        {
+            let mut bytes = Vec::new();
+            if e.read_to_end(&mut bytes).is_ok() {
+                let n = out
+                    .keys()
+                    .filter(|k| k.starts_with(ENUM_EXTENSIONS))
+                    .count();
+                out.insert(format!("{ENUM_EXTENSIONS}{n}.json"), bytes);
             }
         }
         for inner in nested_jars(zip) {
@@ -1170,8 +1196,38 @@ fn zip_mod_file<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> ModFil
 /// earliest that may go next going next (its sort takes the first free file each time). Orders
 /// against mods that are not there, or of the same file, ask nothing; files whose orders go in a
 /// circle (FML refuses to load those) keep the order given. A file's mods stay together, in the
-/// order it declares them.
+/// order it declares them. A mod that several jars bundle is one file, as jar-in-jar takes one
+/// of the copies: the first given, with what any of them asks. (Taken apart, an order against
+/// the mod reached one copy only, and the other went first: AE2WTLib and ExtendedAE both bundle
+/// AE2WTLib's API and ask to load before it; it loaded before both and had closed its
+/// registrations when theirs came.)
 pub fn load_order(files: &[ModFile]) -> Vec<String> {
+    let mut merged: Vec<ModFile> = Vec::new();
+    for f in files {
+        match merged
+            .iter_mut()
+            .find(|m| m.ids.iter().any(|i| f.ids.contains(i)))
+        {
+            Some(m) => {
+                m.ids.extend(
+                    f.ids
+                        .iter()
+                        .filter(|i| !m.ids.contains(i))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+                m.orders.extend(
+                    f.orders
+                        .iter()
+                        .filter(|o| !m.orders.contains(o))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                );
+            }
+            None => merged.push(f.clone()),
+        }
+    }
+    let files = &merged[..];
     let of_mod = |id: &str| files.iter().position(|f| f.ids.iter().any(|i| i == id));
     // For each file, those that must be out before it.
     let mut before: Vec<Vec<usize>> = vec![Vec::new(); files.len()];
@@ -2589,6 +2645,62 @@ mod mixin_census_tests {
         );
     }
 
+    /// Each jar's enum extensions (the file its metadata names, wherever it is in the jar) are
+    /// carried under a name of their own, in the jars' order: every jar's file has the same path.
+    #[test]
+    fn each_jars_enum_extensions_are_carried_by_number() {
+        let jar = |tag: &str, files: &[(&str, &str)]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, text) in files {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                std::io::Write::write_all(&mut zip, text.as_bytes()).unwrap();
+            }
+            let path =
+                std::env::temp_dir().join(format!("hz-enums-{tag}-{}.jar", std::process::id()));
+            std::fs::write(&path, zip.finish().unwrap().into_inner()).unwrap();
+            path
+        };
+        let toml = "modLoader = \"javafml\"\nenumExtensions = \"META-INF/enumextensions.json\" # ours\n[[mods]]\nmodId = \"a\"\n";
+        let first = jar(
+            "a",
+            &[
+                ("META-INF/neoforge.mods.toml", toml),
+                ("META-INF/enumextensions.json", "{\"entries\": [1]}"),
+            ],
+        );
+        let plain = jar(
+            "b",
+            &[("META-INF/neoforge.mods.toml", "[[mods]]\nmodId = \"b\"\n")],
+        );
+        let second = jar(
+            "c",
+            &[
+                (
+                    "META-INF/neoforge.mods.toml",
+                    "enumExtensions='extra/enums.json'\n[[mods]]\nmodId = \"c\"\n",
+                ),
+                ("extra/enums.json", "{\"entries\": [2]}"),
+            ],
+        );
+        let files = jar_resources(&[first.as_path(), plain.as_path(), second.as_path()]);
+        for path in [&first, &plain, &second] {
+            std::fs::remove_file(path).ok();
+        }
+        let carried: Vec<(&str, &str)> = files
+            .iter()
+            .filter(|f| f.0.starts_with("hz/"))
+            .map(|f| (f.0.as_str(), std::str::from_utf8(&f.1).unwrap()))
+            .collect();
+        assert_eq!(
+            carried,
+            [
+                ("hz/enum-extensions/0.json", "{\"entries\": [1]}"),
+                ("hz/enum-extensions/1.json", "{\"entries\": [2]}")
+            ]
+        );
+    }
+
     /// FML's sorter (`ModSorter`, a topological sort that takes the earliest free file each time):
     /// a mod loads after those it asks to load after and before those it asks to load before, and
     /// keeps its place otherwise. An order against a mod that is not there, against the file's own
@@ -2660,6 +2772,23 @@ mod mixin_census_tests {
             },
         ];
         assert_eq!(load_order(&circle), ["c", "a", "b"]);
+        // A mod two jars bundle is one file, whichever copy is given first: both that ask to load
+        // before it do.
+        let file = |id: &str, orders: &[(&str, bool)]| ModFile {
+            ids: vec![id.to_owned()],
+            orders: orders
+                .iter()
+                .map(|(o, after)| (o.to_string(), *after))
+                .collect(),
+        };
+        let bundled = [
+            file("api", &[("core", true)]),
+            file("api", &[("core", true)]),
+            file("core", &[]),
+            file("terminals", &[("api", false), ("core", true)]),
+            file("other", &[("api", false)]),
+        ];
+        assert_eq!(load_order(&bundled), ["core", "terminals", "other", "api"]);
     }
 
     #[test]

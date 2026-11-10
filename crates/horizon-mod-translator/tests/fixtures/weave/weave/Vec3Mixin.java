@@ -13,14 +13,17 @@ public abstract class Vec3Mixin implements Measured {
     @Final
     public double x;
 
+    // (Before the instance fields: a static initialiser after the last of them makes newer
+    // compilers give the constructor's return that line, and Mixin, which tells a constructor's
+    // body from the field initialisers by line, then takes the initialisers for the body.)
+    @Unique
+    private static int weave$made = 40;
+
     @Unique
     private int weave$reads = 10;
 
     @Unique
     private String weave$label;
-
-    @Unique
-    private static int weave$made = 40;
 
     @Shadow
     public abstract double lengthSqr();

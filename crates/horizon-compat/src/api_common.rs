@@ -365,7 +365,12 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 33] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 34] = [
+    // The camera's views (a mod adds its own to them: Sable's sub-level views).
+    (
+        "net/minecraft/client/CameraType",
+        &["FIRST_PERSON", "THIRD_PERSON_BACK", "THIRD_PERSON_FRONT"],
+    ),
     // How Gson names a field in JSON (`GsonBuilder.setFieldNamingPolicy`), by the policy's name.
     (
         "com/google/gson/FieldNamingPolicy",
@@ -667,15 +672,22 @@ pub(crate) fn carried_enum_call(rt: &mut Rt, owner: &str, rest: &str, args: &[V]
         crate::api::get_static(rt, key)
     };
     if name == "values" {
-        let all: Vec<V> = names.iter().map(|n| constant(rt, n)).collect();
+        let mut all: Vec<V> = names.iter().map(|n| constant(rt, n)).collect();
+        // Then the constants mods added to it.
+        all.extend(crate::enum_ext::extras(rt, class));
         return Some(rt.alloc("[", Data::Array(all)));
     }
     let wanted = rt
         .str_of(args.first().copied().unwrap_or_default())
         .unwrap_or("")
         .to_owned();
-    Some(match names.iter().find(|n| **n == wanted) {
-        Some(n) => constant(rt, n),
+    // One of its own, else one the mods added to it.
+    let found = match names.iter().find(|n| **n == wanted) {
+        Some(n) => Some(constant(rt, n)),
+        None => crate::enum_ext::named(rt, class, &wanted),
+    };
+    Some(match found {
+        Some(found) => found,
         None => crate::jlang::throw_with(
             rt,
             "java/lang/IllegalArgumentException",
@@ -708,7 +720,12 @@ fn plain_enum_values(rt: &mut Rt, class: &str) -> Option<V> {
         None if !result_names(class).is_empty() => result_names(class).to_vec(),
         None => return None,
     };
-    let values: Vec<V> = names.iter().filter_map(|n| get_static(rt, class, n)).collect();
+    let mut values: Vec<V> = names
+        .iter()
+        .filter_map(|n| get_static(rt, class, n))
+        .collect();
+    // Then the constants mods added to it.
+    values.extend(crate::enum_ext::extras(rt, class));
     let arr = rt.new_array(values.len() as i32, V::NULL);
     for (i, v) in values.into_iter().enumerate() {
         rt.array_set(arr, i as i32, v);
@@ -3912,7 +3929,20 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         }
         (o, "getBlockEntity") if o.starts_with("net/minecraft/") && (o.ends_with("Level") || o.ends_with("LevelAccessor") || o.ends_with("BlockGetter") || o.ends_with("LevelReader")) => {
             let h = native(rt, a(1));
-            crate::glue::block_entity_at(rt, [h[0] as i32, h[1] as i32, h[2] as i32])
+            let found = crate::glue::block_entity_at(rt, [h[0] as i32, h[1] as i32, h[2] as i32]);
+            // `getBlockEntity(pos, type)`: the one there when it is of that type, as an
+            // `Optional` (it was answered as the plain lookup: the block entity itself or null,
+            // and an elevator's `getElevatorTile(...).map(...)` had no `Optional` to ask).
+            if desc.ends_with(")Ljava/util/Optional;") {
+                let of_type = found.r() != 0
+                    && crate::api::call(
+                        rt,
+                        "net/minecraft/world/level/block/entity/BlockEntity.getType.()Lnet/minecraft/world/level/block/entity/BlockEntityType;",
+                        &[found],
+                    ) == a(2);
+                return Some(optional(rt, if of_type { found } else { V::NULL }));
+            }
+            found
         }
         // Vec2: two floats (`x`, `y`), as Create's value settings lay their board out with.
         (VEC2, "<init>") if desc == "(FF)V" => {
@@ -3957,7 +3987,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "values") if desc.starts_with("()[") => return plain_enum_values(rt, o),
         (o, "valueOf") if desc.starts_with("(Ljava/lang/String;)") && PLAIN_ENUMS.iter().any(|(c, _)| *c == o) => {
             let n = rt.str_of(a(0)).unwrap_or_default().to_owned();
-            return plain_enum(rt, o, &n);
+            return plain_enum(rt, o, &n).or_else(|| crate::enum_ext::named(rt, o, &n));
         }
         // Vec3
         ("net/minecraft/world/phys/Vec3", "<init>") if desc == "(DDD)V" => {
@@ -4766,6 +4796,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // A vanilla enum's name in data (`StringRepresentable.getSerializedName`, named on the
         // interface or on its class): its constant's, as vanilla spells it.
         (_, "getSerializedName") if desc == "()Ljava/lang/String;" && api_constant(rt, a(0)) => {
+            // (One a mod added to the enum is named as it was constructed.)
+            if let Some(own) = crate::enum_ext::serialized_name(rt, a(0)) {
+                return Some(own);
+            }
             let class = rt.class_of(a(0));
             let constant = constant(rt, a(0));
             let text = serialized_name(class, &constant);

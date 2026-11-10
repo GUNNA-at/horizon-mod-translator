@@ -418,6 +418,23 @@ impl ClassFile {
                 }
             }
         }
+        // A mixin's constructor gives its targets its field initialisers and no more.
+        if cf
+            .annotation_of("Lorg/spongepowered/asm/mixin/Mixin;")
+            .is_some()
+        {
+            let mut methods = std::mem::take(&mut cf.methods);
+            for code in methods
+                .iter_mut()
+                .filter(|m| m.name == "<init>")
+                .filter_map(|m| m.code.as_mut())
+            {
+                initialisers_only(code, &|idx| {
+                    cf.member(idx).is_some_and(|m| m.name == "<init>")
+                });
+            }
+            cf.methods = methods;
+        }
         Ok(cf)
     }
 
@@ -601,6 +618,86 @@ impl ClassFile {
     }
 }
 
+/// Leaves of a mixin's constructor what Mixin takes of it: its field initialisers, which Mixin
+/// finds by their lines (`MixinApplicatorStandard.getInitialiser`). The constructor's own lines
+/// run from its call of the superclass's constructor to its last `return`; the instructions
+/// after that call whose lines lie outside them are the initialisers `javac` put there (each
+/// on its field's line), and the rest is a body no target ever runs: it is there for `javac`
+/// (Artifacts' `UmbrellaItemMixin(Properties)` ends `throw new IllegalArgumentException()`,
+/// and run as written every umbrella failed to register). A constructor without line numbers
+/// or without a `return` gives none, as Mixin takes none of it. Everything else after the call
+/// becomes `nop`s, with a `return` at the end; `is_init(i)` says whether the pool's member `i`
+/// is a constructor.
+fn initialisers_only(code: &mut Code, is_init: &dyn Fn(u16) -> bool) {
+    use crate::insn::{Operand, op};
+    const RETURN: u8 = 0xb1;
+    let Ok(insns) = crate::insn::decode(&code.bytes) else {
+        return;
+    };
+    let lines: std::collections::BTreeMap<usize, u16> = code
+        .lines
+        .iter()
+        .map(|&(pc, line)| (pc as usize, line))
+        .collect();
+    // Mixin's `getConstructorRange`: `start` is the line of the first constructor call, `end`
+    // that of the last `return`, or `start` again where a field was set since the last line
+    // began (the `return` of a constructor `javac` made up, which has no line of its own:
+    // Mixin gives that `return` the line `start`).
+    let (mut line, mut start, mut end) = (0u16, 0u16, 0u16);
+    let (mut marker, mut fresh, mut end_return) = (None, false, None);
+    for (i, insn) in insns.iter().enumerate() {
+        if let Some(&l) = lines.get(&insn.at) {
+            (line, fresh) = (l, true);
+        }
+        match (insn.op, &insn.arg) {
+            (op::INVOKESPECIAL, Operand::Int(idx)) if marker.is_none() && is_init(*idx as u16) => {
+                (marker, start) = (Some(i), line);
+            }
+            (op::PUTFIELD, _) => fresh = false,
+            (RETURN, _) if fresh => end = line,
+            (RETURN, _) => (end, end_return) = (start, Some(insn.at)),
+            _ => {}
+        }
+    }
+    let Some(marker) = marker else { return };
+    let mut keep = vec![false; insns.len()];
+    if start != 0 && end >= start {
+        let mut gather = false;
+        for (i, insn) in insns.iter().enumerate().skip(marker + 1) {
+            let begins = if end_return == Some(insn.at) {
+                Some(start)
+            } else {
+                lines.get(&insn.at).copied()
+            };
+            if let Some(l) = begins {
+                // (A line that is the constructor's last and holds more than its `return` is an
+                // initialiser's too: all of it but that `return`.)
+                gather = (l == end && insn.op != RETURN) || l < start || l > end;
+            }
+            keep[i] = gather && insn.op != RETURN;
+        }
+    }
+    let len = code.bytes.len();
+    let end_of = |i: usize| insns.get(i + 1).map_or(len, |next| next.at);
+    for (i, insn) in insns.iter().enumerate().skip(marker + 1) {
+        if !keep[i] {
+            code.bytes[insn.at..end_of(i)].fill(0);
+        }
+    }
+    if insns.len() - 1 > marker && !keep[insns.len() - 1] {
+        code.bytes[len - 1] = RETURN;
+    }
+    // A handler of what is no longer there guards nothing.
+    let kept = |from: usize, to: usize| {
+        insns
+            .iter()
+            .enumerate()
+            .any(|(i, insn)| (i <= marker || keep[i]) && insn.at >= from && insn.at < to)
+    };
+    code.handlers
+        .retain(|&(from, to, ..)| kept(from as usize, to as usize));
+}
+
 /// A method descriptor's parameter types, as class names (`I` for an int, `[Lx;` for arrays).
 pub fn param_classes(desc: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -622,6 +719,93 @@ pub fn param_classes(desc: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod mixin_constructor_tests {
+    use super::ClassFile;
+    use std::process::Command;
+
+    /// The opcodes of `class`'s first constructor after its call of the superclass's, without
+    /// the `nop`s.
+    fn after_super(class: &ClassFile) -> Vec<u8> {
+        let ctor = class.methods.iter().find(|m| m.name == "<init>").unwrap();
+        let insns = crate::insn::decode(&ctor.code.as_ref().unwrap().bytes).unwrap();
+        let call = insns.iter().position(|i| i.op == 0xb7).unwrap();
+        insns[call + 1..]
+            .iter()
+            .map(|i| i.op)
+            .filter(|&op| op != 0)
+            .collect()
+    }
+
+    /// Mixin merges a mixin's field initialisers into its target's constructors and nothing else
+    /// of the mixin's constructor: not a body's statements, and nothing at all of a constructor
+    /// that only throws (no `return` tells Mixin where the body ends). A class that is no mixin
+    /// keeps its constructor as written.
+    #[test]
+    fn a_mixins_constructor_keeps_its_field_initialisers_only() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("horizon-mixin-ctor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mixin = |name: &str, body: &str| {
+            format!(
+                "package t;\n@org.spongepowered.asm.mixin.Mixin(Base.class)\npublic abstract class {name} extends Base {{\n    int a = 5;\n    String b = \"x\";\n{body}\n}}\n"
+            )
+        };
+        let files = [
+            (
+                "org/spongepowered/asm/mixin/Mixin.java".to_owned(),
+                "package org.spongepowered.asm.mixin; import java.lang.annotation.*; @Retention(RetentionPolicy.CLASS) public @interface Mixin { Class<?>[] value() default {}; }".to_owned(),
+            ),
+            ("t/Base.java".to_owned(), "package t; public class Base { Base(int v) {} Base() {} static void touch() {} }".to_owned()),
+            ("t/Throws.java".to_owned(), mixin("Throws", "    Throws(int v) {\n        super(v);\n        throw new IllegalArgumentException();\n    }")),
+            ("t/Body.java".to_owned(), mixin("Body", "    Body(int v) {\n        super(v);\n        touch();\n    }")),
+            ("t/Implicit.java".to_owned(), mixin("Implicit", "")),
+            ("t/Plain.java".to_owned(), "package t;\npublic class Plain extends Base {\n    int a = 5;\n    Plain(int v) {\n        super(v);\n        touch();\n    }\n}\n".to_owned()),
+        ];
+        for (path, src) in &files {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let class = |name: &str| {
+            ClassFile::parse(&std::fs::read(root.join(format!("t/{name}.class"))).unwrap()).unwrap()
+        };
+        let (throws, body, implicit, plain) = (
+            class("Throws"),
+            class("Body"),
+            class("Implicit"),
+            class("Plain"),
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        // `aload_0, iconst_5, putfield` and `aload_0, ldc, putfield`, then the `return`.
+        let initialisers = [0x2a, 0x08, 0xb5, 0x2a, 0x12, 0xb5, 0xb1];
+        assert_eq!(
+            after_super(&body),
+            initialisers,
+            "the body's call is not run"
+        );
+        assert_eq!(after_super(&implicit), initialisers);
+        assert_eq!(
+            after_super(&throws),
+            [0xb1],
+            "nothing of a constructor that only throws"
+        );
+        // `aload_0, iconst_5, putfield`, `invokestatic`, `return`.
+        assert_eq!(after_super(&plain), [0x2a, 0x08, 0xb5, 0xb8, 0xb1]);
+    }
 }
 
 #[cfg(test)]

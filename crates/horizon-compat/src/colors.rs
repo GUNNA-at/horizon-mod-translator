@@ -856,6 +856,64 @@ mod tests {
         assert_eq!(c(&mut rt, tint, &[level, pos, water]), V::I(0x3F_76E4));
     }
 
+    /// The biome a level hands out at a position is there to ask (`getBiome(pos).value()`): it
+    /// snows where its temperature is under 0.15, which height brings a temperate biome to far
+    /// above the clouds, and nothing falls in one without precipitation.
+    #[test]
+    fn a_levels_biome_says_whether_it_rains_or_snows() {
+        struct Climates;
+        impl Host for Climates {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            fn biome(&self, pos: [i32; 3]) -> Option<String> {
+                Some(
+                    match pos[0] {
+                        x if x < 0 => "minecraft:snowy_plains",
+                        0..=9 => "minecraft:plains",
+                        _ => "minecraft:desert",
+                    }
+                    .into(),
+                )
+            }
+            fn biome_json(&self, id: &str) -> Option<String> {
+                Some(match id {
+                    "minecraft:snowy_plains" => {
+                        r#"{"temperature":0.0,"downfall":0.5,"has_precipitation":true}"#.into()
+                    }
+                    "minecraft:plains" => {
+                        r#"{"temperature":0.8,"downfall":0.4,"has_precipitation":true}"#.into()
+                    }
+                    _ => r#"{"temperature":2.0,"downfall":0.0,"has_precipitation":false}"#.into(),
+                })
+            }
+        }
+        let mut rt = runtime();
+        let mut host = Climates;
+        rt.with_host(&mut host, |rt| {
+            let level = crate::glue::level(rt);
+            let falls = |rt: &mut Rt, at: [i64; 3]| {
+                let pos = api::block_pos(rt, at[0], at[1], at[2]);
+                let holder = c(rt, "net/minecraft/world/level/Level.getBiome.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/Holder;", &[level, pos]);
+                let biome = c(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder]);
+                assert!(biome.r() != 0, "no biome at {at:?}");
+                let cold = c(rt, "net/minecraft/world/level/biome/Biome.coldEnoughToSnow.(Lnet/minecraft/core/BlockPos;)Z", &[biome, pos]).i() != 0;
+                let kind = c(rt, "net/minecraft/world/level/biome/Biome.getPrecipitationAt.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/biome/Biome$Precipitation;", &[biome, pos]);
+                let kind = c(rt, "java/lang/Enum.name.()Ljava/lang/String;", &[kind]);
+                (cold, rt.str_of(kind).unwrap_or("?").to_owned())
+            };
+            assert_eq!(falls(rt, [-5, 64, 0]), (true, "SNOW".to_owned()));
+            assert_eq!(falls(rt, [5, 64, 0]), (false, "RAIN".to_owned()));
+            assert_eq!(falls(rt, [5, 100, 0]), (false, "RAIN".to_owned()));
+            assert_eq!(falls(rt, [5, 700, 0]), (true, "SNOW".to_owned()));
+            assert_eq!(falls(rt, [15, 64, 0]), (false, "NONE".to_owned()));
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// A biome's colours from its data: its own water and foliage colours, dark forest's grass
     /// modifier on the map's colour; plains where nothing is said.
     #[test]

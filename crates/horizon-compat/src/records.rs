@@ -84,12 +84,13 @@ fn own_key(rt: &mut Rt, v: V, method: &str) -> Option<&'static str> {
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
-pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
+pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
     RECORDS.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
         || members(owner).is_some()
         || (matches!(name, "equals" | "hashCode" | "ordinal" | "name" | "compareTo") && ENUMS.binary_search(&owner).is_ok())
         || (matches!(name, "values" | "valueOf") && constants(owner).is_some())
         || FACTORIES.binary_search_by(|(c, _)| (*c).cmp(owner)).is_ok()
+        || crate::enum_ext::claims(owner, name, desc)
 }
 
 /// The constructor a static factory of `class` (a record's or data class's: `GlobalPos.of`) only
@@ -275,6 +276,11 @@ fn hash_of(rt: &mut Rt, v: V) -> i32 {
 
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
+    if crate::enum_ext::claims(owner, name, desc)
+        && let Some(v) = crate::enum_ext::call(rt, owner, name, desc, args)
+    {
+        return Some(v);
+    }
     // A static factory: the object its constructor makes of the same arguments.
     if let Some((class, init)) = factory(owner, name, desc) {
         let o = rt.new_object(class);
@@ -303,7 +309,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // `values()`: a new array of the constants each time, as Java clones it.
             ("values", _) if desc.starts_with("()[") => {
                 let (class, names) = constants(owner)?;
-                let all: Vec<V> = names.split(',').enumerate().map(|(i, n)| crate::api::api_enum(rt, class, n, i as i32)).collect();
+                let mut all: Vec<V> = names
+                    .split(',')
+                    .enumerate()
+                    .map(|(i, n)| crate::api::api_enum(rt, class, n, i as i32))
+                    .collect();
+                // Then the constants mods added to it.
+                all.extend(crate::enum_ext::extras(rt, class));
                 let array: &'static str = rt.static_key(&format!("[L{class};"));
                 Some(rt.alloc(array, Data::Array(all)))
             }
@@ -311,8 +323,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             ("valueOf", _) if desc.starts_with("(Ljava/lang/String;)") => {
                 let (class, names) = constants(owner)?;
                 let wanted = rt.str_of(this).map(str::to_owned);
-                match names.split(',').enumerate().find(|(_, n)| Some(*n) == wanted.as_deref()) {
+                let own = names
+                    .split(',')
+                    .enumerate()
+                    .find(|(_, n)| Some(*n) == wanted.as_deref());
+                // One of its own, else one the mods added to it.
+                let found = match own {
                     Some((i, n)) => Some(crate::api::api_enum(rt, class, n, i as i32)),
+                    None => wanted
+                        .as_deref()
+                        .and_then(|w| crate::enum_ext::named(rt, class, w)),
+                };
+                match found {
+                    Some(constant) => Some(constant),
                     None => {
                         let text = format!("No enum constant {}.{}", class.replace(['/', '$'], "."), wanted.unwrap_or_else(|| "null".into()));
                         Some(crate::jlang::throw_with(rt, "java/lang/IllegalArgumentException", &text))

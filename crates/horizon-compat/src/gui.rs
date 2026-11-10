@@ -2042,8 +2042,10 @@ fn client_calls(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
         (LANGUAGE_MANAGER, "getSelected") => rt.string("en_us"),
         (LANGUAGE_MANAGER, "getJavaLocale") | (MINECRAFT, "getLocale") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
         // The client's runtime holds no server object, even in single player (the game's server
-        // thread runs its own): a mod syncs over the network, as to a remote server.
-        (MINECRAFT, "hasSingleplayerServer") => V::I(0),
+        // thread runs its own): a mod syncs over the network, as to a remote server, and the
+        // client says of itself what a guest's does.
+        (MINECRAFT, "hasSingleplayerServer" | "isLocalServer" | "isSingleplayer") => V::I(0),
+        (MINECRAFT, "getSingleplayerServer") => V::NULL,
         // A mixin accessor onto the client: the screen open (none until one opens). The particle
         // engine is [`crate::particle_engine`]'s.
         (MINECRAFT, "$screen") => V::NULL,
@@ -2639,6 +2641,9 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
                     | "getLanguageManager"
                     | "getLocale"
                     | "hasSingleplayerServer"
+                    | "isLocalServer"
+                    | "isSingleplayer"
+                    | "getSingleplayerServer"
                     | "$screen"
                     | "getEntityModels"
                     | "getBlockEntityRenderDispatcher"
