@@ -191,18 +191,108 @@ pub(crate) fn reaches(rt: &Rt, event: &str, wanted: &str) -> bool {
 /// [`hearing`]). While it is canceled (`setCanceled(true)` on a cancellable event), only the
 /// listeners that asked for canceled events hear it (`receiveCanceled`; one may let it go on).
 pub fn post(rt: &mut Rt, class: &str, event: V) {
+    post_as(rt, class, event, None);
+}
+
+/// Posts `event` as [`post`] does, to one mod's bus when `only` names the mod: FML hands a mod's
+/// own events (its configs') to that mod's bus alone, so the other mods' listeners for the same
+/// class never hear them. A listener nothing says the mod of hears it still.
+pub(crate) fn post_as(rt: &mut Rt, class: &str, event: V, only: Option<&str>) {
     let profile = profiling();
     for l in hearing(rt, class) {
         if rt.get_field(event, "$canceled").i() != 0 && rt.get_field(l, "$receiveCanceled").i() == 0 {
             continue;
         }
+        let owner = rt.get_field(l, BUS_MOD);
+        if let (Some(only), Some(owner)) = (only, rt.str_of(owner))
+            && owner != only
+        {
+            continue;
+        }
+        // The listener's mod is the active one while it hears, as FML sets the container around
+        // a mod's turn: what it registers then (a config, another listener) is that mod's.
+        let before = activate(rt, owner);
         let started = profile.then(std::time::Instant::now);
         rt.call_functional(ACCEPT, l, &[event]);
         if let Some(t) = started {
             record(rt, class, l, t.elapsed());
         }
+        activate(rt, before);
         rt.report_thrown(class);
     }
+}
+
+/// The mod (its id, a string) whose bus a listener listens on: the bus it was added to, or the mod
+/// that was loading when it was added.
+const BUS_MOD: &str = "$busMod";
+
+/// Makes the mod of id `id` (a string; null or void for none) the active one, and gives back the
+/// one that was (`ModLoadingContext.getActiveContainer`).
+fn activate(rt: &mut Rt, id: V) -> V {
+    let id = if rt.str_of(id).is_some() { id } else { V::NULL };
+    match rt.interned.get_mut(ACTIVE_MOD) {
+        Some(slot) => std::mem::replace(slot, id),
+        None if id.is_null() => V::NULL,
+        None => {
+            rt.interned.insert(ACTIVE_MOD.into(), id);
+            V::NULL
+        }
+    }
+}
+
+/// The bus of the mod of id `id`, one per mod (`ModContainer.getEventBus()`, the bus a mod's
+/// constructor takes): the mod's listeners listen on it.
+fn mod_bus(rt: &mut Rt, id: &str) -> V {
+    if id.is_empty() {
+        return rt.new_object("net/neoforged/bus/api/IEventBus");
+    }
+    rt.intern(format!("compat:mod-bus/{id}"), |rt| {
+        let bus = rt.new_object("net/neoforged/bus/api/IEventBus");
+        let s = rt.string(id);
+        rt.put_field(bus, "$modId", s);
+        bus
+    })
+}
+
+/// The id of the mod being loaded (its constructor runs, or a listener of its hears), if one is.
+fn active_mod(rt: &Rt) -> Option<String> {
+    rt.interned
+        .get(ACTIVE_MOD)
+        .copied()
+        .and_then(|v| rt.str_of(v).map(str::to_owned))
+}
+
+/// The listeners added since there were `from` become those of `bus`'s mod, or of the mod being
+/// loaded when the bus is no mod's (the game's, `NeoForge.EVENT_BUS`).
+fn own_listeners(rt: &mut Rt, from: usize, bus: V) {
+    let id = match rt.get_field(bus, "$modId") {
+        id if rt.str_of(id).is_some() => id,
+        _ => rt.interned.get(ACTIVE_MOD).copied().unwrap_or(V::NULL),
+    };
+    if rt.str_of(id).is_none() {
+        return;
+    }
+    for i in from..rt.listeners.len() {
+        let l = rt.listeners[i].1;
+        if rt.str_of(rt.get_field(l, BUS_MOD)).is_none() {
+            rt.put_field(l, BUS_MOD, id);
+        }
+    }
+}
+
+/// Listens with the static `@SubscribeEvent` methods of `class`, an `@EventBusSubscriber` class of
+/// the mod of id `mod_id` (generated code, as FML subscribes each to its mod's bus).
+pub fn subscribe_class(rt: &mut Rt, class: &str, mod_id: &str) {
+    let from = rt.listeners.len();
+    rt.subscribe_class(class);
+    let bus = mod_bus(rt, mod_id);
+    own_listeners(rt, from, bus);
+}
+
+/// Loading is over for the mod whose constructor ran (generated code, after the last one): no mod
+/// is the active one until a listener hears.
+pub fn constructed(rt: &mut Rt) {
+    activate(rt, V::NULL);
 }
 
 /// Listener `l`'s `EventPriority` ordinal: 0 `HIGHEST` to 4 `LOWEST`, `NORMAL` (2) unless it said.
@@ -844,6 +934,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 rt.listen_options(listener, u8::try_from(priority.clamp(0, 4)).unwrap_or(2), canceled);
             }
             rt.listeners.push((wanted, listener));
+            own_listeners(rt, rt.listeners.len() - 1, a(0));
             V::Void
         }
         // `bus.unregister(x)`: what `register(x)` or `addListener(x)` added stops listening.
@@ -854,12 +945,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // `bus.register(Foo.class)` listens with its static `@SubscribeEvent` methods, `bus.register(obj)`
         // with the object's.
         ("net/neoforged/bus/api/IEventBus", "register") => {
+            let from = rt.listeners.len();
             if rt.class_of(a(1)) == "java/lang/Class" {
                 let class = rt.str_of(a(1)).unwrap_or("").to_owned();
                 rt.subscribe_class(&class);
             } else {
                 rt.subscribe_object(a(1));
             }
+            own_listeners(rt, from, a(0));
             V::Void
         }
         // Level events and a level's tick: the level they're about, with time to spare (`hasTime`).
@@ -1464,6 +1557,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let (registry, id) = split_key(rt, a(1));
             registry_holder(rt, &registry, &id, V::NULL)
         }
+        // A mod's own holder class extends `Holder.Reference` (Puzzles Lib's `LazyHolder`): its
+        // constructor takes the key the holder answers with (`key()`, `unwrapKey()`) and the value
+        // it holds, either of them null for one that learns it later.
+        ("net/minecraft/core/Holder$Reference", "<init>") => {
+            if rt.str_of(a(3)).is_some() {
+                let (registry, id) = split_key(rt, a(3));
+                let (r, i) = (rt.string(&registry), rt.string(&id));
+                rt.put_field(a(0), "$registry", r);
+                rt.put_field(a(0), "$id", i);
+            }
+            if a(4).r() != 0 {
+                rt.put_field(a(0), "$value", a(4));
+            }
+            V::Void
+        }
         // A registry entry's `Holder` made above: its value, key and name.
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Reference", n) if rt.get_field(a(0), "$registry").r() != 0 => {
             let (reg, mut id) = (rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned(), rt.str_of(rt.get_field(a(0), "$id")).unwrap_or("").to_owned());
@@ -1638,7 +1746,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // Kotlin for Forge's loading context: a Kotlin mod's constructor asks it for the mod bus
         // (`MOD_BUS`), as a Java mod's constructor takes the bus.
         (KOTLIN_CONTEXT_COMPANION, "get") => rt.intern("compat:kotlin-loading-context".into(), |rt| rt.new_object(KOTLIN_CONTEXT)),
-        (KOTLIN_CONTEXT, "getKEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
+        (KOTLIN_CONTEXT, "getKEventBus") => {
+            let id = active_mod(rt).unwrap_or_default();
+            mod_bus(rt, &id)
+        }
         // The mods this engine carries, as FML lists them: the jar's own and those bundled in it.
         ("net/neoforged/fml/ModList", "get") => rt.intern("compat:mod-list".into(), |rt| rt.new_object("net/neoforged/fml/ModList")),
         ("net/neoforged/fml/ModList", "isLoaded") => {
@@ -1761,7 +1872,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (MOD_CONTAINER, "getModId" | "getNamespace") => rt.get_field(a(0), "$modId"),
         // Events route by class, so every handle on the mod bus is the same bus.
-        (MOD_CONTAINER, "getEventBus") => rt.new_object("net/neoforged/bus/api/IEventBus"),
+        (MOD_CONTAINER, "getEventBus") => {
+            let id = rt
+                .str_of(rt.get_field(a(0), "$modId"))
+                .unwrap_or("")
+                .to_owned();
+            mod_bus(rt, &id)
+        }
         // A setup event's deferred work runs at once (one thread here), and its future is done.
         (o, "enqueueWork") if o.starts_with("net/neoforged/fml/event/lifecycle/") => {
             let value = if desc.starts_with("(Ljava/lang/Runnable;") {
@@ -2170,8 +2287,9 @@ pub(crate) fn mod_container(rt: &mut Rt, id: &str) -> V {
 
 /// The container of the mod being constructed: the one `start` named, else the engine's first.
 fn active_container(rt: &mut Rt) -> V {
-    let named = rt.interned.get(ACTIVE_MOD).copied().and_then(|v| rt.str_of(v).map(str::to_owned));
-    let id = named.or_else(|| loaded_mods(rt).into_iter().next()).unwrap_or_default();
+    let id = active_mod(rt)
+        .or_else(|| loaded_mods(rt).into_iter().next())
+        .unwrap_or_default();
     mod_container(rt, &id)
 }
 
@@ -2203,12 +2321,18 @@ fn version_part(text: &str, i: usize) -> i32 {
     piece.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)
 }
 
-/// Loading objects a mod's constructor takes: the event bus, its container, the side.
+/// Loading objects a mod's constructor takes: its bus, its container, and the side, the client's
+/// as `FMLEnvironment.dist` is (a mod that sets up its client from the constructor's `Dist` does).
 pub fn constructor_arg(rt: &mut Rt, class: &str) -> V {
     match class {
-        "net/neoforged/bus/api/IEventBus" => rt.new_object("net/neoforged/bus/api/IEventBus"),
+        "net/neoforged/bus/api/IEventBus" => {
+            let id = active_mod(rt).unwrap_or_default();
+            mod_bus(rt, &id)
+        }
         MOD_CONTAINER | FML_CONTAINER => active_container(rt),
-        "net/neoforged/api/distmarker/Dist" => crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.DEDICATED_SERVER"),
+        "net/neoforged/api/distmarker/Dist" => {
+            crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.CLIENT")
+        }
         _ => V::NULL,
     }
 }
@@ -2870,6 +2994,139 @@ mod tests {
         };
         assert_eq!(text(&mut rt, "net/neoforged/fml/config/ModConfig.getFileName.()Ljava/lang/String;").as_deref(), Some("ruby-common.toml"));
         assert_eq!(text(&mut rt, "net/neoforged/fml/config/ModConfig.getModId.()Ljava/lang/String;").as_deref(), Some("ruby"));
+    }
+
+    /// FML hands a config's events to the bus of the mod that registered it (`ModConfig.setConfig`
+    /// gives them to the config's container): of two mods listening for `ModConfigEvent`, each
+    /// hears its own config load and never the other's, whether it listens on the bus its
+    /// container gives or with its `@EventBusSubscriber` class. The mod whose listener hears is
+    /// the active one meanwhile.
+    #[test]
+    fn a_configs_events_reach_its_own_mods_bus_only() {
+        const ACTIVE: &str = "net/neoforged/fml/ModLoadingContext.getActiveContainer.()Lnet/neoforged/fml/ModContainer;";
+        const MOD_ID: &str = "net/neoforged/fml/ModContainer.getModId.()Ljava/lang/String;";
+        const ADD: &str = "net/neoforged/bus/api/IEventBus.addListener.(Ljava/lang/Class;Ljava/util/function/Consumer;)V";
+        /// Listener 2 notes the event it hears, 4 the active mod's id: in the list it holds, or
+        /// (a class's static one, holding nothing) in the one kept as `test:static`.
+        fn listen(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let seen = rt
+                .captured(args[0])
+                .first()
+                .copied()
+                .unwrap_or_else(|| rt.interned["test:static"]);
+            let noted = if id == 4 {
+                let active = call(rt, ACTIVE, &[V::NULL]).unwrap();
+                call(rt, MOD_ID, &[active]).unwrap()
+            } else {
+                args[1]
+            };
+            list_mut(rt, seen).push(noted);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.mods = vec!["ruby".into(), "opal".into()];
+        rt.lambda_call = Some(listen);
+        let list = |rt: &mut Rt| rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        let (ruby_heard, ruby_active, opal_heard) = (list(&mut rt), list(&mut rt), list(&mut rt));
+        rt.interned.insert("test:static".into(), opal_heard);
+        // Ruby listens on the bus its container gives, as a library does for the mods that use it.
+        let ruby = mod_container(&mut rt, "ruby");
+        let bus = call(
+            &mut rt,
+            "net/neoforged/fml/ModContainer.getEventBus.()Lnet/neoforged/bus/api/IEventBus;",
+            &[ruby],
+        )
+        .unwrap();
+        let class = rt.class_literal(CONFIG_EVENT);
+        for (id, seen) in [(2, ruby_heard), (4, ruby_active)] {
+            let listener = rt.lambda_id("java/util/function/Consumer", id, vec![seen]);
+            crate::api::call(&mut rt, ADD, &[bus, class, listener]);
+        }
+        // Opal with its subscriber class, as generated code subscribes it.
+        rt.subscribers.insert(
+            "t/OpalEvents",
+            vec![(CONFIG_EVENT, "t/OpalEvents.onConfig", true, 2)],
+        );
+        subscribe_class(&mut rt, "t/OpalEvents", "opal");
+        let opal = mod_container(&mut rt, "opal");
+        let common = crate::api::api_enum(
+            &mut rt,
+            "net/neoforged/fml/config/ModConfig$Type",
+            "COMMON",
+            0,
+        );
+        let register = "net/neoforged/fml/ModContainer.registerConfig.(Lnet/neoforged/fml/config/ModConfig$Type;Lnet/neoforged/fml/config/IConfigSpec;)V";
+        for container in [ruby, opal] {
+            let spec = rt.new_object("net/neoforged/neoforge/common/ModConfigSpec");
+            call(&mut rt, register, &[container, common, spec]);
+        }
+        fire_registrations(&mut rt);
+        let owners = |rt: &mut Rt, heard: V| -> Vec<String> {
+            let events = list_mut(rt, heard).clone();
+            events
+                .into_iter()
+                .map(|e| {
+                    let config = call(rt, "net/neoforged/fml/event/config/ModConfigEvent.getConfig.()Lnet/neoforged/fml/config/ModConfig;", &[e]).unwrap();
+                    let id = call(rt, "net/neoforged/fml/config/ModConfig.getModId.()Ljava/lang/String;", &[config]).unwrap();
+                    rt.str_of(id).unwrap_or("").to_owned()
+                })
+                .collect()
+        };
+        assert_eq!(owners(&mut rt, ruby_heard), ["ruby"]);
+        assert_eq!(owners(&mut rt, opal_heard), ["opal"]);
+        let active: Vec<String> = list_mut(&mut rt, ruby_active)
+            .clone()
+            .into_iter()
+            .map(|id| rt.str_of(id).unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(active, ["ruby"]);
+        // Once it has heard, no mod is the active one: the engine's first stands in.
+        let after = call(&mut rt, ACTIVE, &[V::NULL]).unwrap();
+        assert_eq!(after, ruby);
+    }
+
+    /// A mod's holder class that extends `Holder.Reference` (Puzzles Lib's `LazyHolder`:
+    /// `super(Type.STAND_ALONE, null, key, null)`) answers with the key its constructor took, as
+    /// vanilla's `key()` and `unwrapKey()` do.
+    #[test]
+    fn a_mods_own_reference_holder_answers_with_the_key_it_was_made_with() {
+        let mut rt = Rt::new();
+        rt.supers
+            .insert("t/LazyHolder", "net/minecraft/core/Holder$Reference");
+        let registry = rt.string("minecraft:block");
+        let location = rt.string("t:lamp");
+        let key = crate::api::call(
+            &mut rt,
+            "net/minecraft/resources/ResourceKey.create.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;",
+            &[registry, location],
+        );
+        let holder = rt.new_object("t/LazyHolder");
+        let init = "net/minecraft/core/Holder$Reference.<init>.(Lnet/minecraft/core/Holder$Reference$Type;Lnet/minecraft/core/HolderOwner;Lnet/minecraft/resources/ResourceKey;Ljava/lang/Object;)V";
+        crate::api::call(&mut rt, init, &[holder, V::NULL, V::NULL, key, V::NULL]);
+        let unwrapped = crate::api::call(
+            &mut rt,
+            "net/minecraft/core/Holder.unwrapKey.()Ljava/util/Optional;",
+            &[holder],
+        );
+        let got = crate::api::call(
+            &mut rt,
+            "java/util/Optional.orElseThrow.()Ljava/lang/Object;",
+            &[unwrapped],
+        );
+        assert!(rt.thrown.is_none());
+        let at = crate::api::call(
+            &mut rt,
+            "net/minecraft/resources/ResourceKey.location.()Lnet/minecraft/resources/ResourceLocation;",
+            &[got],
+        );
+        assert_eq!(rt.str_of(at), Some("t:lamp"));
+        let same = crate::api::call(
+            &mut rt,
+            "net/minecraft/core/Holder$Reference.key.()Lnet/minecraft/resources/ResourceKey;",
+            &[holder],
+        );
+        assert_eq!(rt.str_of(same), rt.str_of(key));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create's `ContraptionType` makes its holder from the registry before it is registered

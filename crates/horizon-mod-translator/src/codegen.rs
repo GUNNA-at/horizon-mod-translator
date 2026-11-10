@@ -405,6 +405,9 @@ pub struct Program<'a> {
     /// The mods built on it translated with it (its addons), in loading order: FML constructs a
     /// mod after the mods it needs, so theirs come after its own.
     pub addons: Vec<String>,
+    /// The mods' ids in the order FML loads them ([`crate::load_order`]): the order their classes
+    /// are constructed in. Empty: the mod, then its addons as given.
+    pub load_order: Vec<String>,
     /// Each mod's id, version and display name from its jar ([`crate::mod_metadata`]): what its
     /// `IModInfo` answers.
     pub metadata: Vec<(String, String, String)>,
@@ -698,6 +701,7 @@ impl<'a> Program<'a> {
             registries: BTreeSet::new(),
             mod_id: None,
             addons: Vec::new(),
+            load_order: Vec::new(),
             metadata: Vec::new(),
             scan_files: Vec::new(),
             long_block: (LONG_BLOCK, BLOCK_PIECE),
@@ -831,9 +835,21 @@ impl<'a> Program<'a> {
     /// the mod bus), in FML's order (a mod after the ones it needs): mods bundled in the jar first,
     /// then the jar's own mod (`mod_id`), then its addons translated with it.
     fn mod_mains(&self) -> Vec<(&'a ClassFile, &'a crate::class::Method)> {
+        // The sides a `@Mod` class is for (`dist`): both unless it names them.
+        let sides = |c: &ClassFile| {
+            c.annotation_of(MOD)
+                .and_then(|a| a.value("dist"))
+                .filter(|d| !d.is_empty())
+                .map(|d| d.split(',').map(str::to_owned).collect::<Vec<_>>())
+        };
         let mut found: Vec<(&'a ClassFile, &'a crate::class::Method)> = Vec::new();
         for c in self.classes.values() {
             if c.annotation_of(MOD).is_none() {
+                continue;
+            }
+            // FML constructs a class only on a side it is for: the game here is a client, so a
+            // dedicated server's entry class (AE2's `AppEngServer`) is not constructed.
+            if sides(c).is_some_and(|s| !s.iter().any(|d| d == "CLIENT")) {
                 continue;
             }
             let ctor = c
@@ -847,13 +863,21 @@ impl<'a> Program<'a> {
         }
         let rank = |c: &ClassFile| {
             let id = c.annotation_of(MOD).and_then(|a| a.value("value"));
-            if id.is_some() && id == self.mod_id.as_deref() {
+            if !self.load_order.is_empty() {
+                // FML's order of the mods, those it does not list first.
+                self.load_order
+                    .iter()
+                    .position(|m| Some(m.as_str()) == id)
+                    .map_or(0, |i| i + 1)
+            } else if id.is_some() && id == self.mod_id.as_deref() {
                 1
             } else {
                 self.addons.iter().position(|a| Some(a.as_str()) == id).map_or(0, |i| i + 2)
             }
         };
-        found.sort_by_key(|(c, _)| (rank(c), c.name.clone()));
+        // Of one mod's classes, the one for both sides before the one for this side only, as FML
+        // sorts a mod's entry classes.
+        found.sort_by_key(|(c, _)| (rank(c), sides(c).is_some(), c.name.clone()));
         found
     }
 
@@ -1238,9 +1262,50 @@ impl<'a> Program<'a> {
                 let _ = writeln!(out, "    {}", self.ensure(&c.name).replace("if rt.thrown.is_some() { return V::Void; }", &format!("rt.report_thrown({:?});", c.name)));
             }
         }
+        if !mains.is_empty() {
+            out.push_str("    horizon_compat::neo::constructed(rt);\n");
+        }
         for c in classes {
-            if EVENT_BUS_SUBSCRIBER.iter().any(|t| c.annotation_of(t).is_some()) {
-                let _ = writeln!(out, "    rt.subscribe_class({:?});", c.name);
+            let Some(a) = EVENT_BUS_SUBSCRIBER.iter().find_map(|t| c.annotation_of(t)) else {
+                continue;
+            };
+            // FML subscribes a class on the sides it is for (`value`, both unless it names them):
+            // a dedicated server's is left out of this client.
+            if a.value("value")
+                .is_some_and(|sides| !sides.is_empty() && !sides.split(',').any(|d| d == "CLIENT"))
+            {
+                continue;
+            }
+            // The mod whose bus FML subscribes it to: the one it names, the one its class is the
+            // main class of, else its jar's.
+            let named = a
+                .value("modid")
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned);
+            let own = || {
+                c.annotation_of(MOD)
+                    .and_then(|a| a.value("value"))
+                    .map(str::to_owned)
+            };
+            let jar = || match self
+                .scan_files
+                .iter()
+                .find(|(_, names)| names.contains(&c.name))
+            {
+                Some((jar_ids, _)) => jar_ids.first().cloned(),
+                None => ids.first().cloned(),
+            };
+            match named.or_else(own).or_else(jar) {
+                Some(id) => {
+                    let _ = writeln!(
+                        out,
+                        "    horizon_compat::neo::subscribe_class(rt, {:?}, {id:?});",
+                        c.name
+                    );
+                }
+                None => {
+                    let _ = writeln!(out, "    rt.subscribe_class({:?});", c.name);
+                }
             }
         }
         if !mains.is_empty() {
@@ -2964,6 +3029,129 @@ mod invoker_tests {
             );
         }
         assert!(p.unsupported.is_empty(), "{:?}", p.unsupported);
+    }
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use crate::class::ClassFile;
+    use std::process::Command;
+
+    /// FML's loading, as `start` does it: the mods' classes are constructed in the order the mods
+    /// load in, a mod's class for both sides before its client's, and a dedicated server's entry
+    /// class not at all; each `@EventBusSubscriber` class is subscribed for the mod it names (else
+    /// its jar's), unless it is for a dedicated server only.
+    #[test]
+    fn mods_are_constructed_in_loading_order_on_the_clients_side() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("horizon-loading-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = [
+            (
+                "net/neoforged/api/distmarker/Dist.java",
+                "package net.neoforged.api.distmarker; public enum Dist { CLIENT, DEDICATED_SERVER }",
+            ),
+            (
+                "net/neoforged/fml/common/Mod.java",
+                "package net.neoforged.fml.common; import java.lang.annotation.*; import net.neoforged.api.distmarker.Dist; @Retention(RetentionPolicy.RUNTIME) public @interface Mod { String value(); Dist[] dist() default {Dist.CLIENT, Dist.DEDICATED_SERVER}; }",
+            ),
+            (
+                "net/neoforged/fml/common/EventBusSubscriber.java",
+                "package net.neoforged.fml.common; import java.lang.annotation.*; import net.neoforged.api.distmarker.Dist; @Retention(RetentionPolicy.RUNTIME) public @interface EventBusSubscriber { Dist[] value() default {Dist.CLIENT, Dist.DEDICATED_SERVER}; String modid() default \"\"; }",
+            ),
+            (
+                "t/Addon.java",
+                "package t; @net.neoforged.fml.common.Mod(\"addon\") public class Addon { public Addon() {} }",
+            ),
+            (
+                "t/Base.java",
+                "package t; @net.neoforged.fml.common.Mod(\"base\") public class Base { public Base() {} }",
+            ),
+            (
+                "t/AClient.java",
+                "package t; @net.neoforged.fml.common.Mod(value = \"base\", dist = net.neoforged.api.distmarker.Dist.CLIENT) public class AClient { public AClient() {} }",
+            ),
+            (
+                "t/BaseServer.java",
+                "package t; @net.neoforged.fml.common.Mod(value = \"base\", dist = net.neoforged.api.distmarker.Dist.DEDICATED_SERVER) public class BaseServer { public BaseServer() {} }",
+            ),
+            (
+                "t/Events.java",
+                "package t; @net.neoforged.fml.common.EventBusSubscriber(modid = \"addon\") public class Events {}",
+            ),
+            (
+                "t/BaseEvents.java",
+                "package t; @net.neoforged.fml.common.EventBusSubscriber public class BaseEvents {}",
+            ),
+            (
+                "t/ServerEvents.java",
+                "package t; @net.neoforged.fml.common.EventBusSubscriber(net.neoforged.api.distmarker.Dist.DEDICATED_SERVER) public class ServerEvents {}",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let names = [
+            "t/Addon",
+            "t/Base",
+            "t/AClient",
+            "t/BaseServer",
+            "t/Events",
+            "t/BaseEvents",
+            "t/ServerEvents",
+        ];
+        let classes: Vec<ClassFile> = names
+            .iter()
+            .map(|c| {
+                ClassFile::parse(&std::fs::read(root.join(format!("{c}.class"))).unwrap()).unwrap()
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        let mut p = super::Program::new(&classes);
+        p.mod_id = Some("addon".to_owned());
+        p.load_order = vec!["base".to_owned(), "addon".to_owned()];
+        p.scan_files = vec![(
+            vec!["base".to_owned()],
+            names.iter().map(|n| (*n).to_owned()).collect(),
+        )];
+        let module = p.emit();
+        let start = &module[module
+            .find("pub fn start(rt: &mut Rt)")
+            .expect("start is written")..];
+        let constructed: Vec<&str> = start
+            .match_indices("\"the constructor of ")
+            .map(|(at, m)| start[at + m.len()..].split('"').next().unwrap())
+            .collect();
+        assert_eq!(constructed, ["t/Base", "t/AClient", "t/Addon"]);
+        let subscribed: Vec<&str> = start
+            .lines()
+            .filter_map(|l| {
+                l.trim()
+                    .strip_prefix("horizon_compat::neo::subscribe_class(rt, ")
+            })
+            .map(|l| l.trim_end_matches(");"))
+            .collect();
+        assert_eq!(
+            subscribed,
+            ["\"t/BaseEvents\", \"base\"", "\"t/Events\", \"addon\""]
+        );
+        assert!(
+            !start.contains("ServerEvents"),
+            "a dedicated server's subscriber is subscribed"
+        );
     }
 }
 

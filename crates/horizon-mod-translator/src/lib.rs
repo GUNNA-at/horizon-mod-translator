@@ -219,8 +219,11 @@ pub const LIBRARY_CODE: &[&str] = &[
     "org/apache/commons/lang3/math/Fraction",
 ];
 
-/// Whether a class of the game's libraries is code to translate as a mod's library is
-/// ([`LIBRARY_CODE`]).
+/// Whether a class of the game's libraries is code to translate as a mod's library is: one of
+/// [`LIBRARY_CODE`], or any class of JOML's but its float matrices of 3 and 4 (with their stacks
+/// and read-only interfaces), which the runtime keeps as arrays of its own for drawing. A JOML
+/// vector or quaternion is its fields, here as in JOML, so its own code reads what the runtime
+/// made and the runtime what its code made; 734 of its methods had no answer.
 pub fn library_code(class: &str) -> bool {
     LIBRARY_CODE.iter().any(|p| {
         class
@@ -1015,6 +1018,107 @@ fn zip_mod_metadata<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> Ve
         }
     }
     out.retain(|m| !m.0.is_empty());
+    out
+}
+
+/// One mod file as FML's sorter sees it: the ids of the mods it declares, and the orders they ask
+/// for against other mods (`[[dependencies.<id>]]` with `ordering`): the other mod's id, and
+/// whether this file loads after it (`"AFTER"`) or before it (`"BEFORE"`; `"NONE"`, the usual
+/// one, asks for none and is left out).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ModFile {
+    pub ids: Vec<String>,
+    pub orders: Vec<(String, bool)>,
+}
+
+/// [`ModFile`] of a jar, and of each mod jar it bundles for jar-in-jar ([`nested_mods`]) after it.
+pub fn mod_files(jar: &Path) -> Vec<ModFile> {
+    let Ok(f) = std::fs::File::open(jar) else {
+        return Vec::new();
+    };
+    let Ok(mut zip) = zip::ZipArchive::new(f) else {
+        return Vec::new();
+    };
+    let mut out = vec![zip_mod_file(&mut zip)];
+    for (_, bytes) in nested_mods(jar) {
+        if let Ok(mut z) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
+            out.push(zip_mod_file(&mut z));
+        }
+    }
+    out
+}
+
+fn zip_mod_file<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> ModFile {
+    let mut file = ModFile {
+        ids: zip_mod_metadata(zip).into_iter().map(|m| m.0).collect(),
+        orders: Vec::new(),
+    };
+    let Some(text) = zip_mods_toml(zip) else {
+        return file;
+    };
+    // A dependency table's keys, until the next table: the mod it names and the order asked.
+    let mut dependency: Option<(String, String)> = None;
+    let close = |d: &mut Option<(String, String)>, orders: &mut Vec<(String, bool)>| {
+        if let Some((id, order)) = d.take() {
+            match order.to_ascii_uppercase().as_str() {
+                "AFTER" if !id.is_empty() => orders.push((id, true)),
+                "BEFORE" if !id.is_empty() => orders.push((id, false)),
+                _ => {}
+            }
+        }
+    };
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(header) = bundle::toml_header(line) {
+            close(&mut dependency, &mut file.orders);
+            if header.starts_with("[[dependencies.") {
+                dependency = Some(Default::default());
+            }
+            continue;
+        }
+        let (Some((k, v)), Some(d)) = (line.split_once('='), dependency.as_mut()) else {
+            continue;
+        };
+        match k.trim() {
+            "modId" => d.0 = bundle::toml_string(v),
+            "ordering" => d.1 = bundle::toml_string(v),
+            _ => {}
+        }
+    }
+    close(&mut dependency, &mut file.orders);
+    file
+}
+
+/// The order FML loads the mods of `files` in (`ModSorter`): every file after those it asks to
+/// load after and before those it asks to load before, and otherwise in the order given, the
+/// earliest that may go next going next (its sort takes the first free file each time). Orders
+/// against mods that are not there, or of the same file, ask nothing; files whose orders go in a
+/// circle (FML refuses to load those) keep the order given. A file's mods stay together, in the
+/// order it declares them.
+pub fn load_order(files: &[ModFile]) -> Vec<String> {
+    let of_mod = |id: &str| files.iter().position(|f| f.ids.iter().any(|i| i == id));
+    // For each file, those that must be out before it.
+    let mut before: Vec<Vec<usize>> = vec![Vec::new(); files.len()];
+    for (i, f) in files.iter().enumerate() {
+        for (other, after) in &f.orders {
+            match of_mod(other) {
+                Some(o) if o != i && *after => before[i].push(o),
+                Some(o) if o != i => before[o].push(i),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let mut done = vec![false; files.len()];
+    for _ in 0..files.len() {
+        let free = (0..files.len()).find(|&i| !done[i] && before[i].iter().all(|&b| done[b]));
+        // A circle: the first left goes next.
+        let Some(next) = free.or_else(|| done.iter().position(|d| !d)) else {
+            break;
+        };
+        done[next] = true;
+        out.extend(files[next].ids.iter().cloned());
+    }
     out
 }
 
@@ -2319,6 +2423,79 @@ mod mixin_census_tests {
             ["dev/a/Aeronautics", "dev/o/Offroad", "dev/w/Wheels"]
         );
         assert_eq!(ids, ["aeronautics", "offroad", "wheels"]);
+    }
+
+    /// FML's sorter (`ModSorter`, a topological sort that takes the earliest free file each time):
+    /// a mod loads after those it asks to load after and before those it asks to load before, and
+    /// keeps its place otherwise. An order against a mod that is not there, against the file's own
+    /// other mod, or `"NONE"`, asks nothing; a file's mods stay together.
+    #[test]
+    fn mods_load_after_those_they_ask_to_and_keep_their_place_otherwise() {
+        fn jar(toml: &str) -> std::path::PathBuf {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            zip.start_file(
+                "META-INF/neoforge.mods.toml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+            std::io::Write::write_all(&mut zip, toml.as_bytes()).unwrap();
+            let path =
+                std::env::temp_dir().join(format!("hz-order-{}-{n}.jar", std::process::id()));
+            std::fs::write(&path, zip.finish().unwrap().into_inner()).unwrap();
+            path
+        }
+        let jars = [
+            // Asks to load after a mod given later, and (asking nothing) names another with no order.
+            jar(
+                "[[mods]]\nmodId = \"addon\"\n[[dependencies.addon]]\nmodId = \"base\"\nordering = \"AFTER\"\n[[dependencies.addon]]\nmodId = \"late\"\nordering = \"NONE\"\n",
+            ),
+            jar("[[mods]]\nmodId = \"late\"\n"),
+            // Asks to load before one given earlier; the mod it would load after is not there.
+            jar(
+                "[[mods]]\nmodId = \"base\"\n[[dependencies.base]]\nmodId = \"late\"\nordering = 'BEFORE'\n[[dependencies.base]]\nmodId = \"absent\"\nordering = \"AFTER\"\n",
+            ),
+            // Two mods of one file, the second after the first: nothing to sort.
+            jar(
+                "[[mods]]\nmodId = \"pair\"\n[[mods]]\nmodId = \"twin\"\n[[dependencies.twin]]\nmodId = \"pair\"\nordering = \"AFTER\"\n",
+            ),
+        ];
+        let files: Vec<ModFile> = jars.iter().flat_map(|j| mod_files(j)).collect();
+        for j in &jars {
+            std::fs::remove_file(j).ok();
+        }
+        assert_eq!(
+            files[0],
+            ModFile {
+                ids: vec!["addon".into()],
+                orders: vec![("base".into(), true)]
+            }
+        );
+        assert_eq!(
+            files[2].orders,
+            [("late".to_owned(), false), ("absent".to_owned(), true)]
+        );
+        assert_eq!(
+            load_order(&files),
+            ["base", "addon", "late", "pair", "twin"]
+        );
+        // Two that each ask to load after the other (FML refuses those) keep the order given.
+        let circle = [
+            ModFile {
+                ids: vec!["a".into()],
+                orders: vec![("b".into(), true)],
+            },
+            ModFile {
+                ids: vec!["b".into()],
+                orders: vec![("a".into(), true)],
+            },
+            ModFile {
+                ids: vec!["c".into()],
+                orders: Vec::new(),
+            },
+        ];
+        assert_eq!(load_order(&circle), ["c", "a", "b"]);
     }
 
     #[test]

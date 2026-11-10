@@ -9905,6 +9905,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - `Dist` is listed as an enum (its jar, of the side markers, was not among those read for the game's
     enums; it is now): three mods still ended in `MatchException`.
   - Tests: 760 compat, 15 compat-core, 28 translator; the differential test.
+- [x] 2026-11-10 Part 155: loading as FML does it. The fourth launch's largest group of errors was 367
+  of one kind, `Cannot get config value before config is loaded`, and they were the runtime's doing.
+  - A config's events (`ModConfigEvent.Loading`, `Reloading`, `Unloading`) go to the bus of the mod that
+    registered the config and to no other, as `ModConfig.setConfig` hands them to the config's container.
+    They went to every mod's listener: with 365 mods each `onLoad` ran for every other mod's config and
+    read values of its own that had not loaded. Each mod now has its own bus object (the one its
+    constructor takes, `ModContainer.getEventBus()`, Kotlin for Forge's `MOD_BUS`); a listener is its
+    bus's mod's, or the mod's that was loading when it was added, and an `@EventBusSubscriber` class is
+    subscribed for the mod it names (else its `@Mod` class's, else its jar's). A listener nothing says the
+    mod of still hears every config. While a listener hears, its mod is the active one
+    (`ModLoadingContext.getActiveContainer`), and none is once the constructors are done; it had stayed
+    the last mod constructed for the rest of the game.
+  - The mods are constructed in FML's order (`ModSorter`): each after the mods its `mods.toml` asks to
+    load after and before those it asks to load before, in the order given otherwise (the sort takes the
+    earliest free mod each time). 230 of the pack's 1,098 declared dependencies ask for `AFTER` and 17 for
+    `BEFORE`; sorted by file name, as they were given, the pack's jars break 79 of them (Ars Nouveau's
+    addons before it, AE2's before AE2, the mods built on Architectury before it).
+  - `@Mod(dist = ...)`: a class is constructed only on a side it is for, a mod's class for both sides
+    before its client's. AE2's `AppEngServer`, a dedicated server's entry, was constructed after
+    `AppEngClient` and threw. An `@EventBusSubscriber` class for a dedicated server only is not subscribed.
+    The `Dist` a constructor takes is the client's, as `FMLEnvironment.dist` already was (it was the
+    server's: such a mod skipped its client setup).
+  - A mod's holder class that extends `Holder.Reference` (Puzzles Lib's `LazyHolder`) keeps the key its
+    constructor took: `unwrapKey().orElseThrow()` threw for Easy Magic. `System.getProperty("joml.nounsafe")`
+    is `true`: there is no `Unsafe` here, and JOML has a switch for that.
+  - Building: the unoptimised build (every code crate at `opt-level = 0`: 565 crates in 5 minutes, where
+    the optimised one takes 25) cannot be one executable. It is 4.3 to 4.5 GB: Apple's linker gives up
+    past 16 branch-island clusters (about 2 GB of code), and rust-lld links it in 13 s but macOS does not
+    start a Mach-O file past 4 GB. The optimised one is 2.07 GB and was 1.8 GB into the 2 GB between its
+    start and the region the system maps its own libraries into; it is now linked by rust-lld above that
+    region (`-pagezero_size 0x1000000000`). A fast build needs the mods' code in dynamic libraries.
+  - Tests: 762 compat, 15 compat-core, 30 translator; the differential test.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

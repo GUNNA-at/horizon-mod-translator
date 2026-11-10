@@ -2176,13 +2176,16 @@ fn event_supers(rt: &mut Rt) {
     }
 }
 
-/// A config's event (`Loading`, `Reloading`, `Unloading`) to the mod bus, heard by a listener for
-/// it or for `ModConfigEvent` (the MDK's `Config.onLoad` copies the values into its fields there).
+/// A config's event (`Loading`, `Reloading`, `Unloading`) to its mod's bus, heard by that mod's
+/// listener for it or for `ModConfigEvent` (the MDK's `Config.onLoad` copies the values into its
+/// fields there). No other mod hears it (`ModConfig.setConfig` hands it to the config's container):
+/// theirs would read values of their own that have not loaded.
 fn post_event(rt: &mut Rt, class: &'static str, config: V) {
     event_supers(rt);
     let ev = rt.new_object(class);
     rt.put_field(ev, "$config", config);
-    crate::neo::post(rt, class, ev);
+    let owner = text(rt, field(rt, config, "$modId"));
+    crate::neo::post_as(rt, class, ev, owner.as_deref());
 }
 
 fn loaded_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {

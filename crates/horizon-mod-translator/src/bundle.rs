@@ -5682,6 +5682,12 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     let mut program = Program::new(classes);
     program.mod_id = Some(id.clone());
     program.addons = members[1..].iter().map(|(_, n)| n.clone()).collect();
+    // The order the mods load in: as given (the mod, then those built on it), the mods their jars
+    // bundle before them all, and each after the mods it asks to load after.
+    let files: Vec<Vec<crate::ModFile>> = jars.iter().map(|j| crate::mod_files(j)).collect();
+    let nested = files.iter().flat_map(|f| f.iter().skip(1));
+    let own = files.iter().filter_map(|f| f.first());
+    program.load_order = crate::load_order(&nested.chain(own).cloned().collect::<Vec<_>>());
     program.services = crate::services_of(jars)?;
     // The mods FML lists: the jars', and those they bundle for jar-in-jar (Flywheel, Ponder).
     program.metadata = jars.iter().flat_map(|j| crate::mod_metadata(j).into_iter().chain(crate::nested_mod_metadata(j))).collect();

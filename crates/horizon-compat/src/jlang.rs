@@ -911,6 +911,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 V::Void
             }
+            // No `Unsafe` here: JOML is told so by its own switch, and copies its numbers field
+            // by field.
+            "getProperty" if rt.str_of(a(0)) == Some("joml.nounsafe") => rt.string("true"),
             // No system properties or environment here: a property's default, else null.
             "getProperty" if ks.len() == 2 => a(1),
             "getProperty" | "getenv" => V::NULL,
