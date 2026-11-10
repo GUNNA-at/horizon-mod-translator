@@ -281,21 +281,34 @@ fn tick_player(rt: &mut Rt, player: V, local: bool) {
     );
 }
 
+/// A player is a tick older: `tickCount`, which the game counts for every entity it ticks and
+/// mods read as the field it is (`player.tickCount % 20 == 0`: unanswered it stayed 0, and
+/// what a mod does once a second it did every tick).
+fn aged(rt: &mut Rt, player: V) {
+    let ticks = rt.get_field(player, "tickCount").i();
+    rt.put_field(player, "tickCount", V::I(ticks.wrapping_add(1)));
+}
+
 /// A server player's tick (`Player.tick`), for the acting player.
 pub fn player_tick(rt: &mut Rt) {
+    let player = api_common::acting_player(rt);
+    aged(rt, player);
     if !ticks_heard(rt, false) {
         return;
     }
-    let player = api_common::acting_player(rt);
     tick_player(rt, player, false);
 }
 
 /// The client's own player's tick, among the client level's entities, while there is a player.
 pub fn client_player_tick(rt: &mut Rt) {
-    if rt.host().is_none_or(|h| h.client_player().is_none()) || !ticks_heard(rt, true) {
+    if rt.host().is_none_or(|h| h.client_player().is_none()) {
         return;
     }
     let player = crate::network::local_player(rt);
+    aged(rt, player);
+    if !ticks_heard(rt, true) {
+        return;
+    }
     tick_player(rt, player, true);
 }
 
@@ -919,6 +932,36 @@ mod tests {
                 "level unload client true",
             ]
         );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A player is a tick older at each of its ticks, whether a mod hears them or not; the
+    /// level it is in and what it may do are read as the fields and methods they are.
+    #[test]
+    fn a_player_ages_as_it_ticks() {
+        let mut rt = Rt::new();
+        let mut server = MemoryHost {
+            player_id: Some(7),
+            ..Default::default()
+        };
+        rt.with_host(&mut server, |rt| {
+            for _ in 0..3 {
+                player_tick(rt);
+            }
+            let player = api_common::acting_player(rt);
+            assert_eq!(rt.get_field(player, "tickCount"), V::I(3));
+            let level = crate::api::call(rt, "net/minecraft/world/entity/Entity.level.()Lnet/minecraft/world/level/Level;", &[player]);
+            // The field itself, as an access transformer opens it.
+            assert_eq!(crate::api::call(rt, "net/minecraft/world/entity/Entity.$level.()Lnet/minecraft/world/level/Level;", &[player]), level);
+            assert_eq!(crate::api::call(rt, "net/minecraft/server/level/ServerPlayer.$level.()Lnet/minecraft/world/level/Level;", &[player]), level);
+            // The stacks of its slots, as the lists they are.
+            let inventory = crate::api::call(rt, "net/minecraft/world/entity/player/Player.getInventory.()Lnet/minecraft/world/entity/player/Inventory;", &[player]);
+            for (field, slots) in [("$items", 36), ("$armor", 4), ("$offhand", 1)] {
+                let key = rt.static_key(&format!("net/minecraft/world/entity/player/Inventory.{field}.()Lnet/minecraft/core/NonNullList;"));
+                let list = crate::api::call(rt, key, &[inventory]);
+                assert_eq!(crate::api::call(rt, "net/minecraft/core/NonNullList.size.()I", &[list]), V::I(slots), "{field}");
+            }
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }

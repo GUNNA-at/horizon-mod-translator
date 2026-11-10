@@ -317,6 +317,12 @@ fn is_constructor(key: &str) -> bool {
             .is_some_and(|at| key[at..].starts_with("<init>.("))
 }
 
+thread_local! {
+    /// How many calls are being made on another's behalf, to learn whether anything answers
+    /// them ([`call_nested`]'s field through its getter): their misses are theirs alone.
+    static PROBING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     let since = crate::misses();
     let r = call_exact(rt, key, args);
@@ -350,6 +356,39 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         if held != V::Void && this.r() != 0 {
             uncount(rt, key);
             return held;
+        }
+    }
+    // A field of the game's object read as the field it is, which nothing keeps under its own
+    // name: what the object's method of the field's name answers, where it has one that
+    // returns the field's type (`level` and `level()` of an entity, `onGround` and
+    // `onGround()`), or its getter (`server` and `getServer()`; `is...` for a flag).
+    if let Some((field, returned)) = rest.strip_prefix('$').and_then(|r| r.split_once(".()"))
+        && args.first().is_some_and(|v| v.r() != 0)
+        && !field.is_empty()
+    {
+        let mut titled = field.to_owned();
+        titled[..1].make_ascii_uppercase();
+        let getters = [
+            field.to_owned(),
+            format!("get{titled}"),
+            if returned == "Z" {
+                format!("is{titled}")
+            } else {
+                String::new()
+            },
+        ];
+        for getter in getters.iter().filter(|g| !g.is_empty()) {
+            let asked = rt.static_key(&format!("{owner}.{getter}.(){returned}"));
+            let seen = rt.unmapped.get(asked).copied().unwrap_or(0);
+            // (Asked on the field's behalf: a miss of it is not told of, nor counted.)
+            PROBING.with(|p| p.set(p.get() + 1));
+            let r2 = call_nested(rt, asked, args);
+            PROBING.with(|p| p.set(p.get() - 1));
+            if rt.unmapped.get(asked).copied().unwrap_or(0) == seen {
+                uncount(rt, key);
+                return r2;
+            }
+            uncount(rt, asked);
         }
     }
     // An enum of the game's no table here lists, by the constants the translator carried for it:
@@ -412,6 +451,9 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         uncount(rt, key);
         // (From the runtime's own code into code as the mods' is: an entry.)
         return rt.entered(|rt| f(rt, args), |r| *r);
+    }
+    if PROBING.with(|p| p.get()) > 0 {
+        return r;
     }
     trace_unmapped(rt, key, args);
     if runaway(rt, key) {

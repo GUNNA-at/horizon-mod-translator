@@ -3462,9 +3462,24 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                         | "isLocalPlayer"
                         | "mayBuild"
                         | "$clientLevel"
+                        | "$level"
+                        | "hasPermissions"
                 ) =>
         {
             match n {
+                // The level the game gave the player, of 0 to 4 (an operator's): a server
+                // player's by its id, the client's own as the server last told it.
+                "hasPermissions" => {
+                    let level = rt.host().and_then(|h| {
+                        crate::network::player_uuid(rt, a(0))
+                            .and_then(|uuid| h.player_permission(uuid))
+                            .or_else(|| h.client_player().map(|(_, level)| level))
+                    });
+                    match level {
+                        Some(level) => V::I(i32::from(i32::from(level) >= a(1).i())),
+                        None => return None,
+                    }
+                }
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),
                 // `Player.isSecondaryUseActive` is its shift key; `hasInfiniteMaterials`, creative's
@@ -3489,8 +3504,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "$clientLevel" => crate::glue::level(rt),
                 // A server player's level is the hooks' one level (what mods compare and key their
                 // data by), but on a client's runtime, where that one is the client's.
-                "level" | "getCommandSenderWorld" | "serverLevel" if rt.class_of(a(0)) == LOCAL_PLAYER || !crate::neo::is_client(rt) => crate::glue::level(rt),
-                "level" | "getCommandSenderWorld" | "serverLevel" => rt.intern("compat:server-level".into(), |rt| {
+                "level" | "getCommandSenderWorld" | "serverLevel" | "$level" if rt.class_of(a(0)) == LOCAL_PLAYER || !crate::neo::is_client(rt) => crate::glue::level(rt),
+                "level" | "getCommandSenderWorld" | "serverLevel" | "$level" => rt.intern("compat:server-level".into(), |rt| {
                     let l = rt.new_object("net/minecraft/server/level/ServerLevel");
                     rt.put_field(l, "isClientSide", V::I(0));
                     l

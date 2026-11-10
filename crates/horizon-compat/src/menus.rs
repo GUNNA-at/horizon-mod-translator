@@ -324,6 +324,8 @@ pub fn init_player(rt: &mut Rt, p: V) {
     init_menu(rt, m, V::NULL, 0);
     rt.put_field(p, "inventoryMenu", m);
     rt.put_field(p, "containerMenu", m);
+    // Its age in ticks, counted as it ticks ([`crate::world_events`]).
+    rt.put_field(p, "tickCount", V::I(0));
 }
 
 /// `Player.getInventory()`: one object for each player object, its `selected` the hotbar slot the
@@ -1886,6 +1888,18 @@ fn player_inventory_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Opt
             inventory_get(rt, selected)
         }
         ("getArmor", _) => inventory_get(rt, 36 + a(1).i()),
+        // `items`, `armor` and `offhand` read as the fields they are: the stacks of those slots
+        // as they are now, in a list of its own each time (what is set in the list afterwards
+        // does not reach the player's slots; what is changed in a stack does).
+        ("$items" | "$armor" | "$offhand", _) => {
+            let slots = match name {
+                "$items" => 0..36,
+                "$armor" => 36..40,
+                _ => 40..41,
+            };
+            let stacks: Vec<V> = slots.map(|slot| inventory_get(rt, slot)).collect();
+            crate::jutil::new_list(rt, stacks)
+        }
         ("removeItem", "(II)Lnet/minecraft/world/item/ItemStack;") => {
             let there = inventory_get(rt, a(1).i());
             if is_empty(rt, there) || a(2).i() <= 0 {

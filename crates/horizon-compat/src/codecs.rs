@@ -26,6 +26,8 @@ const SUPPLIER: &str = "java/util/function/Supplier.get.()Ljava/lang/Object;";
 const CONSUMER: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
 const SERIALIZED_NAME: &str = "net/minecraft/util/StringRepresentable.getSerializedName.()Ljava/lang/String;";
 
+const LENIENT_MAP: &str = "net/neoforged/neoforge/common/LenientUnboundedMapCodec";
+
 fn codec(rt: &mut Rt, kind: &'static str, parts: Vec<V>) -> V {
     rt.alloc(kind, Data::Array(parts))
 }
@@ -396,10 +398,19 @@ pub fn decode(rt: &mut Rt, c: V, j: &Json) -> Result<V, String> {
         "map" => {
             let Json::Object(o) = j else { return Err(format!("Not a map: {j}")) };
             let m = rt.alloc("java/util/HashMap", Data::Table(Table::default()));
+            // NeoForge's lenient one (`LenientUnboundedMapCodec`) leaves out an entry whose key
+            // or value it cannot read, where the plain one fails.
+            let lenient = part(2).i() != 0;
             for (k, v) in o {
-                let key = decode(rt, part(0), &Json::String(k.clone()))?;
-                let value = decode(rt, part(1), v)?;
-                jutil::table_put(rt, m, key, value);
+                let read = decode(rt, part(0), &Json::String(k.clone()))
+                    .and_then(|key| Ok((key, decode(rt, part(1), v)?)));
+                match read {
+                    Ok((key, value)) => {
+                        jutil::table_put(rt, m, key, value);
+                    }
+                    Err(_) if lenient => {}
+                    Err(e) => return Err(e),
+                }
             }
             Ok(m)
         }
@@ -1634,6 +1645,7 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
                 | "net/minecraft/util/StringRepresentable"
                 | ENUM_CODEC
                 | "net/neoforged/neoforge/common/util/NeoForgeExtraCodecs"
+                | LENIENT_MAP
                 | "net/minecraft/resources/RegistryOps"
                 | "net/minecraft/resources/RegistryFileCodec"
                 | "net/minecraft/core/RegistryCodecs"
@@ -1752,6 +1764,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             return Some(codec(rt, "compat:codec/list", vec![a(0)]));
         }
         ("com/mojang/serialization/Codec", "unboundedMap") => return Some(codec(rt, "compat:codec/map", vec![a(0), a(1)])),
+        // NeoForge's `new LenientUnboundedMapCodec(keys, values)`: the object becomes that codec,
+        // an unbounded map that leaves out what it cannot read.
+        (LENIENT_MAP, "<init>") => {
+            if let Some(o) = rt.heap.get_mut(a(0).r() as usize) {
+                o.class = "compat:codec/map";
+                o.data = Data::Array(vec![a(1), a(2), V::I(1)]);
+            }
+            return Some(V::Void);
+        }
         ("com/mojang/serialization/Codec", "pair") => return Some(codec(rt, "compat:codec/pair", vec![a(0), a(1)])),
         // `Codec.mapPair(first, second)`: both read the same map, a pair of what they read;
         // `mapEither`, the first of the two that reads it. Map codecs both.
@@ -2376,6 +2397,47 @@ mod tests {
     fn c(rt: &mut Rt, key: &str, args: &[V]) -> V {
         let k = rt.static_key(key);
         api::call(rt, k, args)
+    }
+
+    /// NeoForge's lenient unbounded map leaves out an entry it cannot read, where the plain
+    /// one fails; it writes as any map.
+    #[test]
+    fn a_lenient_map_leaves_out_what_it_cannot_read() {
+        let mut rt = Rt::new();
+        let (string, int) = (
+            st(&mut rt, "com/mojang/serialization/Codec.STRING"),
+            st(&mut rt, "com/mojang/serialization/Codec.INT"),
+        );
+        let plain = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.unboundedMap.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/codecs/UnboundedMapCodec;",
+            &[string, int],
+        );
+        let lenient = rt.new_object("net/neoforged/neoforge/common/LenientUnboundedMapCodec");
+        c(
+            &mut rt,
+            "net/neoforged/neoforge/common/LenientUnboundedMapCodec.<init>.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)V",
+            &[lenient, string, int],
+        );
+        assert!(is_codec(&rt, lenient));
+        let j: Json = serde_json::json!({"a": 1, "b": "x", "c": 3});
+        assert!(decode(&mut rt, plain, &j).is_err());
+        let read = decode(&mut rt, lenient, &j).expect("read");
+        let pairs: Vec<(String, i32)> = jutil::table_pairs(&rt, read)
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    rt.str_of(k).unwrap_or("").to_owned(),
+                    rt.get_field(v, "value").i(),
+                )
+            })
+            .collect();
+        assert_eq!(pairs, [("a".to_owned(), 1), ("c".to_owned(), 3)]);
+        let Ok(Nbt::Compound(written)) = encode(&mut rt, lenient, read) else {
+            panic!("not written")
+        };
+        assert_eq!(written.len(), 2);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     fn st(rt: &mut Rt, key: &str) -> V {

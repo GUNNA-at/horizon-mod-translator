@@ -130,7 +130,10 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     ) || stream_class(owner)
         || reader_class(owner)
         || (matches!(owner, MINECRAFT | SERVER) && name == "getResourceManager")
-        || (owner == SERVER_RESOURCES && name == "getRegistryLookup")
+        || matches!(
+            name,
+            "getRegistryLookup" | "getContext" | "makeConditionalOps"
+        )
         || (owner == EXECUTOR && name == "execute")
         || (matches!(owner, "java/io/Closeable" | "java/lang/AutoCloseable") && name == "close")
 }
@@ -528,6 +531,31 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (SERVER_LISTENERS_EVENT, "getServerResources") => server_resources(rt),
         (SERVER_LISTENERS_EVENT, "getRegistryAccess") | (TAGS_UPDATED_EVENT, "getRegistryAccess") | (SERVER_RESOURCES, "getRegistryLookup") => registry_access(rt),
+        // What NeoForge gives every reload listener (`ContextAwareReloadListener`, which the
+        // game's listener classes extend there): the registries, the context its conditions
+        // are judged in, and the ops that read a file with both. Create Big Cannons' listeners
+        // read their block and munition properties with them.
+        (_, "getRegistryLookup") if desc == "()Lnet/minecraft/core/HolderLookup$Provider;" => {
+            registry_access(rt)
+        }
+        (_, "getContext")
+            if desc == "()Lnet/neoforged/neoforge/common/conditions/ICondition$IContext;" =>
+        {
+            rt.intern("compat:condition-context".into(), |rt| {
+                rt.new_object("net/neoforged/neoforge/common/conditions/ICondition$IContext")
+            })
+        }
+        (_, "makeConditionalOps") if desc.starts_with("()") => {
+            let (access, json) = (
+                registry_access(rt),
+                crate::api::get_static(rt, "com/mojang/serialization/JsonOps.INSTANCE"),
+            );
+            crate::api::call(
+                rt,
+                "net/minecraft/core/HolderLookup$Provider.createSerializationContext.(Lcom/mojang/serialization/DynamicOps;)Lnet/minecraft/resources/RegistryOps;",
+                &[access, json],
+            )
+        }
         // The tags bound (`ReloadableServerResources.updateRegistryTags`): the server's own load,
         // after its listeners; one from a server's packet is a client's.
         (TAGS_UPDATED_EVENT, "getUpdateCause") => {
@@ -1382,6 +1410,43 @@ fn image_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 mod tests {
     use super::*;
     use crate::host::MemoryHost;
+
+    /// A reload listener of a mod's has what NeoForge gives each of them: the registries, and
+    /// a context for its conditions.
+    #[test]
+    fn a_reload_listener_has_the_registries_and_its_context() {
+        let mut rt = Rt::new();
+        rt.supers.insert(
+            "t/Listener",
+            "net/minecraft/server/packs/resources/SimpleJsonResourceReloadListener",
+        );
+        let listener = rt.new_object("t/Listener");
+        let access = crate::api::call(
+            &mut rt,
+            "net/minecraft/server/packs/resources/SimpleJsonResourceReloadListener.getRegistryLookup.()Lnet/minecraft/core/HolderLookup$Provider;",
+            &[listener],
+        );
+        assert_eq!(access, registry_access(&mut rt));
+        // (Written on a listener class that names no class of the game's above it.)
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/lang/Object.getRegistryLookup.()Lnet/minecraft/core/HolderLookup$Provider;",
+                &[listener]
+            ),
+            access
+        );
+        let context = crate::api::call(
+            &mut rt,
+            "java/lang/Object.getContext.()Lnet/neoforged/neoforge/common/conditions/ICondition$IContext;",
+            &[listener],
+        );
+        assert_eq!(
+            rt.class_of(context),
+            "net/neoforged/neoforge/common/conditions/ICondition$IContext"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     fn png_2x1() -> Vec<u8> {
         let mut out = Vec::new();

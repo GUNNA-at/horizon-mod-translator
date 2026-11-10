@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 624] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 623] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1615,7 +1615,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 624] = [
     ("net/neoforged/neoforge/client/model/renderable/CompositeRenderable$Transforms", "i(Lcom/google/common/collect/ImmutableMap;)V=parts|o"),
     ("net/neoforged/neoforge/common/BasicItemListing", "i(Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;Lnet/minecraft/world/item/ItemStack;IIF)V=price,price2,forSale,maxTrades,xp,priceMult|o"),
     ("net/neoforged/neoforge/common/EffectCure", "gname()Ljava/lang/String;=name|i(Ljava/lang/String;)V=name|o"),
-    ("net/neoforged/neoforge/common/LenientUnboundedMapCodec", "i(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)V=keyCodec,elementCodec|gkeyCodec()Lcom/mojang/serialization/Codec;=keyCodec|gelementCodec()Lcom/mojang/serialization/Codec;=elementCodec|e=keyCodec,elementCodec"),
     ("net/neoforged/neoforge/common/brewing/BrewingRecipe", "i(Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/crafting/Ingredient;Lnet/minecraft/world/item/ItemStack;)V=input,ingredient,output|ggetInput()Lnet/minecraft/world/item/crafting/Ingredient;=input|ggetIngredient()Lnet/minecraft/world/item/crafting/Ingredient;=ingredient|ggetOutput()Lnet/minecraft/world/item/ItemStack;=output|o"),
     ("net/neoforged/neoforge/common/conditions/ConditionalOps$ConditionalDecoder", "i(Ljava/lang/String;Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Decoder;)V=conditionalsPropertyKey,conditionsCodec,contextCodec,innerCodec|o"),
     ("net/neoforged/neoforge/common/conditions/ConditionalOps$ConditionalEncoder", "i(Ljava/lang/String;Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Encoder;)V=conditionalsPropertyKey,conditionsCodec,innerCodec|o"),

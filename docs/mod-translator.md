@@ -10784,6 +10784,28 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - The server answers more of itself: the thread it runs on (Immersive Portals logged an
     error at every packet for not being on it), that it runs, its tick rate manager, the
     keys of its levels.
+- [x] 2026-11-10 Part 185: a player ages, and fields read as fields.
+  - A player's `tickCount` stayed 0: the game counts it for every entity it ticks, the
+    runtime counted it for the mods' own entities and for mobs, and mods read it as the
+    public field it is (`player.tickCount % 20 == 0`). Unanswered, what a mod does once a
+    second it did at every tick. A player is a tick older at each of its ticks now, whether
+    a mod hears them or not.
+  - A field of one of the game's objects that the mods read as a field (an access
+    transformer opens it, or it is public) and that nothing keeps under its own name is
+    asked of the object's method of that name, where it has one returning the field's type,
+    or of its getter: `level` of an entity is `level()`, `onGround` `onGround()`, `server`
+    `getServer()`. Launch 19 had `Entity.level` unanswered on players and on a wolf. Such a
+    question is asked quietly: a miss of it is neither traced nor counted against the hook.
+  - A player's permission level (`hasPermissions`), from the game; `Inventory.items`, `armor`
+    and `offhand` as lists of the stacks in those slots now.
+  - NeoForge gives every reload listener the registries, the context of its conditions and
+    the ops that read a file with both (`ContextAwareReloadListener`, which the game's
+    listener classes extend there). Create Big Cannons reads its block armour, hit effects
+    and munition properties with them: unanswered, none loaded, and its first packet to a
+    player failed on a property that was not there.
+  - NeoForge's `LenientUnboundedMapCodec`: an unbounded map that leaves out an entry it
+    cannot read. (It was in the table of the game's plain data classes; a class modelled by
+    hand leaves that table.)
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
