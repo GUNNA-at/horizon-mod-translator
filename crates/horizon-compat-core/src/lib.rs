@@ -216,6 +216,7 @@ pub fn reenter<R>(at: usize, f: impl FnOnce(&mut Rt) -> R) -> Option<R> {
 pub type ParkedBlockEntities = (HashMap<[i32; 3], V>, HashMap<[i32; 3], (String, bool)>);
 
 /// The translated mod's runtime state.
+#[derive(Clone)]
 pub struct Rt {
     pub heap: Vec<Object>,
     pub statics: HashMap<&'static str, V>,
@@ -277,8 +278,10 @@ pub struct Rt {
     /// The mods FML would list (`ModList.isLoaded`): the `@Mod`s this engine carries, the jar's
     /// own and those bundled in it. Set by generated code before the mods are constructed.
     pub mods: Vec<String>,
-    /// Classes whose static initialiser ran.
-    pub initialized: std::collections::HashSet<&'static str>,
+    /// Classes whose static initialiser ran. Asked at every use of a class's statics: hashed
+    /// cheaply.
+    pub initialized:
+        std::collections::HashSet<&'static str, std::hash::BuildHasherDefault<FxHasher>>,
     /// Values Java compares by identity, one object each (see `api_common`).
     pub interned: HashMap<String, V>,
     /// The collection an iterator, key set or map entry came from, for `remove()` and `setValue`.
@@ -395,6 +398,21 @@ impl Default for Rt {
 }
 
 impl Rt {
+    /// A runtime of its own that starts as this one stands: every object, static, listener and
+    /// registration, copied (a reference is a place in the heap, so the copy's references mean the
+    /// copy's objects). What either does from then on the other never sees. A pack's mods are
+    /// loaded once and each thread's runtime starts as a copy of that one, where loading them
+    /// again for each took minutes. Not while a hook runs in this one: the game it is in and the
+    /// exception it may be throwing are not the copy's.
+    pub fn fork(&self) -> Rt {
+        let mut rt = self.clone();
+        rt.host = None;
+        rt.thrown = None;
+        rt.unwinding.clear();
+        (rt.hook_misses, rt.hook_first_miss) = (0, None);
+        rt
+    }
+
     /// A `&'static str` for a key built at runtime, made once per distinct key.
     pub fn static_key(&mut self, key: &str) -> &'static str {
         if let Some(k) = self.keys.get(key) {
@@ -1615,6 +1633,39 @@ mod tests {
         assert_eq!(fcmp(f64::NAN, 1.0, 1), 1);
         assert_eq!(d2i(f64::NAN), 0);
         assert_eq!(d2i(1e20), i32::MAX);
+    }
+
+    /// A copy of a runtime holds what the runtime held, as objects of its own: a static of the
+    /// one still names the same object in the other, and a change in either stays there.
+    #[test]
+    fn a_copy_of_a_runtime_goes_its_own_way() {
+        let mut rt = Rt::new();
+        let machine = rt.new_object("m/Machine");
+        let name = rt.string("press");
+        rt.put_field(machine, "name", name);
+        rt.put_field(machine, "speed", V::I(16));
+        rt.statics.insert("m/Machine.INSTANCE", machine);
+        rt.initialized.insert("m/Machine");
+        rt.throw_new("java/lang/IllegalStateException");
+        let mut copy = rt.fork();
+        assert!(
+            copy.thrown.is_none(),
+            "what the one is throwing is not the copy's to catch"
+        );
+        let theirs = copy.statics["m/Machine.INSTANCE"];
+        assert_eq!(theirs, machine, "a reference is a place in the heap");
+        assert_eq!(copy.str_of(copy.get_field(theirs, "name")), Some("press"));
+        assert!(
+            !copy.initialized.insert("m/Machine"),
+            "the class is initialised there too"
+        );
+        copy.put_field(theirs, "speed", V::I(256));
+        let made = copy.new_object("m/Belt");
+        assert_eq!(rt.get_field(machine, "speed"), V::I(16));
+        assert_eq!(copy.get_field(theirs, "speed"), V::I(256));
+        assert!(rt.heap.len() < copy.heap.len() && copy.class_of(made) == "m/Belt");
+        // An interned string is the same reference in each, and a new one is each one's own.
+        assert_eq!(copy.string("press"), name);
     }
 
     #[test]

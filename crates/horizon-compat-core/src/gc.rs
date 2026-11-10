@@ -116,6 +116,7 @@ impl Rt {
                         refs(v, todo);
                     }
                     refs(&t.comparator, todo);
+                    refs(&t.strategy, todo);
                 }
                 Data::Str(_) | Data::Native(..) | Data::Bytes(..) => {}
             }

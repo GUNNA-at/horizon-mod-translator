@@ -10042,6 +10042,41 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     trailing comma in an object is still an error, as it is there.
   - Checked alone (`modcheck.sh`): the mod is constructed, nothing unmapped.
   - Tests: 778 compat, 15 compat-core, 31 translator; the differential tests.
+- [x] 2026-11-10 Part 160: where a pack's loading spent its time. Launch 9 (the build of Parts
+  155–157) got past every mod's constructor and the registrations, through the models, and was still
+  loading after 900 s. Stack samples of it, named with an unstripped copy of the same link, showed
+  three places.
+  - FramedBlocks' caches of its states (common setup, and again at the models): 94% of the samples in
+    the lookup of a mod's enum property value, which looked through every static of every mod for the
+    constant, at each `BlockState.getValue`. The piece timer stopped it after 90 s each time. A value
+    is now looked for once.
+  - Chisels & Bits' creative tab (150 s): its cache evicts by `Map.remove`, and a removal hashed
+    every key of the map again. Create Submarine's config (most of 140 s): an insertion into a sorted
+    map compared the key with every one before its place, copying both strings each time, then hashed
+    them all again. A table's hash index is now kept by moving the positions behind the entry; a
+    sorted map's place is found by halving; a lookup no longer copies its bucket; strings compare
+    without being copied.
+  - A `TreeMap` or `TreeSet` made with a comparator finds its keys by the comparator alone, as
+    Java's does (one entry for `"Speed"` and `"SPEED"` under `String.CASE_INSENSITIVE_ORDER`, which
+    is now answered, and nothing asked of the keys' `hashCode`). `compareToIgnoreCase` gives Java's
+    number. The natural order of the runtime's own comparable values (an id by path then namespace,
+    a UUID, a path) is their class's `compareTo`, where every such key compared as equal.
+  - Tests: 781 compat (a map and a sorted map through 4000 insertions and removals against a model
+    of them; the comparator's map; Java's numbers for string comparison).
+- [x] 2026-11-10 Part 161: the mods are loaded once. Each thread's runtime, the runtime that answers
+  questions before a game runs, and the world generator's each constructed every mod and fired every
+  loading event for itself: launch 9 was 190 s into its second load on the main thread when it was
+  stopped, with the server thread's and the world generator's still to come.
+  - `Rt::fork`: a runtime of its own that starts as another stands. References are places in the
+    heap, so a copy of the heap is a copy of every object.
+  - The engine loads the mods in one runtime for the process (collected once the loading is done),
+    which also answers the questions asked of the mods' classes and registrations alone. A thread's
+    runtime and the world generator's start as copies of it, drawing their own random numbers.
+  - Measured on Mekanism alone: loaded in 240 ms (103,086 objects after the collection), copied in
+    6 ms for the same thread and 8 ms for another.
+  - The set of initialised classes, asked at every use of a class's statics, hashes with the
+    runtime's cheap hash. The collector follows a custom-hash table's strategy object.
+  - Tests: 16 compat-core (a copy goes its own way), 781 compat, 31 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
