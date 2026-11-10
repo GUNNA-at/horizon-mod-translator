@@ -214,11 +214,19 @@ pub(crate) fn post_as(rt: &mut Rt, class: &str, event: V, only: Option<&str>) {
         // its hearing is one piece of the mod's code, on a clock of its own.
         let before = activate(rt, owner);
         let outer = crate::api::timed_start();
+        // And the calls nothing maps are counted for it alone: one listener that makes a
+        // million (a mod's model for every state of its blocks) left every listener after it
+        // none, in a hook that hears a whole event, and each of those ended at its first.
+        let misses = (
+            std::mem::take(&mut rt.hook_misses),
+            rt.hook_first_miss.take(),
+        );
         let started = profile.then(std::time::Instant::now);
         rt.call_functional(ACCEPT, l, &[event]);
         if let Some(t) = started {
             record(rt, class, l, t.elapsed());
         }
+        (rt.hook_misses, rt.hook_first_miss) = misses;
         crate::api::timed_end(outer);
         activate(rt, before);
         rt.report_thrown(class);
@@ -406,9 +414,55 @@ pub fn profile() -> Vec<(String, String, u32, std::time::Duration)> {
     out
 }
 
+/// What the name of a place in a method the runtime runs itself starts with: a mixin's static
+/// injector into the method listens for the place, as the translator lists it among its class's
+/// subscribers (`hz/inject:<owner>.<method>@<place>`).
+const PLACE: &str = "hz/inject:";
+/// NeoForge's `GameData.postRegisterEvents`: the loop over the registries that posts a
+/// `RegisterEvent` for each.
+const POST_REGISTER_EVENTS: &str =
+    "hz/inject:net/neoforged/neoforge/registries/GameData.postRegisterEvents";
+
+/// Listens with every static handler a mixin injects into a method the runtime runs itself
+/// (once: a class listens only when it does not yet).
+fn listen_for_places(rt: &mut Rt) {
+    if rt.statics.contains_key("compat:places-heard") {
+        return;
+    }
+    rt.statics.insert("compat:places-heard", V::I(1));
+    let mut classes: Vec<&'static str> = rt
+        .subscribers
+        .iter()
+        .filter(|(_, all)| all.iter().any(|s| s.0.starts_with(PLACE)))
+        .map(|(class, _)| *class)
+        .collect();
+    classes.sort_unstable();
+    for class in classes {
+        rt.subscribe_class(class);
+    }
+}
+
+/// Runs the handlers mixins inject at `place` of a method the runtime runs itself, with what
+/// Mixin hands them there: a `CallbackInfo` for an `@Inject` (`with` None), the local for a
+/// `@ModifyVariable` at its store.
+fn at_place(rt: &mut Rt, method: &str, place: &str, with: Option<V>) {
+    let event = format!("{method}@{place}");
+    if !rt.listeners.iter().any(|(heard, _)| *heard == event) {
+        return;
+    }
+    let with = with.unwrap_or_else(|| {
+        let info = rt.new_object(crate::mixin::CALLBACK_INFO);
+        let name = rt.string(method.rsplit('.').next().unwrap_or(method));
+        crate::api::call(rt, "org/spongepowered/asm/mixin/injection/callback/CallbackInfo.<init>.(Ljava/lang/String;Z)V", &[info, name, V::I(0)]);
+        info
+    });
+    post(rt, &event, with);
+}
+
 /// Fires what NeoForge's loading fires once the mods are constructed: `FMLConstructModEvent`
 /// (Dragons Plus makes its content in it), then `RegisterEvent` once per registry, then setup.
 pub fn fire_registrations(rt: &mut Rt) {
+    listen_for_places(rt);
     let ev = rt.new_object(CONSTRUCT);
     post(rt, CONSTRUCT, ev);
     let neoforge = REGISTRIES
@@ -437,11 +491,27 @@ pub fn fire_registrations(rt: &mut Rt) {
         let ev = rt.new_object(REGISTER_EVENT);
         let key = rt.string(&registry);
         rt.put_field(ev, "$registry", key);
+        // NeoForge's loop, as a mixin into it sees it: the event stored in its local, posted to
+        // every mod, and what follows the post (supermartijn642's library fills its mods'
+        // registry fields there, from the event it kept at the store).
+        at_place(rt, POST_REGISTER_EVENTS, "STORE", Some(ev));
+        at_place(
+            rt,
+            POST_REGISTER_EVENTS,
+            "INVOKE:postEventWrapContainerInModOrder:BEFORE",
+            None,
+        );
         post(rt, REGISTER_EVENT, ev);
         // And the entries the mods' `DeferredRegister`s hold for this registry, as each of them
         // registers its own when it hears the event: a registry's are there before the next
         // one fires (an item's supplier finds its block).
         resolve_pending(rt, Some(&registry));
+        at_place(
+            rt,
+            POST_REGISTER_EVENTS,
+            "INVOKE:postEventWrapContainerInModOrder:AFTER",
+            None,
+        );
     }
     resolve(rt);
     // With the registries full, NeoForge gives entity types their attributes
@@ -2856,6 +2926,107 @@ mod tests {
         }
         post_started(&mut rt);
         assert_eq!(list_mut(&mut rt, log)[4..], [two]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Each listener of an event has its own count of the calls nothing maps: one that is
+    /// stopped for a million of them (a loop on a stand-in answer) leaves the next its own, and
+    /// what the hook had counted before the event is kept.
+    #[test]
+    fn a_listener_stuck_on_unmapped_calls_does_not_stop_the_next() {
+        struct Game;
+        impl crate::host::Host for Game {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+        }
+        const EVENT: &str = "net/neoforged/neoforge/client/event/ModelEvent$BakingCompleted";
+        const NOPE: &str = "net/minecraft/Nope.next.()I";
+        /// 1: a listener whose loop has gone round a million times; 2: one that makes one call.
+        fn heard(rt: &mut Rt, id: u32, _args: &[V]) -> Option<V> {
+            if id == 1 {
+                rt.hook_misses = 999_999;
+                rt.hook_first_miss =
+                    std::time::Instant::now().checked_sub(std::time::Duration::from_secs(11));
+            }
+            crate::api::call(rt, NOPE, &[]);
+            let stopped = rt.thrown.is_some();
+            let log = rt.interned["test:log"];
+            list_mut(rt, log).push(V::I(stopped as i32));
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let log = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.interned.insert("test:log".into(), log);
+        for id in [1, 2] {
+            let l = rt.lambda_id("java/util/function/Consumer", id, vec![]);
+            rt.listeners.push((EVENT.to_owned(), l));
+        }
+        let mut game = Game;
+        rt.with_host(&mut game, |rt| {
+            rt.hook_misses = 7;
+            let ev = rt.new_object(EVENT);
+            post(rt, EVENT, ev);
+            assert_eq!(list_mut(rt, log).clone(), [V::I(1), V::I(0)]);
+            assert_eq!(rt.hook_misses, 7);
+        });
+    }
+
+    /// A mixin's static injectors into NeoForge's loop over the registries
+    /// (`GameData.postRegisterEvents`) run where the runtime, which does that loop's work itself,
+    /// passes the places they name: the one at the event's store is given the event every
+    /// listener then hears, the one after the post a `CallbackInfo` once the registry's listeners
+    /// are done (supermartijn642's library fills its mods' registry fields there; without it
+    /// every such mod's blocks, items and menus stayed null).
+    #[test]
+    fn a_mixin_into_the_registry_loop_runs_at_its_places() {
+        const MIXIN: &str = "t/GameDataMixin";
+        const STORE: &str =
+            "hz/inject:net/neoforged/neoforge/registries/GameData.postRegisterEvents@STORE";
+        const AFTER: &str = "hz/inject:net/neoforged/neoforge/registries/GameData.postRegisterEvents@INVOKE:postEventWrapContainerInModOrder:AFTER";
+        /// 1: the handler at the store; 2: the one after the post; 3: a mod's listener.
+        fn heard(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let log = rt.interned["test:log"];
+            list_mut(rt, log).extend([V::I(id as i32), args[1]]);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let log = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.interned.insert("test:log".into(), log);
+        rt.subscribers.insert(
+            MIXIN,
+            vec![
+                (STORE, "t/GameDataMixin.keep", true, 1),
+                (AFTER, "t/GameDataMixin.after", true, 2),
+            ],
+        );
+        let listener = rt.lambda_id("java/util/function/Consumer", 3, vec![]);
+        rt.listeners.push((REGISTER_EVENT.to_owned(), listener));
+        fire_registrations(&mut rt);
+        let heard = list_mut(&mut rt, log).clone();
+        assert!(
+            heard.len() >= 12 && heard.len().is_multiple_of(6),
+            "{}",
+            heard.len()
+        );
+        for registry in heard.chunks(6) {
+            let ids: Vec<i32> = registry.iter().step_by(2).map(|v| v.i()).collect();
+            assert_eq!(ids, [1, 3, 2]);
+            let (stored, posted, info) = (registry[1], registry[3], registry[5]);
+            assert_eq!(
+                stored, posted,
+                "the handler at the store is given the event posted"
+            );
+            assert_eq!(rt.class_of(posted), REGISTER_EVENT);
+            assert_eq!(rt.class_of(info), crate::mixin::CALLBACK_INFO);
+        }
+        // Each registry's own event.
+        assert_ne!(heard[1], heard[7]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

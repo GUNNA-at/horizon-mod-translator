@@ -27,8 +27,63 @@ pub use crate::GAME_DIR;
 pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     matches!(
         owner,
-        PATH | PATHS | FILES | FILE | FILE_TIME | FML_PATHS | FML_CONFIG
+        PATH | PATHS
+            | FILES
+            | FILE
+            | FILE_TIME
+            | FML_PATHS
+            | FML_CONFIG
+            | FILE_SYSTEM
+            | FILE_SYSTEMS
+            | WATCH_SERVICE
+            | WATCH_KEY
+            | WATCHABLE
     ) || (owner == FILE_UTILS && FILE_UTILS_METHODS.contains(&name))
+}
+
+/// Watching a folder for changed files (a config that is read again when it is edited). A
+/// service can be made and folders registered with it, and nothing is ever seen to change:
+/// `poll` has no key, and `take`, which waits for one, ends as a waiting thread ends when it is
+/// interrupted (a thread's body runs where it is started here, so one that waited for an event
+/// would wait in place of the game; four of a pack's mods asked 4 million times in 10 s each
+/// before they were stopped).
+const FILE_SYSTEM: &str = "java/nio/file/FileSystem";
+const FILE_SYSTEMS: &str = "java/nio/file/FileSystems";
+const WATCH_SERVICE: &str = "java/nio/file/WatchService";
+const WATCH_KEY: &str = "java/nio/file/WatchKey";
+const WATCHABLE: &str = "java/nio/file/Watchable";
+
+fn watch_call(rt: &mut Rt, owner: &str, name: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    Some(match (owner, name) {
+        (FILE_SYSTEMS, "getDefault") => {
+            rt.intern("compat:file-system".into(), |rt| rt.new_object(FILE_SYSTEM))
+        }
+        (FILE_SYSTEM, "newWatchService") => rt.new_object(WATCH_SERVICE),
+        (FILE_SYSTEM, "getSeparator") => rt.string("/"),
+        (FILE_SYSTEM, "isOpen") => V::I(1),
+        (WATCH_SERVICE, "take") => throw(
+            rt,
+            "java/lang/InterruptedException",
+            "no file is watched for changes here",
+        ),
+        (WATCH_SERVICE, "poll") => V::NULL,
+        (WATCH_SERVICE, "close") => V::Void,
+        (WATCH_KEY, "pollEvents") => crate::jutil::new_list(rt, Vec::new()),
+        (WATCH_KEY, "reset" | "isValid") => V::I(1),
+        (WATCH_KEY, "cancel") => V::Void,
+        (WATCH_KEY, "watchable") => rt.get_field(a(0), "$watched"),
+        // `path.register(service, kinds...)`: a key for the folder.
+        (PATH | WATCHABLE, "register") => {
+            let key = rt.new_object(WATCH_KEY);
+            rt.put_field(key, "$watched", a(0));
+            key
+        }
+        (PATH, "getFileSystem") => {
+            rt.intern("compat:file-system".into(), |rt| rt.new_object(FILE_SYSTEM))
+        }
+        _ => return None,
+    })
 }
 
 /// commons-io's `FileUtils`: a file's text read and written whole, which a mod keeps its own
@@ -585,6 +640,11 @@ fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             Ok(bytes) => crate::streams::file_input(rt, bytes),
             Err(e) => throw_io(rt, &e, &p),
         },
+        // `newBufferedReader(path[, charset])`: a reader over the file's text as it is now.
+        "newBufferedReader" => match std::fs::read(&disk) {
+            Ok(bytes) => rt.alloc("java/io/BufferedReader", Data::Bytes(bytes, 0)),
+            Err(e) => throw_io(rt, &e, &p),
+        },
         "newOutputStream" => crate::streams::open_output(rt, &p, a(1)),
         // `newBufferedWriter(path[, charset], options...)`: a writer onto the file ([`crate::writers`]).
         "newBufferedWriter" => {
@@ -677,6 +737,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let joined = join_parts(rt, a(0), a(1))?;
             Some(new_path(rt, &joined))
         }
+        PATH if matches!(name, "register" | "getFileSystem") => watch_call(rt, owner, name, args),
+        FILE_SYSTEM | FILE_SYSTEMS | WATCH_SERVICE | WATCH_KEY | WATCHABLE => {
+            watch_call(rt, owner, name, args)
+        }
         PATH => {
             let p = text(rt, a(0))?;
             path_method(rt, name, &p, args)
@@ -763,6 +827,19 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         (FILE, "separatorChar") => Some(V::I('/' as i32)),
         (FILE, "pathSeparator") => Some(rt.string(":")),
         (FILE, "pathSeparatorChar") => Some(V::I(':' as i32)),
+        // The kinds of change a folder is watched for: one object each.
+        (
+            "java/nio/file/StandardWatchEventKinds",
+            "ENTRY_CREATE" | "ENTRY_MODIFY" | "ENTRY_DELETE" | "OVERFLOW",
+        ) => {
+            let name = field.to_owned();
+            Some(rt.intern(format!("compat:watch-kind/{name}"), move |rt| {
+                let kind = rt.new_object("java/nio/file/WatchEvent$Kind");
+                let n = rt.string(&name);
+                rt.put_field(kind, "$name", n);
+                kind
+            }))
+        }
         _ => None,
     }
 }
@@ -827,6 +904,91 @@ mod tests {
         assert_eq!(made(&mut rt, Some("/"), "/etc"), "/etc");
         assert_eq!(made(&mut rt, Some("relative"), "//x//y/"), "relative/x/y");
         assert_eq!(made(&mut rt, None, "/alone"), "/alone");
+    }
+
+    /// A folder can be watched, and nothing in it is ever seen to change: a watcher's thread that
+    /// waits for an event ends at once, as an interrupted one does.
+    #[test]
+    fn a_watched_folder_never_changes() {
+        crate::install();
+        let mut rt = Rt::new();
+        let dir = rt.string("config");
+        let none = rt.new_array(0, V::NULL);
+        let path = c(
+            &mut rt,
+            "java/nio/file/Path.of.(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;",
+            &[dir, none],
+        );
+        let system = c(
+            &mut rt,
+            "java/nio/file/Path.getFileSystem.()Ljava/nio/file/FileSystem;",
+            &[path],
+        );
+        assert_eq!(
+            system,
+            c(
+                &mut rt,
+                "java/nio/file/FileSystems.getDefault.()Ljava/nio/file/FileSystem;",
+                &[]
+            )
+        );
+        let service = c(
+            &mut rt,
+            "java/nio/file/FileSystem.newWatchService.()Ljava/nio/file/WatchService;",
+            &[system],
+        );
+        let modified = crate::api::get_static(
+            &mut rt,
+            "java/nio/file/StandardWatchEventKinds.ENTRY_MODIFY",
+        );
+        assert_eq!(
+            modified,
+            crate::api::get_static(
+                &mut rt,
+                "java/nio/file/StandardWatchEventKinds.ENTRY_MODIFY"
+            )
+        );
+        let kinds = rt.new_array(1, modified);
+        let key = c(
+            &mut rt,
+            "java/nio/file/Path.register.(Ljava/nio/file/WatchService;[Ljava/nio/file/WatchEvent$Kind;)Ljava/nio/file/WatchKey;",
+            &[path, service, kinds],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/nio/file/WatchKey.watchable.()Ljava/nio/file/Watchable;",
+                &[key]
+            ),
+            path
+        );
+        let events = c(
+            &mut rt,
+            "java/nio/file/WatchKey.pollEvents.()Ljava/util/List;",
+            &[key],
+        );
+        assert_eq!(c(&mut rt, "java/util/List.size.()I", &[events]), V::I(0));
+        assert_eq!(
+            c(&mut rt, "java/nio/file/WatchKey.reset.()Z", &[key]),
+            V::I(1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/nio/file/WatchService.poll.()Ljava/nio/file/WatchKey;",
+                &[service]
+            ),
+            V::NULL
+        );
+        assert!(rt.thrown.is_none());
+        c(
+            &mut rt,
+            "java/nio/file/WatchService.take.()Ljava/nio/file/WatchKey;",
+            &[service],
+        );
+        let thrown = rt.thrown.take().expect("a waiting thread is interrupted");
+        assert_eq!(rt.class_of(thrown), "java/lang/InterruptedException");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `Files.copy(stream, path)` writes what is left of the stream and says how much; a file
@@ -1006,6 +1168,31 @@ mod tests {
         let file = c(&mut rt, "java/nio/file/Path.resolve.(Ljava/lang/String;)Ljava/nio/file/Path;", &[schematics, a]);
         let read = c(&mut rt, "java/nio/file/Files.readString.(Ljava/nio/file/Path;)Ljava/lang/String;", &[file]);
         assert_eq!(rt.str_of(read), Some("{}"));
+        // And through a reader (a config library reads back the file it wrote).
+        let reader = c(
+            &mut rt,
+            "java/nio/file/Files.newBufferedReader.(Ljava/nio/file/Path;)Ljava/io/BufferedReader;",
+            &[file],
+        );
+        let line = c(
+            &mut rt,
+            "java/io/BufferedReader.readLine.()Ljava/lang/String;",
+            &[reader],
+        );
+        assert_eq!(rt.str_of(line), Some("{}"));
+        let missing = rt.string("none.nbt");
+        let missing = c(
+            &mut rt,
+            "java/nio/file/Path.resolve.(Ljava/lang/String;)Ljava/nio/file/Path;",
+            &[schematics, missing],
+        );
+        c(
+            &mut rt,
+            "java/nio/file/Files.newBufferedReader.(Ljava/nio/file/Path;)Ljava/io/BufferedReader;",
+            &[missing],
+        );
+        let thrown = rt.thrown.take().expect("no such file");
+        assert_eq!(rt.class_of(thrown), "java/nio/file/NoSuchFileException");
         let name = c(&mut rt, "java/nio/file/Path.getFileName.()Ljava/nio/file/Path;", &[file]);
         let shown = c(&mut rt, "java/nio/file/Path.toString.()Ljava/lang/String;", &[name]);
         assert_eq!(rt.str_of(shown), Some("a.nbt"));

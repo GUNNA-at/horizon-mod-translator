@@ -1648,6 +1648,11 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             }
             mc
         }
+        // Its fields while the client is in no world (in one, the object holds them): none of
+        // them is set, as vanilla's are null before a world is joined. And its thread: the
+        // game's, which runs the mods' code.
+        ("net/minecraft/client/Minecraft", "$player" | "$level" | "$cameraEntity" | "$crosshairPickEntity" | "$hitResult" | "$gameMode") => V::NULL,
+        ("net/minecraft/client/Minecraft", "$gameThread") => crate::api::call(rt, "java/lang/Thread.currentThread.()Ljava/lang/Thread;", &[]),
         ("net/minecraft/client/Minecraft", "getBlockRenderer") => single(rt, "net/minecraft/client/renderer/block/BlockRenderDispatcher"),
         ("net/minecraft/client/Minecraft", "getTimer") => single(rt, "net/minecraft/client/DeltaTracker"),
         ("net/minecraft/client/Minecraft", "getModelManager") => single(rt, "net/minecraft/client/resources/model/ModelManager"),

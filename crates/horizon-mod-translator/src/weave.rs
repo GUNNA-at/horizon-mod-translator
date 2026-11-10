@@ -777,7 +777,33 @@ pub struct Plan {
     /// Mixins into classes that are not translated (the game's), with those targets: the methods
     /// and fields they add are the game objects' own, as Mixin merges them.
     pub vanilla: BTreeMap<String, Vec<String>>,
+    /// The static handlers such a mixin injects into a method of the game's or the loader's, by
+    /// handler (`mixin.name.desc`), each with the places it is injected at ([`native_place`]):
+    /// the runtime, which runs that method's work itself, calls the handlers of the places it
+    /// passes (the registries' events, say: NeoForge's `GameData.postRegisterEvents`).
+    pub native: BTreeMap<String, Vec<String>>,
 }
+
+/// The name the runtime knows a place in a method it runs itself by: `hz/inject:` and the
+/// method (`owner.name`), `@` and the place as its `@At` says it (`HEAD`, `RETURN`, `TAIL`,
+/// `STORE`, `INVOKE:<name of what is called>:BEFORE` or `:AFTER`). None for a place no runtime
+/// code is asked about.
+pub fn native_place(target: &str, method: &str, at: &At) -> Option<String> {
+    let at = match at {
+        At::Head => "HEAD".to_owned(),
+        At::Return { .. } => "RETURN".to_owned(),
+        At::Tail => "TAIL".to_owned(),
+        At::Store { .. } => "STORE".to_owned(),
+        At::Invoke { name, after, .. } => {
+            format!("INVOKE:{name}:{}", if *after { "AFTER" } else { "BEFORE" })
+        }
+        _ => return None,
+    };
+    Some(format!("{NATIVE_PLACE}{target}.{method}@{at}"))
+}
+
+/// What the name of a place in a method the runtime runs itself starts with ([`native_place`]).
+pub const NATIVE_PLACE: &str = "hz/inject:";
 
 /// An `@At`'s `args` (`["doubleValue=0.25d", "log=true"]`, joined by `,`) as pairs.
 fn at_args(v: &str) -> BTreeMap<String, String> {
@@ -1004,6 +1030,40 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                 let targets = plan.vanilla.entry(mixin.name.clone()).or_default();
                 if !targets.contains(&target_name) {
                     targets.push(target_name.clone());
+                }
+                // Its static injectors, by the places they name: for the runtime to call where
+                // its own code for the method passes them.
+                for h in mixin
+                    .methods
+                    .iter()
+                    .filter(|h| h.access & 0x0008 != 0 && h.code.is_some())
+                {
+                    for a in &h.annotations {
+                        let simple = a.ty.trim_end_matches(';').rsplit('/').next().unwrap_or("");
+                        if !(a.ty.starts_with(MIXIN)
+                            && matches!(simple, "Inject" | "ModifyVariable"))
+                        {
+                            continue;
+                        }
+                        for method in a.value("method").unwrap_or("").split(',') {
+                            // `name(desc)`, with or without the class before it.
+                            let name = method.split('(').next().unwrap_or("");
+                            let name = name.rsplit([';', '.']).next().unwrap_or(name);
+                            for at in a.nested("at").iter().filter_map(|at| parse_at(at).ok()) {
+                                if let Some(place) = native_place(&target_name, name, &at)
+                                    .filter(|_| !name.is_empty())
+                                {
+                                    let places = plan
+                                        .native
+                                        .entry(format!("{}.{}.{}", mixin.name, h.name, h.desc))
+                                        .or_default();
+                                    if !places.contains(&place) {
+                                        places.push(place);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 continue;
             };
@@ -1319,5 +1379,118 @@ mod tests {
         };
         let at = parse_at(&at).unwrap();
         assert_eq!(at, At::Invoke { owner: "com/a/B".into(), name: "go".into(), desc: "(I)V".into(), ordinal: Some(1), after: true, assign: false });
+    }
+
+    /// A mixin into a class that is not translated (NeoForge's `GameData`, as supermartijn642's
+    /// library has one): its static injectors are planned by the places they name, which the
+    /// runtime posts to where its own code for the method passes them; an instance handler and a
+    /// method that injects nothing are not.
+    #[test]
+    fn static_injectors_into_the_loaders_code_are_planned_by_their_places() {
+        const MIXIN: &str = "Lorg/spongepowered/asm/mixin/";
+        let note = |ty: &str, values: &[(&str, &str)], at: Vec<Annotation>| Annotation {
+            ty: format!("{MIXIN}{ty};"),
+            values: values
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            nested: if at.is_empty() {
+                Vec::new()
+            } else {
+                vec![("at".to_owned(), at)]
+            },
+            ..Annotation::default()
+        };
+        let at = |values: &[(&str, &str)]| note("injection/At", values, Vec::new());
+        let method = |name: &str, desc: &str, access: u16, annotations: Vec<Annotation>| Method {
+            access,
+            name: name.to_owned(),
+            desc: desc.to_owned(),
+            code: Some(crate::class::Code::default()),
+            annotations,
+            param_annotations: Vec::new(),
+            signature: None,
+            default: None,
+        };
+        const EVENT: &str = "(Lnet/neoforged/neoforge/registries/RegisterEvent;)Lnet/neoforged/neoforge/registries/RegisterEvent;";
+        const INFO: &str = "(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V";
+        let posted = at(&[
+            ("value", "INVOKE"),
+            (
+                "target",
+                "Lnet/neoforged/fml/ModLoader;postEventWrapContainerInModOrder(Lnet/neoforged/bus/api/Event;)V",
+            ),
+            ("shift", "AFTER"),
+        ]);
+        let mixin = ClassFile {
+            pool: Vec::new(),
+            access: 0x0021,
+            name: "lib/mixin/GameDataMixin".to_owned(),
+            superclass: Some("java/lang/Object".to_owned()),
+            interfaces: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![
+                method(
+                    "keep",
+                    EVENT,
+                    0x000a,
+                    vec![note(
+                        "injection/ModifyVariable",
+                        &[("method", "postRegisterEvents()V")],
+                        vec![at(&[("value", "STORE")])],
+                    )],
+                ),
+                method(
+                    "after",
+                    INFO,
+                    0x000a,
+                    vec![note(
+                        "injection/Inject",
+                        &[("method", "postRegisterEvents")],
+                        vec![posted.clone(), at(&[("value", "TAIL")])],
+                    )],
+                ),
+                method(
+                    "ofAnObject",
+                    INFO,
+                    0x0002,
+                    vec![note(
+                        "injection/Inject",
+                        &[("method", "postRegisterEvents")],
+                        vec![posted],
+                    )],
+                ),
+                method("helper", "()V", 0x000a, Vec::new()),
+            ],
+            bootstrap: Vec::new(),
+            annotations: vec![note(
+                "Mixin",
+                &[("value", "Lnet/neoforged/neoforge/registries/GameData;")],
+                Vec::new(),
+            )],
+            signature: None,
+        };
+        let plan = plan_with(&[&mixin], &[]);
+        const PLACE: &str =
+            "hz/inject:net/neoforged/neoforge/registries/GameData.postRegisterEvents@";
+        let expected: BTreeMap<String, Vec<String>> = [
+            (
+                format!("lib/mixin/GameDataMixin.keep.{EVENT}"),
+                vec![format!("{PLACE}STORE")],
+            ),
+            (
+                format!("lib/mixin/GameDataMixin.after.{INFO}"),
+                vec![
+                    format!("{PLACE}INVOKE:postEventWrapContainerInModOrder:AFTER"),
+                    format!("{PLACE}TAIL"),
+                ],
+            ),
+        ]
+        .into();
+        assert_eq!(plan.native, expected);
+        assert_eq!(
+            plan.vanilla["lib/mixin/GameDataMixin"],
+            ["net/neoforged/neoforge/registries/GameData"]
+        );
     }
 }

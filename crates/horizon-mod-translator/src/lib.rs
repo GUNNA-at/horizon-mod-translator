@@ -365,8 +365,8 @@ pub fn neoforge_version() -> Option<String> {
 }
 
 /// A file of a jar that a mod may read for itself (`getResourceAsStream`): none of the classes,
-/// the manifest's folder, the pictures and sounds, the resource packs' own files (which the game
-/// serves), and nothing large.
+/// the manifest's folder, a data generator's cache, the pictures and sounds, the resource packs'
+/// own files (which the game serves), and nothing large.
 fn own_resource(path: &str, size: u64) -> bool {
     let lower = path.to_ascii_lowercase();
     let extension = lower.rsplit_once('.').map_or("", |p| p.1);
@@ -379,6 +379,8 @@ fn own_resource(path: &str, size: u64) -> bool {
     !(path.ends_with('/')
         || size > 256 << 10
         || lower.starts_with("meta-inf/")
+        // What a data generator left of its run.
+        || lower.starts_with(".cache/")
         || matches!(extension, "class" | "jar" | "png" | "jpg" | "jpeg" | "gif" | "ogg" | "wav" | "mp3" | "nbt" | "ttf" | "otf" | "dll" | "so" | "dylib" | "jnilib" | "bbmodel" | "xcf" | "psd")
         || matches!(lower.as_str(), "pack.mcmeta" | "license" | "license.txt" | "license.md" | "readme.md" | "changelog.md" | "fabric.mod.json" | "quilt.mod.json")
         || lower.ends_with(".mixins.json")
@@ -390,46 +392,68 @@ fn own_resource(path: &str, size: u64) -> bool {
 }
 
 /// The files of `jars` and of the jars they bundle that a mod may read for itself
-/// ([`own_resource`]), by path, sorted; a path two jars have is the first one's. At most 32 MB.
+/// ([`own_resource`]), by path, sorted; a path two jars have is the first one's. At most 48 MB.
 pub fn jar_resources(jars: &[&Path]) -> Vec<(String, Vec<u8>)> {
+    jar_resources_within(jars, 48 << 20)
+}
+
+/// [`jar_resources`] within `budget` bytes, the smallest files first: where a pack has more than
+/// fits (MineColonies' 25 MB of blueprints among 365 mods' 38 MB), what is left out is its
+/// largest files, and no mod loses the few lines of defaults it reads as it is constructed for
+/// its place in the list.
+fn jar_resources_within(jars: &[&Path], budget: usize) -> Vec<(String, Vec<u8>)> {
     fn read<R: Read + std::io::Seek>(
         zip: &mut zip::ZipArchive<R>,
         out: &mut BTreeMap<String, Vec<u8>>,
-        left: &mut usize,
     ) {
         for i in 0..zip.len() {
             let Ok(mut e) = zip.by_index(i) else { continue };
             let Ok(name) = e.name().map(|n| n.into_owned()) else {
                 continue;
             };
-            if !own_resource(&name, e.size())
-                || out.contains_key(&name)
-                || e.size() as usize > *left
-            {
+            if !own_resource(&name, e.size()) || out.contains_key(&name) {
                 continue;
             }
             let mut bytes = Vec::new();
             if e.read_to_end(&mut bytes).is_ok() {
-                *left -= bytes.len();
                 out.insert(name, bytes);
             }
         }
         for inner in nested_jars(zip) {
             if let Ok(mut inner) = zip::ZipArchive::new(std::io::Cursor::new(inner)) {
-                read(&mut inner, out, left);
+                read(&mut inner, out);
             }
         }
     }
-    let (mut out, mut left) = (BTreeMap::new(), 32usize << 20);
+    let mut out = BTreeMap::new();
     for jar in jars {
         if let Ok(mut zip) = std::fs::File::open(jar)
             .map_err(|e| e.to_string())
             .and_then(|f| zip::ZipArchive::new(f).map_err(|e| e.to_string()))
         {
-            read(&mut zip, &mut out, &mut left);
+            read(&mut zip, &mut out);
         }
     }
-    out.into_iter().collect()
+    let mut sizes: Vec<(usize, &String)> = out
+        .iter()
+        .map(|(name, bytes)| (bytes.len(), name))
+        .collect();
+    sizes.sort();
+    let mut left = budget;
+    let dropped: std::collections::HashSet<String> = sizes
+        .into_iter()
+        .filter(|(size, _)| match left.checked_sub(*size) {
+            Some(rest) => {
+                left = rest;
+                false
+            }
+            None => true,
+        })
+        .map(|(_, name)| name.clone())
+        .collect();
+    out.into_iter()
+        .filter(|(name, _)| !dropped.contains(name))
+        .collect()
 }
 
 /// The classes of the game's own jars that are code ([`game_code`]) and name no LWJGL class,
@@ -2498,6 +2522,10 @@ mod mixin_census_tests {
             ("META-INF/neoforge.mods.toml", b"[[mods]]"),
             ("pack.mcmeta", b"{}"),
             ("large.txt", large.as_slice()),
+            (
+                ".cache/0a3687b7ab47c93d296d71f04d04727fb11dbafe",
+                b"// 1.21.1",
+            ),
         ] {
             zip.start_file(name, zip::write::SimpleFileOptions::default())
                 .unwrap();
@@ -2518,6 +2546,47 @@ mod mixin_census_tests {
             ]
         );
         assert_eq!(files[1].1, b"read me");
+    }
+
+    /// Where the jars' own files are more than a bundle carries, the smallest are carried: one
+    /// mod's large files (MineColonies' blueprints, 25 MB) take no other mod's defaults.
+    #[test]
+    fn the_smallest_of_too_many_own_files_are_carried() {
+        let jar = |tag: &str, files: &[(&str, usize)]| {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            for (name, size) in files {
+                zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                std::io::Write::write_all(&mut zip, &vec![b'x'; *size]).unwrap();
+            }
+            let path =
+                std::env::temp_dir().join(format!("hz-budget-{tag}-{}.jar", std::process::id()));
+            std::fs::write(&path, zip.finish().unwrap().into_inner()).unwrap();
+            path
+        };
+        let colony = jar(
+            "a",
+            &[
+                ("blueprints/hall.blueprint", 600),
+                ("blueprints/hut.blueprint", 300),
+                ("colony.json", 40),
+            ],
+        );
+        let sparse = jar("b", &[("defaults.json5", 50), ("notes.txt", 500)]);
+        let files = jar_resources_within(&[colony.as_path(), sparse.as_path()], 1000);
+        for path in [&colony, &sparse] {
+            std::fs::remove_file(path).ok();
+        }
+        let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "blueprints/hut.blueprint",
+                "colony.json",
+                "defaults.json5",
+                "notes.txt"
+            ]
+        );
     }
 
     /// FML's sorter (`ModSorter`, a topological sort that takes the earliest free file each time):

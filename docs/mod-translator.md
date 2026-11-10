@@ -10170,6 +10170,53 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     do; OpenGL at its minimum does not, and keeps the limit of eight with the same message).
   - Tests: the widened terrain and emission shaders validate and name each array where it is
     bound and sampled; 927 of the renderer's unit tests pass.
+- [x] 2026-11-10 Part 166: launch 11 (the build of Parts 162–165: 1036 s for the round, 106 crates),
+  and what it showed. Five constructors failed where launch 10 had six. The mods were loaded and
+  the client set up after about 175 s; then FramedBlocks' listener of `ModelEvent.ModifyBakingResult`
+  took the machine's memory (3.2 GB to 11.9 GB resident in thirty seconds, a footprint of 23.5 GB
+  of the machine's 24) and macOS ended the game at 321 s, before its window was made: the sixteen
+  sprite arrays of Part 165 were not reached.
+  - Guava's `BiMap.inverse()` is a view now: the map and its inverse are two tables kept as one,
+    each naming the other, so what is put in or taken out of one is in the other, `put` refuses a
+    value another key holds and `forcePut` takes it. It was a copy made at every call, and
+    FramedBlocks asks for it once per block state (since Part 164 its model locations are
+    distinct keys, so the map grows as it should: the copies were the 23 GB). Alone, FramedBlocks'
+    models are wrapped in 1.95 s; in launch 10 the same listener was stopped after 152 s.
+  - A mixin's static injectors into a method the runtime runs itself are called where the
+    runtime passes the places they name (`hz/inject:<owner>.<method>@<place>`: the translator
+    lists them among their class's subscribers). The first such method is NeoForge's
+    `GameData.postRegisterEvents`: supermartijn642's library fills its mods' registry fields
+    from a mixin there, and without it every one of its mods' blocks, items and menus stayed
+    null ("Container screen registered with null menu type!", six such errors at launch 11).
+    Alone, Trash Cans' fields are set.
+  - A folder can be watched (`FileSystem.newWatchService`, `Path.register`): nothing in it is
+    seen to change, and a watcher's thread ends as an interrupted one does. A config library's
+    watcher asked 4.2 million times in ten seconds for a key it never got: Trash Cans loads in
+    36 ms where it took 10.03 s, and four jars of the pack did the same.
+  - A jar's own files (what `getResourceAsStream` finds) are carried smallest first, up to 48 MB,
+    without a data generator's `.cache`: the pack has 38.4 MB of them in 13,498 files, 24.8 MB
+    of it MineColonies' blueprints, and the 32 MB the bundle took ran out inside that jar, so
+    every jar after it had none (Sparse Structures' 1.9 KB of defaults, which its constructor
+    needs).
+  - A codec writes JSON (`encodeStart(JsonOps.INSTANCE, value)`, `encode` onto an object): Gson's
+    tree, a boolean as one, a float printed as one; vanilla's `Style.Serializer.CODEC` is the
+    runtime's own, both ways. It answered an error ("writing JSON is not modelled").
+  - Reflection boxes a primitive as what declares it: a `boolean` field read by `Field.get` is a
+    `Boolean` (it was an `Integer`, the runtime holding both as an int), and so for
+    `Method.invoke` and `Array.get`; `getDeclaredFields` of a class of Java's own lists none.
+    Gson writes a box asked for as its primitive's type (`toJson(field.get(o), boolean.class)`
+    wrote `false` whatever it held) and gives one back from `fromJson`; `Streams.write` and
+    `Streams.parse`, `ToNumberPolicy`'s constants and `Files.newBufferedReader` are answered.
+    Alone, Enchantment Descriptions is constructed: its config library writes the file as the
+    JVM does and reads it back (9 keys left unmapped of 15).
+  - Each listener of an event has its own count of the calls nothing maps. In launch 10
+    SecurityCraft's model listener made a million of them (on `StateHolder
+    .PROPERTY_ENTRY_TO_STRING_FUNCTION`, now a function of the runtime's), and every listener
+    after it in the same hook was stopped at its first (Easy Mob Farm's).
+  - Also answered: `Arrays.setAll`, `Map.replaceAll`, `Stream.ofNullable`, the item renderer's
+    trident and spyglass model locations, `Minecraft`'s fields while it is in no world and
+    `ON_OSX`, Gson's `LinkedTreeMap` as a map, `FeatureFlagSet.of`.
+  - Tests: 792 compat, 16 compat-core, 33 translator; the differential tests.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

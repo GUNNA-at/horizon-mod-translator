@@ -243,6 +243,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         ("net/minecraft/world/level/levelgen/placement/PlacedFeature", "CODEC") => native(rt, "placed_feature"),
         ("net/minecraft/world/level/levelgen/placement/PlacedFeature", "DIRECT_CODEC") => native(rt, "placed_feature_direct"),
         ("net/minecraft/network/chat/ComponentSerialization", "CODEC" | "FLAT_CODEC") => native(rt, "component"),
+        ("net/minecraft/network/chat/Style$Serializer", "CODEC") => native(rt, "style"),
         // A fluid by name (`Holder<Fluid>`; registries are their names here, holders their entries).
         ("net/neoforged/neoforge/fluids/FluidStack", "FLUID_NON_EMPTY_CODEC") => rt.intern("compat:codec/fluid-non-empty".into(), |rt| {
             let r = rt.string("fluid");
@@ -758,6 +759,74 @@ fn registry_value(rt: &mut Rt, registry: &str, id: &str) -> Result<V, String> {
 
 // ---- Writing ----
 
+thread_local! {
+    /// Whether what [`encode`] writes is for JSON ([`encode_json`]).
+    static FOR_JSON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A boolean written for JSON. The tags have none (`NbtOps` writes a byte) and JSON has, so one
+/// is these texts in what [`encode`] gives until the tree is made of it ([`json_tree`]).
+const JSON_TRUE: &str = "\u{1}true";
+const JSON_FALSE: &str = "\u{1}false";
+
+/// Writes `value` with codec `c`, as `c.encodeStart(JsonOps.INSTANCE, value)` would: Gson's tree,
+/// or why not. An object's members are in the order of their names (DFU has them in the order
+/// the codec names its fields).
+pub fn encode_json(rt: &mut Rt, c: V, value: V) -> Result<V, String> {
+    let was = FOR_JSON.replace(true);
+    let written = encode(rt, c, value);
+    FOR_JSON.set(was);
+    Ok(json_tree(rt, &written?))
+}
+
+/// JSON a codec of the runtime's own writes, as what [`encode`] gives: the tags' form of it
+/// ([`crate::recipes::json_nbt`]), with a boolean kept one where it goes to JSON.
+fn written(j: &Json) -> Nbt {
+    match j {
+        Json::Bool(b) if FOR_JSON.get() => {
+            Nbt::String(if *b { JSON_TRUE } else { JSON_FALSE }.to_owned())
+        }
+        Json::Array(a) => Nbt::List(a.iter().map(written).collect()),
+        Json::Object(o) => Nbt::Compound(o.iter().map(|(k, v)| (k.clone(), written(v))).collect()),
+        other => crate::recipes::json_nbt(other).unwrap_or(Nbt::Compound(BTreeMap::new())),
+    }
+}
+
+/// What [`encode`] wrote for JSON as Gson's tree: each number of the kind it was written as (a
+/// float prints as a float), a list or an array of numbers as an array.
+fn json_tree(rt: &mut Rt, n: &Nbt) -> V {
+    use crate::gson;
+    let numbers = |rt: &mut Rt, all: Vec<V>| {
+        let items = all.into_iter().map(|n| gson::number(rt, n)).collect();
+        gson::new_array(rt, items)
+    };
+    match n {
+        Nbt::String(s) if s == JSON_TRUE || s == JSON_FALSE => gson::boolean(rt, s == JSON_TRUE),
+        Nbt::String(s) => gson::string(rt, s),
+        Nbt::Byte(b) => gson::number(rt, V::I(i32::from(*b))),
+        Nbt::Short(s) => gson::number(rt, V::I(i32::from(*s))),
+        Nbt::Int(i) => gson::number(rt, V::I(*i)),
+        Nbt::Long(l) => gson::number(rt, V::J(*l)),
+        Nbt::Float(f) => gson::number(rt, V::F(*f)),
+        Nbt::Double(d) => gson::number(rt, V::D(*d)),
+        Nbt::List(l) => {
+            let items = l.iter().map(|e| json_tree(rt, e)).collect();
+            gson::new_array(rt, items)
+        }
+        Nbt::Compound(c) => {
+            let o = gson::new_object(rt);
+            for (k, v) in c {
+                let (k, v) = (rt.string(k), json_tree(rt, v));
+                jutil::table_put(rt, o, k, v);
+            }
+            o
+        }
+        Nbt::ByteArray(a) => numbers(rt, a.iter().map(|b| V::I(i32::from(*b))).collect()),
+        Nbt::IntArray(a) => numbers(rt, a.iter().map(|i| V::I(*i)).collect()),
+        Nbt::LongArray(a) => numbers(rt, a.iter().map(|l| V::J(*l)).collect()),
+    }
+}
+
 /// Writes `value` with codec `c`, as `c.encodeStart(NbtOps.INSTANCE, value)` would: the tag, or why
 /// not.
 pub fn encode(rt: &mut Rt, c: V, value: V) -> Result<Nbt, String> {
@@ -1021,6 +1090,9 @@ fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
         "long" => Nbt::Long(i),
         "float" => Nbt::Float(f as f32),
         "double" => Nbt::Double(f),
+        "bool" if FOR_JSON.get() => {
+            Nbt::String(if i != 0 { JSON_TRUE } else { JSON_FALSE }.to_owned())
+        }
         "bool" => Nbt::Byte((i != 0) as i8),
         _ => return Err(format!("no primitive {name}")),
     })
@@ -1137,7 +1209,15 @@ pub(crate) fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String>
                 None => Nbt::Compound(BTreeMap::new()),
             }
         }
+        // For JSON, the serializer's own object (plain text alone is a string there too).
+        "component" if FOR_JSON.get() => match crate::api_common::component_json(rt, v) {
+            Json::Object(o) if o.len() == 1 && o.get("text").is_some_and(Json::is_string) => {
+                Nbt::String(o["text"].as_str().unwrap_or("").to_owned())
+            }
+            j => written(&j),
+        },
         "component" => crate::api_common::component_nbt(rt, v),
+        "style" => written(&crate::api_common::style_json(rt, v)),
         n if n.starts_with("tag_key/") || n.starts_with("hashed_tag_key/") => {
             let location = rt.str_of(rt.get_field(v, "$location")).ok_or("Not a tag key")?.to_owned();
             Nbt::String(if n.starts_with("hashed") { format!("#{location}") } else { location })
@@ -1656,14 +1736,37 @@ fn codec_method(rt: &mut Rt, method: &str, desc: &str, args: &[V]) -> Option<V> 
             }
             a(3)
         }
-        // `encodeStart(ops, value)`, `encode(value, ops, prefix)`: NBT (`NbtOps`, or `RegistryOps`
-        // over it, which is the same here).
+        // `encodeStart(ops, value)`, `encode(value, ops, prefix)`: Gson's tree for `JsonOps`
+        // (onto the members of a prefix that is an object), else NBT (`NbtOps`); a `RegistryOps`
+        // is the ops it is over.
         "encodeStart" | "encode" => {
             let (ops, value, prefix) = if method == "encodeStart" { (a(1), a(2), V::NULL) } else { (a(2), a(1), a(3)) };
             if rt.class_of(ops).contains("JsonOps") {
-                return Some(error(rt, "writing JSON is not modelled"));
+                return Some(match encode_json(rt, c, value) {
+                    Ok(tree) => {
+                        let object = "com/google/gson/JsonObject";
+                        let tree = if rt.class_of(prefix) == object && rt.class_of(tree) == object {
+                            let merged = crate::gson::new_object(rt);
+                            for (k, v) in jutil::table_pairs(rt, prefix)
+                                .into_iter()
+                                .chain(jutil::table_pairs(rt, tree))
+                            {
+                                jutil::table_put(rt, merged, k, v);
+                            }
+                            merged
+                        } else {
+                            tree
+                        };
+                        success(rt, tree)
+                    }
+                    Err(e) => error(rt, &e),
+                });
             }
-            match encode(rt, c, value) {
+            // What is written inside a value going to JSON, for the tags, is a tag's.
+            let for_json = FOR_JSON.replace(false);
+            let written = encode(rt, c, value);
+            FOR_JSON.set(for_json);
+            match written {
                 Ok(n) => {
                     let n = match (n, rt.class_of(prefix)) {
                         (Nbt::Compound(m), "net/minecraft/nbt/CompoundTag") => {
@@ -2251,6 +2354,137 @@ mod tests {
         assert_eq!(back.len(), 1);
         assert_eq!(crate::api::pos_of(&rt, rt.get_field(back[0], "pos")), [1, -2, 3]);
         assert_eq!(rt.str_of(rt.get_field(back[0], "slot")), Some("TOP_LEFT"));
+    }
+
+    /// `codec.encodeStart(JsonOps.INSTANCE, value)` gives Gson's tree: a boolean is JSON's (the
+    /// tags write a byte), a float prints as one, and `encode` onto an object adds its members.
+    /// Writing for the tags stays as it was. (It gave an error, "writing JSON is not modelled":
+    /// a config library that saves its defaults so stopped its mod's constructor.)
+    #[test]
+    fn a_codec_writes_json() {
+        let mut rt = Rt::new();
+        crate::install();
+        const START: &str = "com/mojang/serialization/Codec.encodeStart.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;";
+        let json = st(&mut rt, "com/mojang/serialization/JsonOps.INSTANCE");
+        let text = |rt: &mut Rt, result: V| {
+            let tree = result_of(rt, result).unwrap();
+            let t = c(
+                rt,
+                "com/google/gson/JsonElement.toString.()Ljava/lang/String;",
+                &[tree],
+            );
+            rt.str_of(t).unwrap().to_owned()
+        };
+        let (string, boolean, float) = (
+            st(&mut rt, "com/mojang/serialization/Codec.STRING"),
+            st(&mut rt, "com/mojang/serialization/Codec.BOOL"),
+            st(&mut rt, "com/mojang/serialization/Codec.FLOAT"),
+        );
+        let yes = c(
+            &mut rt,
+            "java/lang/Boolean.valueOf.(Z)Ljava/lang/Boolean;",
+            &[V::I(1)],
+        );
+        let no = c(
+            &mut rt,
+            "java/lang/Boolean.valueOf.(Z)Ljava/lang/Boolean;",
+            &[V::I(0)],
+        );
+        let r = c(&mut rt, START, &[boolean, json, yes]);
+        assert_eq!(text(&mut rt, r), "true");
+        let flags = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.unboundedMap.(Lcom/mojang/serialization/Codec;Lcom/mojang/serialization/Codec;)Lcom/mojang/serialization/codecs/UnboundedMapCodec;",
+            &[string, boolean],
+        );
+        let map = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+        for (k, v) in [("sneak", no), ("glow", yes)] {
+            let k = rt.string(k);
+            jutil::table_put(&mut rt, map, k, v);
+        }
+        let r = c(&mut rt, START, &[flags, json, map]);
+        assert_eq!(text(&mut rt, r), r#"{"glow":true,"sneak":false}"#);
+        let floats = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.listOf.()Lcom/mojang/serialization/Codec;",
+            &[float],
+        );
+        let tenth = c(
+            &mut rt,
+            "java/lang/Float.valueOf.(F)Ljava/lang/Float;",
+            &[V::F(0.1)],
+        );
+        let two = c(
+            &mut rt,
+            "java/lang/Float.valueOf.(F)Ljava/lang/Float;",
+            &[V::F(2.0)],
+        );
+        let list = jutil::new_list(&mut rt, vec![tenth, two]);
+        let r = c(&mut rt, START, &[floats, json, list]);
+        assert_eq!(text(&mut rt, r), "[0.1,2.0]");
+        // Onto an object: its members, then the value's.
+        let prefix = crate::gson::new_object(&mut rt);
+        let (k, v) = (rt.string("version"), crate::gson::number(&mut rt, V::I(3)));
+        jutil::table_put(&mut rt, prefix, k, v);
+        let r = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.encode.(Ljava/lang/Object;Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;",
+            &[flags, map, json, prefix],
+        );
+        assert_eq!(
+            text(&mut rt, r),
+            r#"{"version":3,"glow":true,"sneak":false}"#
+        );
+        // For the tags, a byte as before.
+        let ops = st(&mut rt, "net/minecraft/nbt/NbtOps.INSTANCE");
+        let r = c(&mut rt, START, &[boolean, ops, yes]);
+        let tag = result_of(&mut rt, r).unwrap();
+        assert_eq!(
+            crate::nbt::element_from_runtime(&rt, tag),
+            Some(Nbt::Byte(1))
+        );
+        // A style, by vanilla's own codec for it: its colour and the formats it sets, and back.
+        let codec = st(&mut rt, "net/minecraft/network/chat/Style$Serializer.CODEC");
+        let empty = st(&mut rt, "net/minecraft/network/chat/Style.EMPTY");
+        let gray = st(&mut rt, "net/minecraft/ChatFormatting.DARK_GRAY");
+        let style = c(
+            &mut rt,
+            "net/minecraft/network/chat/Style.withColor.(Lnet/minecraft/ChatFormatting;)Lnet/minecraft/network/chat/Style;",
+            &[empty, gray],
+        );
+        let style = c(
+            &mut rt,
+            "net/minecraft/network/chat/Style.withBold.(Ljava/lang/Boolean;)Lnet/minecraft/network/chat/Style;",
+            &[style, yes],
+        );
+        let r = c(&mut rt, START, &[codec, json, style]);
+        let tree = result_of(&mut rt, r).unwrap();
+        let shown = c(
+            &mut rt,
+            "com/google/gson/JsonElement.toString.()Ljava/lang/String;",
+            &[tree],
+        );
+        assert_eq!(
+            rt.str_of(shown),
+            Some(r#"{"bold":true,"color":"dark_gray"}"#)
+        );
+        let r = c(
+            &mut rt,
+            "com/mojang/serialization/Codec.parse.(Lcom/mojang/serialization/DynamicOps;Ljava/lang/Object;)Lcom/mojang/serialization/DataResult;",
+            &[codec, json, tree],
+        );
+        let back = result_of(&mut rt, r).unwrap();
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/network/chat/Style.equals.(Ljava/lang/Object;)Z",
+                &[back, style]
+            ),
+            V::I(1)
+        );
+        let r = c(&mut rt, START, &[codec, json, empty]);
+        assert_eq!(text(&mut rt, r), "{}");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Mekanism's `SerializerHelper.oneRequired(main, secondary, getter)` over a record of two

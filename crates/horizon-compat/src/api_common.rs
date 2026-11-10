@@ -365,7 +365,7 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 31] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 32] = [
     // How Gson names a field in JSON (`GsonBuilder.setFieldNamingPolicy`), by the policy's name.
     (
         "com/google/gson/FieldNamingPolicy",
@@ -377,6 +377,17 @@ const PLAIN_ENUMS: [(&str, &[&str]); 31] = [
             "LOWER_CASE_WITH_UNDERSCORES",
             "LOWER_CASE_WITH_DASHES",
             "LOWER_CASE_WITH_DOTS",
+        ],
+    ),
+    // How Gson reads a number whose type says only `Number` or `Object`
+    // (`GsonBuilder.setNumberToNumberStrategy`): named, not yet followed (a `double` is read).
+    (
+        "com/google/gson/ToNumberPolicy",
+        &[
+            "DOUBLE",
+            "LAZILY_PARSED_NUMBER",
+            "LONG_OR_DOUBLE",
+            "BIG_DECIMAL",
         ],
     ),
     // The side a game runs on: a `switch` over it builds its table from `values()`.
@@ -5003,36 +5014,95 @@ pub(crate) fn component(rt: &mut Rt, text: V, translatable: bool, with: V) -> V 
 pub(crate) fn component_json(rt: &Rt, c: V) -> serde_json::Value {
     let mut j = component_core_json(rt, c);
     if let serde_json::Value::Object(o) = &mut j {
-        // The style's tokens in order (`gui`'s: `RED`, `#RRGGBB`, `#` for no colour, `!BOLD` off).
-        for f in rt.str_of(rt.get_field(c, "$style")).unwrap_or("").split(',').filter(|f| !f.is_empty()) {
-            let (on, name) = f.strip_prefix('!').map_or((true, f), |n| (false, n));
-            let format = match name {
-                "OBFUSCATED" => "obfuscated",
-                "BOLD" => "bold",
-                "STRIKETHROUGH" => "strikethrough",
-                "UNDERLINE" => "underlined",
-                "ITALIC" => "italic",
-                "RESET" => {
-                    o.retain(|k, _| !matches!(k.as_str(), "color" | "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated"));
-                    continue;
-                }
-                "#" => {
-                    o.remove("color");
-                    continue;
-                }
-                colour => {
-                    o.insert("color".into(), colour.to_ascii_lowercase().into());
-                    continue;
-                }
-            };
-            o.insert(format.into(), on.into());
-        }
+        style_into(rt.str_of(rt.get_field(c, "$style")).unwrap_or(""), o);
         let extra: Vec<serde_json::Value> = crate::jutil::elements(rt, rt.get_field(c, "$extra")).into_iter().map(|s| component_json(rt, s)).collect();
         if !extra.is_empty() {
             o.insert("extra".into(), extra.into());
         }
     }
     j
+}
+
+/// A style's `tokens` in order (`gui`'s: `RED`, `#RRGGBB`, `#` for no colour, `!BOLD` off) as the
+/// members vanilla's serializer writes for it: `color`, and each format the style sets.
+fn style_into(tokens: &str, o: &mut serde_json::Map<String, serde_json::Value>) {
+    for f in tokens.split(',').filter(|f| !f.is_empty()) {
+        let (on, name) = f.strip_prefix('!').map_or((true, f), |n| (false, n));
+        let format = match name {
+            "OBFUSCATED" => "obfuscated",
+            "BOLD" => "bold",
+            "STRIKETHROUGH" => "strikethrough",
+            "UNDERLINE" => "underlined",
+            "ITALIC" => "italic",
+            "RESET" => {
+                o.retain(|k, _| {
+                    !matches!(
+                        k.as_str(),
+                        "color" | "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated"
+                    )
+                });
+                continue;
+            }
+            "#" => {
+                o.remove("color");
+                continue;
+            }
+            colour => {
+                o.insert("color".into(), colour.to_ascii_lowercase().into());
+                continue;
+            }
+        };
+        o.insert(format.into(), on.into());
+    }
+}
+
+/// The tokens of the style members `o` has, as [`style_into`] reads them: the colour, then each
+/// format on or off (`!BOLD`).
+fn style_tokens_of(o: &serde_json::Map<String, serde_json::Value>) -> String {
+    use serde_json::Value;
+    let mut tokens = String::new();
+    if let Some(colour) = o.get("color").and_then(Value::as_str) {
+        tokens.push_str(&if colour.starts_with('#') {
+            colour.to_owned()
+        } else {
+            colour.to_ascii_uppercase()
+        });
+        tokens.push(',');
+    }
+    for (key, token) in [
+        ("bold", "BOLD"),
+        ("italic", "ITALIC"),
+        ("underlined", "UNDERLINE"),
+        ("strikethrough", "STRIKETHROUGH"),
+        ("obfuscated", "OBFUSCATED"),
+    ] {
+        let on = match o.get(key) {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::Number(n)) => n.as_i64() != Some(0),
+            _ => continue,
+        };
+        if !on {
+            tokens.push('!');
+        }
+        tokens.push_str(token);
+        tokens.push(',');
+    }
+    tokens
+}
+
+/// A style as vanilla's `Style.Serializer.CODEC` writes it: an object of its colour and the
+/// formats it sets (its events and font, which the runtime keeps and doesn't draw, are not
+/// written).
+pub(crate) fn style_json(rt: &Rt, style: V) -> serde_json::Value {
+    let mut o = serde_json::Map::new();
+    style_into(&crate::gui::style_tokens(rt, style), &mut o);
+    serde_json::Value::Object(o)
+}
+
+/// [`style_json`]'s object back as a style.
+pub(crate) fn style_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
+    let tokens = j.as_object().map(style_tokens_of).unwrap_or_default();
+    crate::gui::style_object(rt, &tokens)
 }
 
 /// [`component_json`] without style and siblings.
@@ -5168,35 +5238,7 @@ pub(crate) fn component_from_json(rt: &mut Rt, j: &serde_json::Value) -> V {
                     component(rt, t, false, V::NULL)
                 }
             };
-            // The style's tokens, as `component_json` reads them: the colour, then each format on
-            // or off (`!BOLD`).
-            let mut tokens = String::new();
-            if let Some(colour) = o.get("color").and_then(Value::as_str) {
-                tokens.push_str(&if colour.starts_with('#') {
-                    colour.to_owned()
-                } else {
-                    colour.to_ascii_uppercase()
-                });
-                tokens.push(',');
-            }
-            for (key, token) in [
-                ("bold", "BOLD"),
-                ("italic", "ITALIC"),
-                ("underlined", "UNDERLINE"),
-                ("strikethrough", "STRIKETHROUGH"),
-                ("obfuscated", "OBFUSCATED"),
-            ] {
-                let on = match o.get(key) {
-                    Some(Value::Bool(b)) => *b,
-                    Some(Value::Number(n)) => n.as_i64() != Some(0),
-                    _ => continue,
-                };
-                if !on {
-                    tokens.push('!');
-                }
-                tokens.push_str(token);
-                tokens.push(',');
-            }
+            let tokens = style_tokens_of(o);
             if !tokens.is_empty() {
                 let t = rt.string(&tokens);
                 rt.put_field(c, "$style", t);
@@ -6300,6 +6342,26 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         }
         "java/lang/Boolean" if field == "TRUE" || field == "FALSE" => boolean(rt, field == "TRUE"),
         "java/lang/String" if field == "CASE_INSENSITIVE_ORDER" => crate::jutil::case_insensitive_order(rt),
+        "net/minecraft/world/level/block/state/StateHolder" if field == "PROPERTY_ENTRY_TO_STRING_FUNCTION" => crate::functions::property_entry_text(rt),
+        // Whether the game runs on macOS (its Command key, its window's ways).
+        "net/minecraft/client/Minecraft" if field == "ON_OSX" => {
+            V::I(cfg!(target_os = "macos") as i32)
+        }
+        // Where the trident's and the spyglass's two models are: `minecraft:trident_in_hand#inventory`.
+        "net/minecraft/client/renderer/entity/ItemRenderer"
+            if matches!(
+                field,
+                "TRIDENT_MODEL"
+                    | "TRIDENT_IN_HAND_MODEL"
+                    | "SPYGLASS_MODEL"
+                    | "SPYGLASS_IN_HAND_MODEL"
+            ) =>
+        {
+            let name = field.trim_end_matches("_MODEL").to_ascii_lowercase();
+            rt.intern(format!("compat:item-renderer/{field}"), |rt| {
+                crate::baked_models::location(rt, &format!("minecraft:{name}"), "inventory")
+            })
+        }
         "java/lang/System" if field == "out" || field == "err" => crate::jlang::std_stream(rt, field == "err"),
         // The primitives' classes (`int.class` is `Integer.TYPE`), one object each.
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Boolean" | "java/lang/Byte" | "java/lang/Character" | "java/lang/Short" | "java/lang/Float" | "java/lang/Double" | "java/lang/Void"

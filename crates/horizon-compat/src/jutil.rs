@@ -617,8 +617,105 @@ fn find(rt: &mut Rt, t: &Table, k: V) -> Option<usize> {
         .find(|&i| key_equals(rt, t.strategy, t.entries[i].0, k))
 }
 
-/// Puts `k → v` in the table at `m`; the previous value, or null.
+/// The other way round of the `BiMap` at `m`, if it is one with an `inverse()` made: Guava's is
+/// a view of the same entries, so a `BiMap` here is two tables kept as one, each naming the other
+/// in its comparator slot, which a table that isn't sorted has no other use for (a fastutil map
+/// keeps a number there, never a table that names it back).
+fn inverse_of(rt: &Rt, m: V) -> Option<V> {
+    let other = |v: V| match rt.heap.get(v.r() as usize).map(|o| &o.data) {
+        Some(Data::Table(t)) if !t.sorted && t.comparator.r() != 0 => Some(t.comparator),
+        _ => None,
+    };
+    let inverse = other(m)?;
+    (other(inverse)? == m).then_some(inverse)
+}
+
+/// Makes the tables at `a` and `b` each other's inverse ([`inverse_of`]).
+fn pair(rt: &mut Rt, a: V, b: V) {
+    for (this, other) in [(a, b), (b, a)] {
+        if let Some(Data::Table(t)) = rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data) {
+            t.comparator = other;
+        }
+    }
+}
+
+/// An empty `BiMap` of class `class` with its inverse.
+fn new_bimap(rt: &mut Rt, class: &'static str) -> V {
+    let m = rt.alloc(class, Data::Table(Table::default()));
+    let inverse = rt.alloc(class, Data::Table(Table::default()));
+    pair(rt, m, inverse);
+    m
+}
+
+/// `put` (or `forcePut`, with `force`) of a `BiMap` and its inverse, as Guava's `HashBiMap`: a
+/// value has one key, so a value another key holds is refused (`IllegalArgumentException`) or,
+/// forced, that key goes; the key's old value is no key of the inverse any more. An entry
+/// keeps its place in both when its value changes.
+fn put_both(rt: &mut Rt, m: V, inverse: V, k: V, v: V, force: bool) -> V {
+    let same =
+        |rt: &mut Rt, a: V, b: V| (is_null(a) && is_null(b)) || (!is_null(a) && equals(rt, a, b));
+    let had = get_in(rt, m, k);
+    if let Some(old) = had
+        && same(rt, old, v)
+    {
+        return old;
+    }
+    if let Some(other) = get_in(rt, inverse, v) {
+        if !force {
+            let text = crate::jlang::text(rt, v);
+            return crate::jlang::throw_with(
+                rt,
+                "java/lang/IllegalArgumentException",
+                &format!("value already present: {text}"),
+            );
+        }
+        take_out(rt, m, other);
+        take_out(rt, inverse, v);
+    }
+    let moved = match had {
+        Some(old) => rekey_in(rt, inverse, old, v),
+        None => false,
+    };
+    if !moved {
+        put_in(rt, inverse, v, k);
+    }
+    put_in(rt, m, k, v);
+    had.unwrap_or(V::NULL)
+}
+
+/// Gives the entry of key `old` in the table at `m` the key `k`, where it is; whether there
+/// was one.
+fn rekey_in(rt: &mut Rt, m: V, old: V, k: V) -> bool {
+    let Some(mut t) = take_table(rt, m) else {
+        return false;
+    };
+    let at = find(rt, &t, old);
+    if let Some(at) = at {
+        let (was, now) = (key_hash(rt, t.strategy, old), key_hash(rt, t.strategy, k));
+        if let Some(slots) = t.index.get_mut(&was) {
+            slots.retain(|s| *s != at);
+            if slots.is_empty() {
+                t.index.remove(&was);
+            }
+        }
+        t.entries[at].0 = k;
+        t.index.entry(now).or_default().push(at);
+    }
+    put_table(rt, m, t);
+    at.is_some()
+}
+
+/// Puts `k → v` in the table at `m`; the previous value, or null. In a `BiMap` with its inverse
+/// ([`inverse_of`]), in both.
 pub fn table_put(rt: &mut Rt, m: V, k: V, v: V) -> V {
+    match inverse_of(rt, m) {
+        Some(inverse) => put_both(rt, m, inverse, k, v, false),
+        None => put_in(rt, m, k, v),
+    }
+}
+
+/// [`table_put`] in the one table at `m`.
+fn put_in(rt: &mut Rt, m: V, k: V, v: V) -> V {
     let Some(mut t) = take_table(rt, m) else { return V::NULL };
     if by_comparator(&t) {
         let old = match search(rt, &t, k) {
@@ -661,13 +758,29 @@ pub fn table_put(rt: &mut Rt, m: V, k: V, v: V) -> V {
 }
 
 pub fn table_get(rt: &mut Rt, m: V, k: V) -> Option<V> {
+    get_in(rt, m, k)
+}
+
+fn get_in(rt: &mut Rt, m: V, k: V) -> Option<V> {
     let t = take_table(rt, m)?;
     let r = find(rt, &t, k).map(|i| t.entries[i].1);
     put_table(rt, m, t);
     r
 }
 
+/// Takes `k` out of the table at `m`; its value, if it was there. Out of a `BiMap` with its
+/// inverse ([`inverse_of`]), out of both.
 pub fn table_remove(rt: &mut Rt, m: V, k: V) -> Option<V> {
+    let inverse = inverse_of(rt, m);
+    let value = take_out(rt, m, k)?;
+    if let Some(inverse) = inverse {
+        take_out(rt, inverse, value);
+    }
+    Some(value)
+}
+
+/// [`table_remove`] out of the one table at `m`.
+fn take_out(rt: &mut Rt, m: V, k: V) -> Option<V> {
     let mut t = take_table(rt, m)?;
     let r = if by_comparator(&t) {
         search(rt, &t, k).ok().map(|i| t.entries.remove(i).1)
@@ -1313,6 +1426,9 @@ fn util_owner(owner: &str) -> bool {
         || owner == "java/lang/Iterable"
         || owner.starts_with("it/unimi/dsi/fastutil/")
         || owner.starts_with("com/google/common/collect/")
+        // Gson's own map, which a mod's config library keeps its values in: a map in the order
+        // its keys were put, as any here.
+        || owner == "com/google/gson/internal/LinkedTreeMap"
 }
 
 /// What `Properties` has past a map's own methods: its texts by key, and its file format (a
@@ -2299,8 +2415,27 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             if name == "contains" { V::I((at >= 0) as i32) } else { V::I(at) }
         }
         ("org/apache/commons/lang3/ArrayUtils", "isEmpty") => V::I(elements(rt, a(0)).is_empty() as i32),
-        // Guava's `HashBiMap.create()`: a map (its `inverse()` is a copy, read after it's filled).
-        ("com/google/common/collect/HashBiMap", "create") => rt.alloc("com/google/common/collect/HashBiMap", Data::Table(Table::default())),
+        // Guava's `HashBiMap.create()`, with its inverse; `create(map)` holds the map's entries.
+        // (An `EnumHashBiMap`'s keys are in the order they were put, not their enum's.)
+        (
+            "com/google/common/collect/HashBiMap"
+            | "com/google/common/collect/EnumHashBiMap"
+            | "com/google/common/collect/EnumBiMap",
+            "create",
+        ) => {
+            let class = match owner {
+                "com/google/common/collect/EnumHashBiMap" => {
+                    "com/google/common/collect/EnumHashBiMap"
+                }
+                "com/google/common/collect/EnumBiMap" => "com/google/common/collect/EnumBiMap",
+                _ => "com/google/common/collect/HashBiMap",
+            };
+            let m = new_bimap(rt, class);
+            for (k, v) in table_entries(rt, a(0)) {
+                table_put(rt, m, k, v);
+            }
+            m
+        }
         // Commons Lang's in-place reversal of an array.
         ("org/apache/commons/lang3/ArrayUtils", "reverse") => {
             if let Some(Data::Array(items)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data) {
@@ -2507,6 +2642,15 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         }
         ("java/util/stream/Stream", "of") => {
             let items = varargs(rt);
+            rt.alloc("java/util/stream/Stream", Data::Stream(items))
+        }
+        // `Stream.ofNullable(x)`: of `x`, or of nothing for null.
+        ("java/util/stream/Stream", "ofNullable") => {
+            let items = if is_null(a(0)) {
+                Vec::new()
+            } else {
+                vec![a(0)]
+            };
             rt.alloc("java/util/stream/Stream", Data::Stream(items))
         }
         ("java/util/Arrays", "stream") => {
@@ -2733,6 +2877,25 @@ fn arrays_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             all.splice(from..to, part);
             store(rt, a(0), all);
+            V::Void
+        }
+        // `setAll(array, generator)`: each element what the generator makes of its index, in
+        // order (an element is stored before the next is asked for).
+        "setAll" => {
+            let len = items(rt, a(0))?.len();
+            let apply = match elem {
+                'I' => "java/util/function/IntUnaryOperator.applyAsInt.(I)I",
+                'J' => "java/util/function/IntToLongFunction.applyAsLong.(I)J",
+                'D' => "java/util/function/IntToDoubleFunction.applyAsDouble.(I)D",
+                _ => "java/util/function/IntFunction.apply.(I)Ljava/lang/Object;",
+            };
+            for i in 0..len {
+                let v = rt.call_functional(apply, a(1), &[V::I(i as i32)]);
+                if rt.thrown.is_some() {
+                    break;
+                }
+                rt.array_set(a(0), i as i32, v);
+            }
             V::Void
         }
         "fill" => {
@@ -3554,20 +3717,41 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             old
         }
         "getOrDefault" => table_get(rt, this, a(1)).unwrap_or(a(2)),
-        // A `BiMap`'s other way round: a copy with keys and values swapped.
-        "inverse" if args.len() == 1 => {
-            let class = rt.class_of(this);
-            let inv = rt.alloc(class, Data::Table(Table::default()));
-            for (k, v) in table_entries(rt, this) {
-                table_put(rt, inv, v, k);
+        // A `BiMap`'s other way round: the table kept with it ([`inverse_of`]), made now for one
+        // that had none (an immutable one, which was a map until asked).
+        "inverse" if args.len() == 1 => match inverse_of(rt, this) {
+            Some(inverse) => inverse,
+            None => {
+                let class = rt.class_of(this);
+                let inverse = rt.alloc(class, Data::Table(Table::default()));
+                for (k, v) in table_entries(rt, this) {
+                    put_in(rt, inverse, v, k);
+                }
+                pair(rt, this, inverse);
+                inverse
             }
-            inv
+        },
+        // `BiMap.forcePut`: the value's other key goes, where `put` refuses it.
+        "forcePut" => {
+            let had = table_get(rt, this, a(1));
+            match inverse_of(rt, this) {
+                Some(inverse) => put_both(rt, this, inverse, a(1), a(2), true),
+                None => table_put(rt, this, a(1), a(2)),
+            };
+            found(rt, had)
         }
         "containsKey" => V::I(table_get(rt, this, a(1)).is_some() as i32),
-        "containsValue" => {
-            let vals: Vec<V> = table_entries(rt, this).into_iter().map(|(_, v)| v).collect();
-            V::I(vals.into_iter().any(|v| equals(rt, v, a(2 - 1))) as i32)
-        }
+        // A `BiMap`'s values are its inverse's keys.
+        "containsValue" => match inverse_of(rt, this) {
+            Some(inverse) => V::I(get_in(rt, inverse, a(1)).is_some() as i32),
+            None => {
+                let vals: Vec<V> = table_entries(rt, this)
+                    .into_iter()
+                    .map(|(_, v)| v)
+                    .collect();
+                V::I(vals.into_iter().any(|v| equals(rt, v, a(1))) as i32)
+            }
+        },
         "put" => {
             let had = table_get(rt, this, a(1));
             table_put(rt, this, a(1), a(2));
@@ -3605,13 +3789,27 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        // `replaceAll(function)`: each key's value what the function makes of the two.
+        "replaceAll" => {
+            for (k, v) in table_entries(rt, this) {
+                let new = rt.call_functional("java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", a(1), &[k, v]);
+                if rt.thrown.is_some() {
+                    break;
+                }
+                table_put(rt, this, k, new);
+            }
+            V::Void
+        }
         "remove" => {
             let v = table_remove(rt, this, a(1));
             found(rt, v)
         }
         "clear" => {
-            let empty = emptied(rt, this);
-            put_table(rt, this, empty);
+            // A `BiMap`'s inverse with it.
+            for m in [Some(this), inverse_of(rt, this)].into_iter().flatten() {
+                let empty = emptied(rt, m);
+                put_table(rt, m, empty);
+            }
             V::Void
         }
         // A key mapped to null counts as absent; a primitive map's value (fastutil's
@@ -5325,6 +5523,244 @@ mod tests {
             "{:?}",
             rt.unmapped
         );
+    }
+
+    /// `Arrays.setAll` fills an array from its indices, `Map.replaceAll` gives each key the value
+    /// a function makes of its entry, and `Stream.ofNullable(null)` is empty.
+    #[test]
+    fn arrays_maps_and_streams_take_a_function_of_each() {
+        fn fns(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            Some(match id {
+                // An index as its text; an index squared; a key's value and its key's length.
+                1 => rt.string(&format!("#{}", args[1].i())),
+                2 => V::I(args[1].i() * args[1].i()),
+                _ => {
+                    let n = rt.str_of(args[1]).map_or(0, str::len) as i32;
+                    V::I(args[2].i() + n)
+                }
+            })
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(fns);
+        let names = rt.new_array(3, V::NULL);
+        let name = rt.lambda_id("java/util/function/IntFunction", 1, vec![]);
+        c(
+            &mut rt,
+            "java/util/Arrays.setAll.([Ljava/lang/Object;Ljava/util/function/IntFunction;)V",
+            &[names, name],
+        );
+        let texts: Vec<String> = elements(&rt, names)
+            .iter()
+            .map(|v| rt.str_of(*v).unwrap_or("?").to_owned())
+            .collect();
+        assert_eq!(texts, ["#0", "#1", "#2"]);
+        let squares = rt.alloc("[I", Data::Array(vec![V::I(0); 4]));
+        let square = rt.lambda_id("java/util/function/IntUnaryOperator", 2, vec![]);
+        c(
+            &mut rt,
+            "java/util/Arrays.setAll.([ILjava/util/function/IntUnaryOperator;)V",
+            &[squares, square],
+        );
+        assert_eq!(elements(&rt, squares), [V::I(0), V::I(1), V::I(4), V::I(9)]);
+
+        let m = rt.alloc("java/util/LinkedHashMap", Data::Table(Table::default()));
+        for (k, v) in [("iron", 1), ("gold", 20)] {
+            let k = rt.string(k);
+            table_put(&mut rt, m, k, V::I(v));
+        }
+        let longer = rt.lambda_id("java/util/function/BiFunction", 3, vec![]);
+        c(
+            &mut rt,
+            "java/util/Map.replaceAll.(Ljava/util/function/BiFunction;)V",
+            &[m, longer],
+        );
+        let values: Vec<V> = table_pairs(&rt, m).into_iter().map(|(_, v)| v).collect();
+        assert_eq!(values, [V::I(5), V::I(24)]);
+
+        let none = c(
+            &mut rt,
+            "java/util/stream/Stream.ofNullable.(Ljava/lang/Object;)Ljava/util/stream/Stream;",
+            &[V::NULL],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/stream/Stream.count.()J", &[none]),
+            V::J(0)
+        );
+        let one = c(
+            &mut rt,
+            "java/util/stream/Stream.ofNullable.(Ljava/lang/Object;)Ljava/util/stream/Stream;",
+            &[m],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/stream/Stream.count.()J", &[one]),
+            V::J(1)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Guava's `BiMap.inverse()` is a view: the same object at every call, in which what is put
+    /// in the map since is found, and through which the map is written. A value has one key:
+    /// `put` refuses a value another key holds, `forcePut` takes it from that key. (The inverse
+    /// was a copy made at each call: FramedBlocks asks for it once per block state, and with
+    /// 365 mods' states that took memory by the square of their number: 23 GB.)
+    #[test]
+    fn a_bimap_and_its_inverse_are_one() {
+        crate::install();
+        let mut rt = Rt::new();
+        const PUT: &str = "com/google/common/collect/BiMap.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        const GET: &str =
+            "com/google/common/collect/BiMap.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        const INVERSE: &str =
+            "com/google/common/collect/BiMap.inverse.()Lcom/google/common/collect/BiMap;";
+        let m = c(
+            &mut rt,
+            "com/google/common/collect/HashBiMap.create.()Lcom/google/common/collect/HashBiMap;",
+            &[],
+        );
+        let [stone, dirt, sand, clay, one, two, three, four, five] =
+            ["stone", "dirt", "sand", "clay", "1", "2", "3", "4", "5"].map(|t| rt.string(t));
+        let texts = |rt: &Rt, m: V| -> Vec<(String, String)> {
+            let text = |v: V| rt.str_of(v).unwrap_or("null").to_owned();
+            table_pairs(rt, m)
+                .into_iter()
+                .map(|(k, v)| (text(k), text(v)))
+                .collect()
+        };
+        let pairs = |all: &[(&str, &str)]| -> Vec<(String, String)> {
+            all.iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect()
+        };
+        c(&mut rt, PUT, &[m, stone, one]);
+        let inverse = c(&mut rt, INVERSE, &[m]);
+        assert_eq!(
+            c(&mut rt, INVERSE, &[m]),
+            inverse,
+            "one view, not a copy a call"
+        );
+        assert_eq!(c(&mut rt, INVERSE, &[inverse]), m);
+        // Put after the view was taken, and through it.
+        c(&mut rt, PUT, &[m, dirt, two]);
+        c(&mut rt, PUT, &[inverse, three, sand]);
+        assert_eq!(c(&mut rt, GET, &[inverse, two]), dirt);
+        assert_eq!(c(&mut rt, GET, &[m, sand]), three);
+        assert_eq!(
+            texts(&rt, m),
+            pairs(&[("stone", "1"), ("dirt", "2"), ("sand", "3")])
+        );
+        // A key's new value: its old one is no key of the inverse, and the entry keeps its place.
+        assert_eq!(c(&mut rt, PUT, &[m, dirt, four]), two);
+        assert_eq!(
+            texts(&rt, inverse),
+            pairs(&[("1", "stone"), ("4", "dirt"), ("3", "sand")])
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/BiMap.containsValue.(Ljava/lang/Object;)Z",
+                &[m, two]
+            ),
+            V::I(0)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/BiMap.containsValue.(Ljava/lang/Object;)Z",
+                &[m, four]
+            ),
+            V::I(1)
+        );
+        // A value another key holds: refused, and nothing changes; forced, that key goes.
+        c(&mut rt, PUT, &[m, clay, one]);
+        let thrown = rt.thrown.take().expect("a value has one key");
+        assert_eq!(rt.class_of(thrown), "java/lang/IllegalArgumentException");
+        assert_eq!(
+            texts(&rt, m),
+            pairs(&[("stone", "1"), ("dirt", "4"), ("sand", "3")])
+        );
+        c(
+            &mut rt,
+            "com/google/common/collect/BiMap.forcePut.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[m, clay, one],
+        );
+        assert_eq!(
+            texts(&rt, m),
+            pairs(&[("dirt", "4"), ("sand", "3"), ("clay", "1")])
+        );
+        assert_eq!(
+            texts(&rt, inverse),
+            pairs(&[("4", "dirt"), ("3", "sand"), ("1", "clay")])
+        );
+        // The same entry again is no change; a removal through either is one of both.
+        assert_eq!(c(&mut rt, PUT, &[m, clay, one]), one);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/BiMap.remove.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[inverse, four]
+            ),
+            dirt
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/BiMap.containsKey.(Ljava/lang/Object;)Z",
+                &[m, dirt]
+            ),
+            V::I(0)
+        );
+        c(&mut rt, PUT, &[m, stone, five]);
+        assert_eq!(
+            texts(&rt, inverse),
+            pairs(&[("3", "sand"), ("1", "clay"), ("5", "stone")])
+        );
+        c(
+            &mut rt,
+            "com/google/common/collect/BiMap.clear.()V",
+            &[inverse],
+        );
+        assert!(texts(&rt, m).is_empty() && texts(&rt, inverse).is_empty());
+        c(&mut rt, PUT, &[m, sand, two]);
+        assert_eq!(
+            c(&mut rt, GET, &[inverse, two]),
+            sand,
+            "still one after a clear"
+        );
+        // `create(map)` holds the map's entries; an immutable one's inverse is made once.
+        let copy = c(
+            &mut rt,
+            "com/google/common/collect/HashBiMap.create.(Ljava/util/Map;)Lcom/google/common/collect/HashBiMap;",
+            &[m],
+        );
+        let copied = c(&mut rt, INVERSE, &[copy]);
+        assert_eq!(texts(&rt, copied), pairs(&[("2", "sand")]));
+        c(&mut rt, PUT, &[copy, clay, one]);
+        assert_eq!(
+            texts(&rt, m),
+            pairs(&[("sand", "2")]),
+            "a copy is a map of its own"
+        );
+        let fixed = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableBiMap.copyOf.(Ljava/util/Map;)Lcom/google/common/collect/ImmutableBiMap;",
+            &[copy],
+        );
+        let back = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableBiMap.inverse.()Lcom/google/common/collect/ImmutableBiMap;",
+            &[fixed],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/collect/ImmutableBiMap.inverse.()Lcom/google/common/collect/ImmutableBiMap;",
+                &[fixed]
+            ),
+            back
+        );
+        assert_eq!(texts(&rt, back), pairs(&[("2", "sand"), ("1", "clay")]));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A tree map made with a comparator tells its keys apart by it alone, as Java's does: one

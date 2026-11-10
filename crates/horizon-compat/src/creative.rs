@@ -307,6 +307,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (CONTENTS_EVENT | PARAMETERS, "hasPermissions") => V::I(0),
         (CONTENTS_EVENT | PARAMETERS, "getFlags" | "enabledFeatures") => rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")),
         ("net/minecraft/world/flag/FeatureFlagSet", "contains" | "isSubsetOf") => V::I(1),
+        // `FeatureFlagSet.of(...)`: the one set of flags there is here (every feature on).
+        ("net/minecraft/world/flag/FeatureFlagSet", "of") => rt
+            .intern("compat:feature-flags".into(), |rt| {
+                rt.new_object("net/minecraft/world/flag/FeatureFlagSet")
+            }),
         // The features a level, a connection or a command source has on (`level.enabledFeatures()`):
         // that one set.
         (_, "enabledFeatures") if desc == FLAGS => rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")),

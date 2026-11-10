@@ -480,7 +480,10 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         ITEM_EVENT => matches!(name, "register" | "getItemColors" | "getBlockColors"),
         BLOCK_COLORS => matches!(name, "register" | "getColor"),
         ITEM_COLORS => matches!(name, "register" | "getColor"),
-        MINECRAFT => matches!(name, "getBlockColors" | "getItemColors"),
+        MINECRAFT => matches!(
+            name,
+            "getBlockColors" | "getItemColors" | "$blockColors" | "$itemColors"
+        ),
         BIOME_COLORS => BiomeColor::of_average(name).is_some(),
         GRASS_COLOR => matches!(name, "get" | "getDefaultColor"),
         FOLIAGE_COLOR => matches!(
@@ -507,8 +510,11 @@ pub(crate) fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             register(rt, "item", a(1), a(2));
             V::Void
         }
-        (BLOCK_EVENT | ITEM_EVENT | MINECRAFT, "getBlockColors") => block_colors(rt),
-        (ITEM_EVENT | MINECRAFT, "getItemColors") => item_colors(rt),
+        // (And `Minecraft`'s two fields, as a mixin's accessor reads them.)
+        (BLOCK_EVENT | ITEM_EVENT | MINECRAFT, "getBlockColors") | (MINECRAFT, "$blockColors") => {
+            block_colors(rt)
+        }
+        (ITEM_EVENT | MINECRAFT, "getItemColors") | (MINECRAFT, "$itemColors") => item_colors(rt),
         // `getColor(state, level, pos)`: the handler with no level, else (vanilla: the state's map
         // colour, which isn't kept) none.
         (BLOCK_COLORS, "getColor") if desc.contains("Lnet/minecraft/world/level/Level;") => {

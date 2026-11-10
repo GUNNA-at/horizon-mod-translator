@@ -426,8 +426,18 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     Some(match return_kind(short) {
         'V' => V::NULL,
         'L' | '[' => r,
-        _ => box_raw(rt, r),
+        kind => box_as(rt, r, kind),
     })
+}
+
+/// A primitive boxed as what declares it says (`kind`: a field's or an array's type, a
+/// method's return type): a `boolean` as a `Boolean`, a `char` as a `Character`. The runtime
+/// holds those, a `byte` and a `short` as an int, which alone says `Integer`.
+fn box_as(rt: &mut Rt, v: V, kind: char) -> V {
+    match (v, kind) {
+        (V::I(_), 'Z' | 'B' | 'S' | 'C') => crate::mixin::box_value(rt, v, kind),
+        _ => box_raw(rt, v),
+    }
 }
 
 /// The constructors and methods class `class` declares, as the bundle's table lists them
@@ -1069,7 +1079,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getDeclaredField" | "getField" => field_object(rt, a(0), a(1)),
             "getDeclaredFields" | "getFields" => {
                 let n = rt.str_of(a(0)).unwrap_or("").to_owned();
-                fields_array(rt, &n, name == "getFields")?
+                match fields_array(rt, &n, name == "getFields") {
+                    Some(fields) => fields,
+                    // A class of Java's own (a box, a string, an array, a primitive) lists none:
+                    // none a mod looks for there, its annotated ones (a config library asks it
+                    // of the class of every value it walks).
+                    None if n.starts_with("java/") || n.starts_with('[') || !n.contains('/') => {
+                        rt.alloc("[Ljava/lang/reflect/Field;", Data::Array(Vec::new()))
+                    }
+                    None => return None,
+                }
             }
             // An array class (`int[].class`, `[I`) and what it holds; the primitives' own.
             "isArray" => V::I(rt.str_of(a(0)).is_some_and(|n| n.starts_with('[')) as i32),
@@ -1312,7 +1331,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "getLength" => V::I(rt.array_len(a(0))),
             "get" => {
                 let v = rt.array_get(a(0), a(1).i());
-                box_raw(rt, v)
+                let kind = rt.class_of(a(0)).chars().nth(1).unwrap_or('L');
+                box_as(rt, v, kind)
             }
             "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte"
             | "getChar" | "getShort" => rt.array_get(a(0), a(1).i()),
@@ -1450,7 +1470,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             "get" => {
                 let v = field_value(rt, a(0), a(1));
-                box_raw(rt, v)
+                let (class, name, _) = field_parts(rt, a(0));
+                let kind = find_field(rt, &class, name).and_then(|(_, desc)| desc.chars().next());
+                box_as(rt, v, kind.unwrap_or('L'))
             }
             "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte" | "getShort" | "getChar" => {
                 let v = field_value(rt, a(0), a(1));
@@ -3212,12 +3234,20 @@ mod tests {
     #[test]
     fn reflection_reaches_a_mods_fields_and_methods_by_name() {
         fn vcall(rt: &mut Rt, _key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short == "isActive.()Z" {
+                return rt.get_field(args[0], "active");
+            }
             assert_eq!(short, "getEnergy.()J");
             rt.get_field(args[0], "energy")
         }
         fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
             if (class, what) == ("t/Machine", "<clinit>") && !rt.statics.contains_key("t/Machine.COUNT") {
                 rt.statics.insert("t/Machine.COUNT", V::I(3));
+            }
+            if (class, what) == ("t/Machine", "fields") {
+                return Some(
+                    rt.string("1 energy J\n1 active Z\n1 symbol C\n1 tier B\n25 COUNT I\n"),
+                );
             }
             Some(V::Void)
         }
@@ -3226,6 +3256,7 @@ mod tests {
         rt.vcall = Some(vcall);
         rt.reflect = Some(reflect);
         rt.vkeys.insert("getEnergy.()J");
+        rt.vkeys.insert("isActive.()Z");
         let class = class_object(&mut rt, "t/Machine");
         let machine = rt.new_object("t/Machine");
         rt.put_field(machine, "energy", V::J(5));
@@ -3257,6 +3288,68 @@ mod tests {
         let no_args = rt.new_array(0, V::NULL);
         let boxed = c(&mut rt, "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", &[method, machine, no_args]);
         assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Long", V::J(7)));
+
+        // A `boolean`, a `char` and a `byte` are ints here; each is boxed as its field, its
+        // method or its array declares it (a config library took a `boolean` field read as an
+        // `Integer` for no boolean, and wrote `false` for every one).
+        for (field, value, boxed_as) in [
+            ("active", 1, "java/lang/Boolean"),
+            ("symbol", 0x263a, "java/lang/Character"),
+            ("tier", 4, "java/lang/Byte"),
+        ] {
+            rt.put_field(machine, field, V::I(value));
+            let name = rt.string(field);
+            let f = c(
+                &mut rt,
+                "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+                &[class, name],
+            );
+            let boxed = c(
+                &mut rt,
+                "java/lang/reflect/Field.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[f, machine],
+            );
+            assert_eq!(
+                (rt.class_of(boxed), rt.get_field(boxed, "value")),
+                (boxed_as, V::I(value)),
+                "{field}"
+            );
+        }
+        let name = rt.string("isActive");
+        let no_params = rt.new_array(0, V::NULL);
+        let method = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+            &[class, name, no_params],
+        );
+        let no_args = rt.new_array(0, V::NULL);
+        let boxed = c(
+            &mut rt,
+            "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+            &[method, machine, no_args],
+        );
+        assert_eq!(rt.class_of(boxed), "java/lang/Boolean");
+        // And the box's own class has no fields a mod looks for.
+        let box_class = class_object(&mut rt, "java/lang/Boolean");
+        let none = c(
+            &mut rt,
+            "java/lang/Class.getDeclaredFields.()[Ljava/lang/reflect/Field;",
+            &[box_class],
+        );
+        assert_eq!(
+            (rt.class_of(none), rt.array_len(none)),
+            ("[Ljava/lang/reflect/Field;", 0)
+        );
+        let flags = rt.alloc("[Z", Data::Array(vec![V::I(0), V::I(1)]));
+        let boxed = c(
+            &mut rt,
+            "java/lang/reflect/Array.get.(Ljava/lang/Object;I)Ljava/lang/Object;",
+            &[flags, V::I(1)],
+        );
+        assert_eq!(
+            (rt.class_of(boxed), rt.get_field(boxed, "value")),
+            ("java/lang/Boolean", V::I(1))
+        );
     }
 
     #[test]

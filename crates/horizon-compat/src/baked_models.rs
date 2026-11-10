@@ -537,6 +537,15 @@ mod tests {
         let vanilla = crate::api::call(&mut rt, VANILLA, &[path, inventory]);
         let vanilla_id = crate::api::call(&mut rt, ID, &[vanilla]);
         assert_eq!(rt.str_of(vanilla_id), Some("minecraft:trident_in_hand"));
+        // The item renderer's own constant for it is that location.
+        let constant = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/client/renderer/entity/ItemRenderer.TRIDENT_IN_HAND_MODEL",
+        );
+        assert_eq!(
+            crate::api::call(&mut rt, EQUALS, &[constant, vanilla]),
+            V::I(1)
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

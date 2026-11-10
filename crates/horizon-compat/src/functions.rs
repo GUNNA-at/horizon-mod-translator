@@ -99,6 +99,15 @@ pub(crate) fn name_lookup(rt: &mut Rt, values: V, key_fn: V) -> V {
     combinator(rt, "compat:fn/name_lookup", vec![values, key_fn])
 }
 
+/// `StateHolder.PROPERTY_ENTRY_TO_STRING_FUNCTION`: a state's property and value (an entry of
+/// `getValues()`) as `name=value`, the value by the property's own name for it; `<NULL>` for no
+/// entry.
+pub(crate) fn property_entry_text(rt: &mut Rt) -> V {
+    rt.intern("compat:fn/property-entry-text".into(), |rt| {
+        combinator(rt, "compat:fn/property-entry-text", Vec::new())
+    })
+}
+
 /// A method of the game's or Java's as a function of its receiver and arguments
 /// (`Map.Entry::getKey`): `key` is the method's.
 pub(crate) fn method(rt: &mut Rt, key: &str) -> V {
@@ -205,6 +214,38 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             rt.get_field(args.first().copied().unwrap_or_default(), name)
         }
         "compat:fn/constant" => part(0),
+        "compat:fn/property-entry-text" => {
+            let entry = args.first().copied().unwrap_or_default();
+            if entry.r() == 0 {
+                return rt.string("<NULL>");
+            }
+            let property = crate::api::call(
+                rt,
+                "java/util/Map$Entry.getKey.()Ljava/lang/Object;",
+                &[entry],
+            );
+            let value = crate::api::call(
+                rt,
+                "java/util/Map$Entry.getValue.()Ljava/lang/Object;",
+                &[entry],
+            );
+            let name = crate::api::call(
+                rt,
+                "net/minecraft/world/level/block/state/properties/Property.getName.()Ljava/lang/String;",
+                &[property],
+            );
+            let of = crate::api::call(
+                rt,
+                "net/minecraft/world/level/block/state/properties/Property.getName.(Ljava/lang/Comparable;)Ljava/lang/String;",
+                &[property, value],
+            );
+            let text = format!(
+                "{}={}",
+                rt.str_of(name).unwrap_or(""),
+                rt.str_of(of).unwrap_or("")
+            );
+            rt.string(&text)
+        }
         // [values, keyFunction]: `apply(name)`.
         "compat:fn/name_lookup" => {
             let Some(wanted) = args.first().and_then(|&n| rt.str_of(n)).map(str::to_owned) else { return V::NULL };

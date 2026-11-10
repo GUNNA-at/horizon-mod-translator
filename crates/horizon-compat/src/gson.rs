@@ -18,6 +18,7 @@ pub(crate) const ARRAY: &str = "com/google/gson/JsonArray";
 pub(crate) const PRIMITIVE: &str = "com/google/gson/JsonPrimitive";
 pub(crate) const NULL: &str = "com/google/gson/JsonNull";
 const PARSER: &str = "com/google/gson/JsonParser";
+const STREAMS: &str = "com/google/gson/internal/Streams";
 pub(crate) const GSON: &str = "com/google/gson/Gson";
 const BUILDER: &str = "com/google/gson/GsonBuilder";
 const HELPER: &str = "net/minecraft/util/GsonHelper";
@@ -39,6 +40,7 @@ pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
             | PRIMITIVE
             | NULL
             | PARSER
+            | STREAMS
             | GSON
             | BUILDER
             | HELPER
@@ -904,6 +906,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     match owner {
         HELPER => return helper_call(rt, name, desc, args),
         PARSER => return parser_call(rt, name, desc, args),
+        // Gson's own helper, which a config library calls for itself: a tree written to a
+        // writer, and one read from a reader.
+        STREAMS => {
+            let a = |i: usize| args.get(i).copied().unwrap_or_default();
+            return Some(match name {
+                "write" => {
+                    let tree = if a(0).r() == 0 { null(rt) } else { a(0) };
+                    write_to(rt, a(1), tree, None);
+                    V::Void
+                }
+                "parse" => parse_reader(rt, a(0)),
+                _ => return None,
+            });
+        }
         GSON | BUILDER => return gson_call(rt, owner, name, desc, args),
         FIELD_ATTRIBUTES => return field_attributes_call(rt, name, args),
         TOKEN => return token_call(rt, name, args),
@@ -2179,7 +2195,13 @@ fn gson_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
                         Ok(Some((v, _))) => v,
                     }
                 };
-                return Some(from_tree_in(rt, this, tree, &ty, 0, 0));
+                let read = from_tree_in(rt, this, tree, &ty, 0, 0);
+                // What is read as a primitive's type comes back in its box, an object as any
+                // (`(Boolean) gson.fromJson(reader, boolean.class)`).
+                return Some(match ty.as_bytes() {
+                    &[kind] => crate::mixin::box_value(rt, read, char::from(kind)),
+                    _ => read,
+                });
             }
             if is_element_class(rt.class_of(a(1))) {
                 let v = a(1);
@@ -2625,16 +2647,19 @@ fn bound_fields(
 /// ([`adapter_for`]), for the value's own class where the type says no more than a class, then
 /// for the type. What a value holds is written by all of them.
 fn to_tree_in(rt: &mut Rt, gson: V, v: V, ty: &str, nulls: bool, depth: usize, from: usize) -> V {
-    match ty {
-        "Z" => return boolean(rt, v.i() != 0),
-        "C" => {
-            let c = char::from_u32(v.i() as u32)
-                .map(String::from)
-                .unwrap_or_default();
-            return string(rt, &c);
-        }
-        "I" | "S" | "B" | "J" | "F" | "D" => return number(rt, v),
-        _ => {}
+    // A primitive's type: the value raw, or in its box (`toJson(field.get(o), boolean.class)`).
+    if let &[kind @ (b'Z' | b'C' | b'I' | b'S' | b'B' | b'J' | b'F' | b'D')] = ty.as_bytes() {
+        let raw = crate::mixin::unbox(rt, v, char::from(kind));
+        return match kind {
+            b'Z' => boolean(rt, raw.i() != 0),
+            b'C' => {
+                let c = char::from_u32(raw.i() as u32)
+                    .map(String::from)
+                    .unwrap_or_default();
+                string(rt, &c)
+            }
+            _ => number(rt, raw),
+        };
     }
     // A number a collection holds raw.
     if matches!(v, V::I(_) | V::J(_) | V::F(_) | V::D(_)) {
@@ -3036,6 +3061,31 @@ mod tests {
                 r#"{"speed":3,"name":"fast","ratio":0.5,"on":true,"kept":11,"tags":["a","b"],"entries":[{"id":"x","weight":2},{"id":"y","weight":0}],"limits":{"a":1,"b":20}}"#
             )
         );
+        // A box written as its primitive's type, as a config library writes a field it read
+        // reflectively (`gson.toJson(field.get(o), field.getGenericType())`): a `Boolean` as
+        // `boolean` was `false` whatever it held.
+        for (class, kind, value, text) in [
+            ("boolean", 'Z', V::I(1), "true"),
+            ("int", 'I', V::I(7), "7"),
+            ("double", 'D', V::D(0.25), "0.25"),
+        ] {
+            let boxed = crate::mixin::box_value(&mut rt, value, kind);
+            let ty = rt.class_literal(class);
+            let written = call(
+                &mut rt,
+                "com/google/gson/Gson.toJson.(Ljava/lang/Object;Ljava/lang/reflect/Type;)Ljava/lang/String;",
+                &[gson, boxed, ty],
+            );
+            assert_eq!(rt.str_of(written), Some(text), "{class}");
+            // And read as it: in its box again.
+            let read = call(
+                &mut rt,
+                "com/google/gson/Gson.fromJson.(Ljava/lang/String;Ljava/lang/reflect/Type;)Ljava/lang/Object;",
+                &[gson, written, ty],
+            );
+            assert_eq!(rt.class_of(read), rt.class_of(boxed), "{class}");
+            assert_eq!(rt.get_field(read, "value"), value, "{class}");
+        }
         // With no class to read by, the tree's own shape: maps, lists, every number a `Double`.
         let object = rt.class_literal("java/lang/Object");
         let plain = call(

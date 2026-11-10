@@ -642,15 +642,24 @@ struct Added {
 }
 
 /// Class `c`'s `@SubscribeEvent` methods: (key, handle kind as a lambda's, the method), so
-/// listeners made from them run as lambdas.
-fn subscribers_of(c: &ClassFile) -> Vec<(String, u8, Member)> {
+/// listeners made from them run as lambdas. With them the handlers a mixin injects into a method
+/// the runtime runs itself (`native`: [`weave::Plan::native`]), which listen for the places they
+/// name as a subscriber does for its event.
+fn subscribers_of(
+    c: &ClassFile,
+    native: &BTreeMap<String, Vec<String>>,
+) -> Vec<(String, u8, Member)> {
     c.methods
         .iter()
-        .filter(|m| m.code.is_some() && m.annotations.iter().any(|a| a.ty == SUBSCRIBE_EVENT))
-        .map(|m| {
+        .filter(|m| m.code.is_some())
+        .map(|m| (format!("{}.{}.{}", c.name, m.name, m.desc), m))
+        .filter(|(key, m)| {
+            m.annotations.iter().any(|a| a.ty == SUBSCRIBE_EVENT) || native.contains_key(key)
+        })
+        .map(|(key, m)| {
             let kind = if m.access & 0x0008 != 0 { 6 } else { 5 };
             let member = Member { owner: c.name.clone(), name: m.name.clone(), desc: m.desc.clone() };
-            (format!("{}.{}.{}", c.name, m.name, m.desc), kind, member)
+            (key, kind, member)
         })
         .collect()
 }
@@ -1175,7 +1184,7 @@ impl<'a> Program<'a> {
         let first_lambda = self.lambda_order.len();
         // Listeners made from `@SubscribeEvent` methods run as lambdas.
         for c in classes {
-            for (key, _, _) in subscribers_of(c) {
+            for (key, _, _) in subscribers_of(c, &self.weave.native) {
                 self.lambda_id(&key);
             }
         }
@@ -1398,7 +1407,7 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
                 );
             }
             defs.push_str(&self.class_def(c, reflect));
-            for (key, kind, m) in subscribers_of(c) {
+            for (key, kind, m) in subscribers_of(c, &self.weave.native) {
                 implementations.insert(key, (kind, m));
             }
         }
@@ -1469,12 +1478,23 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             .join("\n");
         let annotations = annotation_lines(c).unwrap_or_default();
         // `@SubscribeEvent` methods: what `bus.register(...)` and `@EventBusSubscriber` listen with.
-        let subscribers: Vec<String> = subscribers_of(c)
+        // And a mixin's injectors into a method the runtime runs itself, which listen for the
+        // places they name.
+        let subscribers: Vec<String> = subscribers_of(c, &self.weave.native)
             .iter()
-            .filter_map(|(key, kind, m)| {
-                let event = crate::class::param_classes(&m.desc).last().cloned()?;
-                let lid = self.lambda_ids.get(key)?;
-                Some(format!("({event:?}, {key:?}, {}, {lid})", *kind == 6))
+            .flat_map(|(key, kind, m)| {
+                let events = match self.weave.native.get(key) {
+                    Some(places) => places.clone(),
+                    None => crate::class::param_classes(&m.desc)
+                        .last()
+                        .cloned()
+                        .into_iter()
+                        .collect(),
+                };
+                let lid = self.lambda_ids.get(key).copied();
+                events.into_iter().filter_map(move |event| {
+                    Some(format!("({event:?}, {key:?}, {}, {})", *kind == 6, lid?))
+                })
             })
             .collect();
         format!(

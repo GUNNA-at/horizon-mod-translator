@@ -4708,6 +4708,7 @@ mod tests {
     /// block item places, air for another item; a mod block's `super` calls reach vanilla's.
     #[test]
     fn a_definition_names_its_properties_and_items_find_their_blocks() {
+        crate::install();
         let mut rt = Rt::new();
         rt.vcall = Some(lambdas);
         let p = props(&mut rt);
@@ -4761,6 +4762,29 @@ mod tests {
             api::call(&mut rt, "java/util/Map.size.()I", &[values]),
             V::I(2)
         );
+        // Each entry as text, as a mod builds a state's model location
+        // (`getValues().entrySet().stream().map(StateHolder.PROPERTY_ENTRY_TO_STRING_FUNCTION)`).
+        let as_text = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/StateHolder.PROPERTY_ENTRY_TO_STRING_FUNCTION",
+        );
+        let entries = api::call(
+            &mut rt,
+            "java/util/Map.entrySet.()Ljava/util/Set;",
+            &[values],
+        );
+        let texts: Vec<String> = jutil::elements(&rt, entries)
+            .into_iter()
+            .map(|e| {
+                let t = api::call(
+                    &mut rt,
+                    "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;",
+                    &[as_text, e],
+                );
+                rt.str_of(t).unwrap_or("?").to_owned()
+            })
+            .collect();
+        assert_eq!(texts, ["type=top", "waterlogged=true"]);
 
         let item_props = rt.new_object("net/minecraft/world/item/Item$Properties");
         let slab_item = rt.new_object("net/minecraft/world/item/BlockItem");
