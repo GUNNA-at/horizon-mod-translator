@@ -68,6 +68,8 @@ public class Fixture {
         String b64 = java.util.Base64.getEncoder().encodeToString(("horizon" + n).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         h = h * 31 + b64.hashCode() + java.util.Base64.getDecoder().decode(b64).length;
         h = h * 31 + (java.lang.reflect.Modifier.isPublic(n) ? 1 : 0) + (java.lang.reflect.Modifier.isStatic(n) ? 2 : 0) + (java.lang.reflect.Modifier.isFinal(n) ? 4 : 0);
+        h = h * 31 + (Character.UnicodeBlock.of((char) ('a' + n)) == Character.UnicodeBlock.BASIC_LATIN ? 1 : 0) + (Character.UnicodeBlock.of('\u044f') == Character.UnicodeBlock.CYRILLIC ? 2 : 0)
+            + Character.UnicodeBlock.of(0x1F600 + n).toString().hashCode();
         java.util.StringTokenizer t = new java.util.StringTokenizer("a,b;c" + n, ",;");
         while (t.hasMoreTokens()) h = h * 31 + t.nextToken().hashCode();
         return h;

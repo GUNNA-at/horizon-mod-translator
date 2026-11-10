@@ -332,6 +332,10 @@ pub struct Rt {
     /// and when it made the first: what tells a hook stuck in a loop on a stand-in answer.
     pub hook_misses: u64,
     pub hook_first_miss: Option<std::time::Instant>,
+    /// The bytes of text and of arrays' and lists' slots allocated so far, roughly: what a loop
+    /// that grows a string without end runs up between two collections (none frees inside a
+    /// hook), for whoever watches for one.
+    pub allocated: u64,
 }
 
 impl Default for Rt {
@@ -385,6 +389,7 @@ impl Default for Rt {
             random_state: 0x9E37_79B9_7F4A_7C15,
             hook_misses: 0,
             hook_first_miss: None,
+            allocated: 0,
         }
     }
 }
@@ -628,6 +633,11 @@ impl Rt {
     }
 
     pub fn alloc_cid(&mut self, class: &'static str, cid: u32, data: Data) -> V {
+        self.allocated += match &data {
+            Data::Str(s) => s.len() as u64,
+            Data::Array(v) | Data::List(v) => 16 * v.len() as u64,
+            _ => 0,
+        };
         if let Some(r) = self.free.pop() {
             self.heap[r as usize] = Object { class, cid, data };
             return V::R(r);

@@ -176,6 +176,8 @@ pub const JDK_CODE: &[&str] = &[
     "java/awt/Point",
     "java/awt/Rectangle",
     "java/awt/geom/",
+    "java/lang/Character$Subset",
+    "java/lang/Character$UnicodeBlock",
     "java/lang/reflect/Modifier",
     "java/math/",
     "java/net/URI",

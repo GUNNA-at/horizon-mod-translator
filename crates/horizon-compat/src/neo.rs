@@ -533,6 +533,10 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
     }
     let id = name.as_str();
     match registry {
+        // The registry of registries (`BuiltInRegistries.REGISTRY`, which Architectury finds
+        // each registry in by its key's location): a registry is its key here, the game's by
+        // its path alone.
+        "registry" => rt.string(id.strip_prefix("minecraft:").unwrap_or(id)),
         "block" if id.starts_with("minecraft:") => crate::api::block(rt, id),
         "item" if id.starts_with("minecraft:") => crate::api_common::item(rt, id),
         "fluid" if id.starts_with("minecraft:") => crate::fluids::fluid(rt, id),
@@ -3287,6 +3291,12 @@ mod tests {
         rt.listeners.push((REGISTER_EVENT.to_owned(), listener));
         fire_registrations(&mut rt);
         assert_eq!(registry_get(&mut rt, "trigger_type", "t:charged"), trigger);
+        // The registry of registries gives each registry by its key's location.
+        let blocks = crate::api::get_static(
+            &mut rt,
+            "net/minecraft/core/registries/BuiltInRegistries.BLOCK",
+        );
+        assert_eq!(registry_get(&mut rt, "registry", "minecraft:block"), blocks);
         let triggers = crate::api::get_static(
             &mut rt,
             "net/minecraft/core/registries/BuiltInRegistries.TRIGGER_TYPES",

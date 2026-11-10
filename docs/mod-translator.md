@@ -9769,6 +9769,32 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     maps), type adapters a mod registers, `@Expose`, `@JsonAdapter`.
   - Tests: a config class with nested entries, a typed map and skipped fields, read, checked field by field
     and written back to the same text. 752 compat tests pass, 15 compat-core, 27 translator and the others.
+- [x] 2026-11-10 Part 148: the pack's second launch. Every mod is constructed (321 of the 365 without an
+  exception), the registries, the common and client setup and the configs follow, and 75 s in a loop takes
+  the machine's memory: the game is killed at 12 GB, before a world.
+  - The log is 4,727 lines (52 at the first launch): 723 unmapped calls traced, 44 constructors ended by an
+    exception, 362 config listeners by another.
+  - The loop: Sound Physics writes its config escaping every character that `Character.UnicodeBlock.of`
+    doesn't call basic Latin. Nothing answered it, so every character was escaped, and the escape's own
+    characters after it, a string growing on each round. `Character.UnicodeBlock` is now the JDK's own code
+    (two more names in `JDK_CODE`; the differential test asks it of Latin, Cyrillic and an emoji). And the
+    guard against a loop on unmapped calls counts what was allocated too: 1,000 such calls with a gigabyte
+    allocated meanwhile stop it at once, where a million calls over ten seconds came far too late (the
+    runtime frees nothing inside one hook).
+  - `java.lang.reflect.Array` (`newInstance`, `getLength`, `get`, `set` and the typed ones): unanswered, the
+    call fell to the class object's own `newInstance`, which tried to construct the element type. Fabric's
+    events keep their listeners in such an array: 9 constructors ended by `NoSuchMethodException`.
+  - The registry of registries: `BuiltInRegistries.REGISTRY.get(key.location())` gives the registry, as
+    Architectury finds each one (11 constructors ended by "Registry block does not exist!").
+    `DeferredRegister.getRegistry()` supplies it.
+  - Seen and not fixed yet: `Dist.values()` and other enums of the API the runtime doesn't list, so a
+    `switch` over one finds no case (`MatchException` in four mods; "Rarity is not an enum"); a config's
+    `Loading` event reaches every mod's listener and not only its owner's (356 of the 362 are one mod's
+    listener reading its own values before they load); and the other constructors, each its own cause
+    (reflection on constructors and static fields, a jar's own files, a regex lookaround, Rhino, Lucene).
+  - Not launched again yet: the pack is building with this Part's translator and runtime, all but the
+    registry of registries (a change to the mapping alone, to add after). Tests: 753 compat, 15
+    compat-core, 27 translator, and the differential test with the new cases.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

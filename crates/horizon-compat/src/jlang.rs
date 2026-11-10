@@ -914,6 +914,67 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             _ => return None,
         }),
+        // `java.lang.reflect.Array`: an array made, measured, read and written by reflection
+        // (Fabric's events keep their listeners in `Array.newInstance(type, 0)`).
+        "java/lang/reflect/Array" => Some(match name {
+            "newInstance" => {
+                // A primitive's array starts as zeros of its kind, any other as nulls.
+                let zero = match rt.str_of(a(0)).unwrap_or("") {
+                    "int" | "short" | "byte" | "char" | "boolean" => V::I(0),
+                    "long" => V::J(0),
+                    "float" => V::F(0.0),
+                    "double" => V::D(0.0),
+                    _ => V::NULL,
+                };
+                let dims: Vec<i32> = if desc.starts_with("(Ljava/lang/Class;I)") {
+                    vec![a(1).i()]
+                } else {
+                    crate::jutil::elements(rt, a(1))
+                        .iter()
+                        .map(|d| d.i())
+                        .collect()
+                };
+                fn make(rt: &mut Rt, dims: &[i32], zero: V) -> V {
+                    let Some((&len, rest)) = dims.split_first() else {
+                        return V::NULL;
+                    };
+                    let array = rt.new_array(len, if rest.is_empty() { zero } else { V::NULL });
+                    for i in 0..len.max(0) {
+                        if !rest.is_empty() {
+                            let inner = make(rt, rest, zero);
+                            rt.array_set(array, i, inner);
+                        }
+                    }
+                    array
+                }
+                make(rt, &dims, zero)
+            }
+            "getLength" => V::I(rt.array_len(a(0))),
+            "get" => {
+                let v = rt.array_get(a(0), a(1).i());
+                box_raw(rt, v)
+            }
+            "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte"
+            | "getChar" | "getShort" => rt.array_get(a(0), a(1).i()),
+            // A box set into a primitive's array is unboxed, as reflection does.
+            "set" => {
+                let v = match rt.array_get(a(0), a(1).i()) {
+                    V::I(_) => crate::mixin::unbox(rt, a(2), 'I'),
+                    V::J(_) => crate::mixin::unbox(rt, a(2), 'J'),
+                    V::F(_) => crate::mixin::unbox(rt, a(2), 'F'),
+                    V::D(_) => crate::mixin::unbox(rt, a(2), 'D'),
+                    _ => a(2),
+                };
+                rt.array_set(a(0), a(1).i(), v);
+                V::Void
+            }
+            "setInt" | "setLong" | "setFloat" | "setDouble" | "setBoolean" | "setByte"
+            | "setChar" | "setShort" => {
+                rt.array_set(a(0), a(1).i(), a(2));
+                V::Void
+            }
+            _ => return None,
+        }),
         "java/lang/reflect/Constructor" => Some(match name {
             "newInstance" => {
                 let class = rt.get_field(a(0), "$class");
@@ -2669,6 +2730,80 @@ mod tests {
         let no_args = rt.new_array(0, V::NULL);
         let boxed = c(&mut rt, "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", &[method, machine, no_args]);
         assert_eq!((rt.class_of(boxed), rt.get_field(boxed, "value")), ("java/lang/Long", V::J(7)));
+    }
+
+    #[test]
+    fn arrays_are_made_and_filled_by_reflection() {
+        let mut rt = Rt::new();
+        let int = class_object(&mut rt, "int");
+        let ints = c(
+            &mut rt,
+            "java/lang/reflect/Array.newInstance.(Ljava/lang/Class;I)Ljava/lang/Object;",
+            &[int, V::I(3)],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/reflect/Array.getLength.(Ljava/lang/Object;)I",
+                &[ints]
+            ),
+            V::I(3)
+        );
+        let seven = c(
+            &mut rt,
+            "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;",
+            &[V::I(7)],
+        );
+        c(
+            &mut rt,
+            "java/lang/reflect/Array.set.(Ljava/lang/Object;ILjava/lang/Object;)V",
+            &[ints, V::I(1), seven],
+        );
+        c(
+            &mut rt,
+            "java/lang/reflect/Array.setInt.(Ljava/lang/Object;II)V",
+            &[ints, V::I(2), V::I(9)],
+        );
+        assert_eq!(
+            (
+                rt.array_get(ints, 0),
+                rt.array_get(ints, 1),
+                rt.array_get(ints, 2)
+            ),
+            (V::I(0), V::I(7), V::I(9))
+        );
+        let boxed = c(
+            &mut rt,
+            "java/lang/reflect/Array.get.(Ljava/lang/Object;I)Ljava/lang/Object;",
+            &[ints, V::I(1)],
+        );
+        assert_eq!(
+            (rt.class_of(boxed), rt.get_field(boxed, "value")),
+            ("java/lang/Integer", V::I(7))
+        );
+        // An interface's array is one of nulls (no object of the interface is made), and a grid is
+        // arrays of arrays.
+        let listener = class_object(&mut rt, "net/fabricmc/fabric/api/event/Listener");
+        let none = c(
+            &mut rt,
+            "java/lang/reflect/Array.newInstance.(Ljava/lang/Class;I)Ljava/lang/Object;",
+            &[listener, V::I(0)],
+        );
+        assert!(rt.thrown.is_none() && rt.array_len(none) == 0);
+        let dims = rt.new_array(2, V::I(0));
+        rt.array_set(dims, 0, V::I(2));
+        rt.array_set(dims, 1, V::I(4));
+        let grid = c(
+            &mut rt,
+            "java/lang/reflect/Array.newInstance.(Ljava/lang/Class;[I)Ljava/lang/Object;",
+            &[int, dims],
+        );
+        let row = rt.array_get(grid, 1);
+        assert_eq!(
+            (rt.array_len(grid), rt.array_len(row), rt.array_get(row, 3)),
+            (2, 4, V::I(0))
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A mod class's fields as its table declares them (Mekanism's `SyncMapper` picks how to sync a

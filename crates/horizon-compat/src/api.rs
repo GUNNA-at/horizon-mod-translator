@@ -220,6 +220,17 @@ fn derived(
 const RUNAWAY_MISSES: u64 = 1_000_000;
 /// How long a hook goes on making such calls before it is taken to be stuck.
 const RUNAWAY_TIME: std::time::Duration = std::time::Duration::from_secs(10);
+/// Far fewer such calls are enough when the loop has allocated this much meanwhile
+/// ([`RUNAWAY_BYTES`]): a loop that grows a string on each round (Sound Physics' `escape`, which
+/// asked `Character.UnicodeBlock.of` of each character and escaped every one, the escapes too)
+/// takes all the machine's memory in seconds, long before a million rounds.
+const RUNAWAY_FEW: u64 = 1_000;
+const RUNAWAY_BYTES: u64 = 1 << 30;
+
+thread_local! {
+    /// What the runtime had allocated at the running hook's first unmapped call.
+    static HOOK_ALLOCATED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// Whether the hook running now (one call of the game's into the mod: a tick, a screen's frame)
 /// is stuck in a loop on what nothing maps: an unmapped call answers a stand-in (0, null), and a
@@ -231,11 +242,16 @@ const RUNAWAY_TIME: std::time::Duration = std::time::Duration::from_secs(10);
 /// the mod's constructor or listener it is in, so the mods after it load.
 fn runaway(rt: &mut Rt, key: &'static str) -> bool {
     if rt.host().is_none() {
-        return LOADING.with(|run| run.borrow_mut().stuck(key));
+        return LOADING.with(|run| run.borrow_mut().stuck(key, rt.allocated));
     }
     rt.hook_misses += 1;
+    if rt.hook_misses == 1 {
+        HOOK_ALLOCATED.set(rt.allocated);
+    }
     let first = *rt.hook_first_miss.get_or_insert_with(std::time::Instant::now);
-    rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME
+    (rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME)
+        || (rt.hook_misses >= RUNAWAY_FEW
+            && rt.allocated.saturating_sub(HOOK_ALLOCATED.get()) >= RUNAWAY_BYTES)
 }
 
 /// The unmapped calls of a loop while the mods load, where no hook bounds them: the few keys the
@@ -247,6 +263,8 @@ struct Run {
     keys: Vec<&'static str>,
     calls: u64,
     since: Option<std::time::Instant>,
+    /// What the runtime had allocated when the count began.
+    allocated: Option<u64>,
 }
 
 /// How many unmapped keys a loop may go round and still be told from loading going on.
@@ -256,7 +274,7 @@ impl Run {
     /// Counts an unmapped call of `key`; whether its loop is stuck ([`RUNAWAY_MISSES`] calls of the
     /// same few keys over [`RUNAWAY_TIME`]). A key past [`RUN_KEYS`] starts the count again:
     /// loading that goes on meets new ones.
-    fn stuck(&mut self, key: &'static str) -> bool {
+    fn stuck(&mut self, key: &'static str, allocated: u64) -> bool {
         if !self.keys.contains(&key) {
             if self.keys.len() >= RUN_KEYS {
                 *self = Run::default();
@@ -265,7 +283,9 @@ impl Run {
         }
         self.calls += 1;
         let since = *self.since.get_or_insert_with(std::time::Instant::now);
-        let stuck = self.calls >= RUNAWAY_MISSES && since.elapsed() >= RUNAWAY_TIME;
+        let grown = allocated.saturating_sub(*self.allocated.get_or_insert(allocated));
+        let stuck = (self.calls >= RUNAWAY_MISSES && since.elapsed() >= RUNAWAY_TIME)
+            || (self.calls >= RUNAWAY_FEW && grown >= RUNAWAY_BYTES);
         if stuck {
             *self = Run::default();
         }
@@ -2084,6 +2104,11 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             crate::jutil::new_list(rt, items)
         }
         ("net/neoforged/neoforge/registries/DeferredRegister", "getRegistryKey") => rt.get_field(a(0), "$registry"),
+        // `getRegistry()`: a supplier of the registry, which is its key here.
+        ("net/neoforged/neoforge/registries/DeferredRegister", "getRegistry") => {
+            let registry = rt.get_field(a(0), "$registry");
+            crate::functions::constant(rt, registry)
+        }
         ("net/neoforged/neoforge/registries/DeferredRegister", "getRegistryName") => {
             let r = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned();
             let s = if r.contains(':') { r } else { format!("minecraft:{r}") };
@@ -4066,6 +4091,20 @@ mod tests {
         assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/DeferredHolder.get.()Ljava/lang/Object;", &[h]), value);
         let reg = rt.str_of(registry).unwrap_or("").to_owned();
         assert_eq!(rt.registered.get(&(reg, "mek:chamber".to_owned())), Some(&value));
+        // `getRegistry()` supplies the registry the register is for.
+        let supplied = call(
+            &mut rt,
+            "net/neoforged/neoforge/registries/DeferredRegister.getRegistry.()Ljava/util/function/Supplier;",
+            &[register],
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/function/Supplier.get.()Ljava/lang/Object;",
+                &[supplied]
+            ),
+            registry
+        );
     }
 
     /// NeoForge's shorthands, as `DeferredRegister.Blocks`/`Items` define them: `registerSimpleBlock`
@@ -4358,31 +4397,53 @@ mod tests {
             keys: vec![key],
             calls: RUNAWAY_MISSES - 1,
             since: Some(long_ago()),
+            allocated: None,
         };
-        assert!(run.stuck(key) && run.calls == 0);
+        assert!(run.stuck(key, 0) && run.calls == 0);
         let mut run = Run {
             keys: vec![key],
             calls: RUNAWAY_MISSES - 1,
             since: Some(std::time::Instant::now()),
+            allocated: None,
         };
         assert!(
-            !run.stuck(key),
+            !run.stuck(key, 0),
             "a million calls in no time are not a stuck loop"
         );
         let mut run = Run {
             keys: (0..RUN_KEYS).map(|_| "other").collect(),
             calls: RUNAWAY_MISSES - 1,
             since: Some(long_ago()),
+            allocated: None,
         };
         assert!(
-            !run.stuck(key) && run.calls == 1,
+            !run.stuck(key, 0) && run.calls == 1,
             "a new key past the loop's few starts the count again"
+        );
+        // And one that has allocated a gigabyte meanwhile, after far fewer calls and at once.
+        let mut run = Run {
+            keys: vec![key],
+            calls: RUNAWAY_FEW - 1,
+            since: Some(std::time::Instant::now()),
+            allocated: Some(5),
+        };
+        assert!(run.stuck(key, 5 + RUNAWAY_BYTES) && run.calls == 0);
+        let mut run = Run {
+            keys: vec![key],
+            calls: RUNAWAY_FEW - 1,
+            since: Some(std::time::Instant::now()),
+            allocated: Some(5),
+        };
+        assert!(
+            !run.stuck(key, RUNAWAY_BYTES),
+            "a thousand calls that allocated less are loading going on"
         );
         LOADING.with(|run| {
             *run.borrow_mut() = Run {
                 keys: vec![key],
                 calls: RUNAWAY_MISSES - 1,
                 since: Some(long_ago()),
+                allocated: None,
             }
         });
         call(&mut rt, key, &[]);
