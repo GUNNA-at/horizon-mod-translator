@@ -405,7 +405,7 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         // is told of where it ends.
         "getDefaultUncaughtExceptionHandler" | "getUncaughtExceptionHandler" => V::NULL,
         "ofVirtual" | "ofPlatform" => rt.new_object(THREAD_BUILDER),
-        "getStackTrace" => crate::jlang::stack_frames(rt),
+        "getStackTrace" => crate::jlang::thread_frames(rt),
         "getThreadGroup" => rt.intern("compat:thread-group".into(), |rt| rt.new_object("java/lang/ThreadGroup")),
         "getContextClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
         "join" | "interrupt" | "yield" | "onSpinWait" | "setPriority" | "setUncaughtExceptionHandler" | "setDefaultUncaughtExceptionHandler" | "setContextClassLoader" | "checkAccess" => {
@@ -2245,6 +2245,34 @@ mod tests {
                 "{key}"
             );
         }
+        // The thread's stack begins with the question itself, then the class that asked
+        // (told by the translated call), then the unknown.
+        rt.caller_class = "kotlin/jvm/internal/Intrinsics";
+        let trace = c(
+            &mut rt,
+            "java/lang/Thread.getStackTrace.()[Ljava/lang/StackTraceElement;",
+            &[game],
+        );
+        let classes: Vec<String> = crate::jutil::elements(&rt, trace)
+            .iter()
+            .map(|f| {
+                let name = c(
+                    &mut rt,
+                    "java/lang/StackTraceElement.getClassName.()Ljava/lang/String;",
+                    &[*f],
+                );
+                rt.str_of(name).unwrap_or("").to_owned()
+            })
+            .collect();
+        assert_eq!(
+            classes[..3],
+            [
+                "java.lang.Thread",
+                "kotlin.jvm.internal.Intrinsics",
+                "Unknown"
+            ]
+        );
+        assert_eq!((classes.len(), rt.caller_class), (8, "java/lang/Object"));
         // In a started thread's body a wait interrupts it, and past a few of them stops it.
         STARTED.with(|s| s.set((1, 0)));
         assert_eq!(c(&mut rt, "java/lang/Thread.interrupted.()Z", &[]), V::I(1));

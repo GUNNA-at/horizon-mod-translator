@@ -3187,6 +3187,40 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 
         // `Block.getSeed(state, pos)`, a mod block's `super.` call: `Mth.getSeed(pos)`.
         ("net/minecraft/world/level/block/Block", "getSeed") if BLOCK_SEED_KEY.ends_with(desc) => pos_seed(rt, a(2)),
+        // `hasCollision` of a block, read as the field it is (an access transformer opens it):
+        // a mod's block as its properties say (`noCollission()`); a block of the game's by
+        // what the game tells of its default state, which is solid or has a face that holds
+        // a block up where it has a shape to walk into (a plant, a torch and a rail have
+        // neither). Structurize lists the blocks that stand without support by it at a
+        // level's tick, and listed them again at every tick while the list stayed empty.
+        (o, "$hasCollision")
+            if o.starts_with("net/minecraft/world/level/block/") && desc == "()Z" =>
+        {
+            let properties = rt.get_field(a(0), "$properties");
+            if properties.r() != 0 {
+                V::I(i32::from(rt.get_field(properties, "$noCollision").i() == 0))
+            } else {
+                let state = call(
+                    rt,
+                    "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;",
+                    &[a(0)],
+                );
+                let text = rt.str_of(state).unwrap_or("minecraft:air").to_owned();
+                let holds = rt
+                    .host()
+                    .and_then(|h| h.block_facts(&text))
+                    .is_some_and(|f| f.sturdy != 0);
+                // (A cobweb and a bamboo sapling are solid by decree and have no collision:
+                // the two blocks `blocksMotion()` leaves out for that.)
+                let passable = matches!(
+                    crate::host::state_block(&text),
+                    "minecraft:cobweb" | "minecraft:bamboo_sapling"
+                );
+                V::I(i32::from(
+                    holds || (!passable && crate::block_breaking::solid(rt, &text)),
+                ))
+            }
+        }
         // `Block.canSupportRigidBlock(level, pos)`: the top of the block there holds a rigid one
         // (a rail, redstone dust). On any block class, as `javac` names the class a call was
         // written on.

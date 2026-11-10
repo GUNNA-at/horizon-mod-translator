@@ -442,14 +442,18 @@ impl Rt {
     }
 
     /// Objects a call makes before it is collected for itself: [`YOUNG_MIN`]; as many as its
-    /// last collection left (`survived`); and an eighth of what the last whole collection
-    /// left, so that looking through a large heap is paid for by what was made since. Not by
-    /// what the heap holds now: that is the garbage too, and a call that made much of it
-    /// would wait the longer for it.
+    /// last collection left (`survived`); and half of what the last whole collection left,
+    /// so that looking through a large heap is paid for by what was made since. Measured in
+    /// the whole pack: a look through 7.4 million objects takes 33 ms, 4.5 ns each, and
+    /// making an object and what it holds costs ten times that and more, so making half as
+    /// many as the heap held keeps the look under a tenth of the work (at an eighth, a tick
+    /// that made 500,000 objects was collected by itself at every tick). Not by what the
+    /// heap holds now: that is the garbage too, and a call that made much of it would wait
+    /// the longer for it.
     fn young_interval(&self, survived: u64) -> u64 {
         match young_min() {
             (min, true) => min,
-            (min, false) => min.max(survived).max(self.live_at_collection / 8),
+            (min, false) => min.max(survived).max(self.live_at_collection / 2),
         }
     }
 

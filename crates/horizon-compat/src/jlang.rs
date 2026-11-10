@@ -17,9 +17,15 @@ const STACK_FRAME: &str = "java/lang/StackTraceElement";
 /// Enough of them that code which takes "the frame two above me" has one to name, and few
 /// enough that a search through them for a class ends at their end.
 pub(crate) fn stack_frames(rt: &mut Rt) -> V {
-    let (class, method) = (rt.string("Unknown"), rt.string("unknown"));
+    frames(rt, &[])
+}
+
+/// A stack trace that begins with `known` (class, method) frames, the rest unknown.
+fn frames(rt: &mut Rt, known: &[(&str, &str)]) -> V {
     let frames = (0..8)
-        .map(|_| {
+        .map(|i| {
+            let (class, method) = known.get(i).copied().unwrap_or(("Unknown", "unknown"));
+            let (class, method) = (rt.string(&class.replace('/', ".")), rt.string(method));
             let frame = rt.new_object(STACK_FRAME);
             rt.put_field(frame, "declaringClass", class);
             rt.put_field(frame, "methodName", method);
@@ -28,6 +34,21 @@ pub(crate) fn stack_frames(rt: &mut Rt) -> V {
         })
         .collect();
     rt.alloc("[Ljava/lang/StackTraceElement;", Data::Array(frames))
+}
+
+/// `Thread.currentThread().getStackTrace()`: `Thread.getStackTrace` itself, then the class
+/// whose code asked, which the translated call tells ([`Rt::caller_class`]), then the unknown.
+/// Kotlin's null checks find themselves in it by their class's name and take the frame after
+/// for the caller's: without their class in it they looked past its end.
+pub(crate) fn thread_frames(rt: &mut Rt) -> V {
+    let asked = std::mem::replace(&mut rt.caller_class, "java/lang/Object");
+    if asked == "java/lang/Object" {
+        return frames(rt, &[("java/lang/Thread", "getStackTrace")]);
+    }
+    frames(
+        rt,
+        &[("java/lang/Thread", "getStackTrace"), (asked, "unknown")],
+    )
 }
 
 pub(crate) fn text(rt: &Rt, v: V) -> String {
@@ -443,10 +464,18 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     // A static method of the mods': its code by its class, name and descriptor, as the class's
     // reflection lists it (AE2 asks each of its parts' classes for `getModels()` so, and
     // Architectury its own network adaptor); the object it is given, if any, is not looked at.
+    // A `Method` found in a class's file says for itself what it is; one only named is looked
+    // up in the files.
     let params = &prefix[name.len() + 1..];
-    if let Some((declaring, access, desc)) = declared_method(rt, &class, &name, params, true)
-        && access & 0x0008 != 0
-    {
+    let found = text(rt, rt.get_field(method, "$desc"));
+    let of_class = if found.is_empty() {
+        declared_method(rt, &class, &name, params, true)
+            .filter(|(_, access, _)| access & 0x0008 != 0)
+            .map(|(declaring, _, desc)| (declaring, desc))
+    } else {
+        (rt.get_field(method, "$access").i() & 0x0008 != 0).then(|| (class.clone(), found))
+    };
+    if let Some((declaring, desc)) = of_class {
         let r = run_static(rt, &declaring, &name, &desc, args)?;
         return Some(match return_kind(&desc) {
             'V' => V::NULL,

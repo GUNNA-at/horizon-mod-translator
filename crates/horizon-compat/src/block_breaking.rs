@@ -536,7 +536,7 @@ fn own_exp_drop(rt: &mut Rt, b: V, st: V, level: V) -> i32 {
 
 /// `BlockState.isSolid()` (vanilla's `legacySolid`) of state `text`: as the game has the block;
 /// a mod block the game doesn't know is solid when its `Properties` force it (`forceSolidOn`).
-fn solid(rt: &Rt, text: &str) -> bool {
+pub(crate) fn solid(rt: &Rt, text: &str) -> bool {
     if let Some(s) = rt.host().and_then(|h| h.block_solid(text)) {
         return s;
     }
@@ -1309,6 +1309,9 @@ mod tests {
             for (block, blocks) in [(STONE, 1), ("minecraft:cobweb", 0), ("minecraft:air", 0)] {
                 let below = api::state(rt, block);
                 assert_eq!(api::call(rt, key(STATE, "blocksMotion", "()Z"), &[below]).i(), blocks, "{block}");
+                // `Block.hasCollision`, read as the field it is.
+                let of = api::call(rt, key(STATE, "getBlock", "()Lnet/minecraft/world/level/block/Block;"), &[below]);
+                assert_eq!(api::call(rt, "net/minecraft/world/level/block/Block.$hasCollision.()Z", &[of]).i(), blocks, "{block}");
             }
             // A mod's ore: `DropExperienceBlock(ConstantInt.of(4), properties)`.
             rt.supers.insert("com/example/ZincOre", "net/minecraft/world/level/block/DropExperienceBlock");

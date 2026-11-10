@@ -3167,7 +3167,13 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
         }
         let key = self.key(&m);
         let init = if op == 0xb8 && m.owner != c.name { self.ensure(&m.owner) } else { String::new() };
-        let caller = if self.caller_sensitive.contains(&format!("{}.{}", m.name, m.desc)) {
+        // (So does `Thread.getStackTrace()`, whose answer begins with the class that asked.)
+        let asks_stack = m.owner == "java/lang/Thread" && m.name == "getStackTrace";
+        let caller = if asks_stack
+            || self
+                .caller_sensitive
+                .contains(&format!("{}.{}", m.name, m.desc))
+        {
             format!("rt.caller_class = {:?}; ", c.name)
         } else {
             String::new()

@@ -10806,6 +10806,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - NeoForge's `LenientUnboundedMapCodec`: an unbounded map that leaves out an entry it
     cannot read. (It was in the table of the game's plain data classes; a class modelled by
     hand leaves that table.)
+- [x] 2026-11-11 Part 186: the world's time in every hook; where the pack's ticks went.
+  - Launch 20 (Parts 182 and 183: 2,236 s, 574 crates, 2,034,777,216 bytes, 33.5 MB more
+    for the reflection entries) is ready after 328 s, with 25 uncaught exceptions. In it a
+    creative motor set beside a shaft turns it: `/data get block` shows the shaft at
+    `Speed: -16.0f` with the motor as its `Source` and a kinetic network of 2, and the
+    motor is drawn in the world. Create's rotation works in the whole pack.
+  - But the server made 43 ticks in 20 s. With `HORIZON_COMPAT_PROFILE` each thread says
+    where its time goes, and both the server's and the window's were in the mods' hooks all
+    of it. Two listeners had nearly all: Waves' `handleWaves` took 312 ms of every player
+    tick on the server and 457 ms of every client tick, and Structurize's `onWorldTick`
+    116 ms of every level tick. A sample of the game's threads, named with an unstripped
+    link of the same game, shows what they did there.
+  - Waves refreshes its caches of shores and biomes around the player when
+    `level.getGameTime() % 6000 == 0` and looks for waves to spawn when `% 20 == 0`. The
+    host of a player's hooks and the host of the client's did not tell the game time: the
+    runtime answered 0, the remainders were 0 at every tick, and the mod walked the land
+    around the player at each. Every host that holds the game or a level tells the time
+    now (a block's hooks the day time and weather of their level too).
+  - Structurize lists the blocks that stand without support the first time a level ticks
+    and keeps the list; one of its tests reads `Block.hasCollision` as the field it is, the
+    runtime had no answer, no block passed, and the list, still empty, was made again at
+    every tick from all 28,818 blocks. The field is answered: a mod's block as its
+    properties say, a block of the game's by whether its default state blocks motion or
+    has a face that holds a block up.
+  - What the sample showed under a block entity's tick and under the client's entity pick
+    was neither of them: the whole collection that the garbage of those two listeners
+    brought on, which runs at the next hook's end. A collection inside a hook now waits
+    for half as many objects as the last whole collection left, where it waited for an
+    eighth: looking through the heap costs 4.5 ns an object and making one ten times that,
+    and at an eighth every tick that made 500,000 objects was collected by itself, 33 ms.
+  - `Thread.currentThread().getStackTrace()` begins with the class that asked (Kotlin's
+    null checks look for their own class in it and take the frame after for the caller's;
+    without it they read past the trace's end). A `Method` found in a class file says for
+    itself whether it is static, so invoking it reads no table.
+  - Open from this launch: the game's physical footprint peaked at 30 GB while loading
+    (13 GB once in the world), on a machine of 24.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

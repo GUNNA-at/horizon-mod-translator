@@ -358,6 +358,16 @@ fn level_host(krate: &str) -> String {
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.level.native_state_text(pos)
         }}
+        // The level's clocks and weather, as the hook's level holds them.
+        fn game_time(&self) -> i64 {{
+            self.level.world.game_time
+        }}
+        fn day_time(&self) -> i64 {{
+            self.level.world.day_time
+        }}
+        fn weather(&self) -> (f32, f32) {{
+            (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
+        }}
         // A new entity's network id, from the game's one counter for every translated mod's.
         fn mod_entity_id(&mut self) -> Option<i32> {{
             Some(crate::game::native_mod_entities::next_mod_entity_id())
@@ -447,6 +457,16 @@ fn level_read_host(c: &str) -> String {
     impl {c}::host::Host for Host<'_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.level.native_state_text(pos)
+        }}
+        // The level's clocks and weather, as the hook's level holds them.
+        fn game_time(&self) -> i64 {{
+            self.level.world.game_time
+        }}
+        fn day_time(&self) -> i64 {{
+            self.level.world.day_time
+        }}
+        fn weather(&self) -> (f32, f32) {{
+            (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
@@ -771,6 +791,10 @@ fn client_host(c: &str, id: &str) -> String {
         }}
         fn dimension_is(&self, dimension: &str) -> bool {{
             self.game.get().native_dimension() == dimension
+        }}
+        // (The world's time, which every host tells: a mod's "every twenty ticks" counts on it.)
+        fn game_time(&self) -> i64 {{
+            self.game.get().native_game_time()
         }}
 {reads}{attributes}        fn fluid_in_tag(&self, fluid: &str, tag: &str) -> bool {{
             self.game.get().native_fluid_name_in_tag(fluid, tag)
@@ -1481,6 +1505,9 @@ fn {id}_particles_submit(
         }}
         fn player_place(&self) -> Option<([f64; 3], f32, f32)> {{
             self.game.native_local_player().map(|(at, yaw, pitch, _)| (at, yaw, pitch))
+        }}
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
         }}
 {reads}        fn partial_tick(&self) -> f32 {{
             self.partial
@@ -3889,6 +3916,12 @@ fn player_host(c: &str, server_effects: &str) -> String {
             self.game.native_hurt_hand_stack(Self::hand(hand), amount);
             true
         }}
+        // The world's time. Without it a player's hooks read 0, and what a mod does every so
+        // many ticks of the game's clock (`level.getGameTime() % 20 == 0`) it did at each:
+        // Waves looked for shores around the player at every tick, 310 ms of it.
+        fn game_time(&self) -> i64 {{
+            self.game.native_game_time()
+        }}
 {reads}{writes}{containers}{server_effects}    }}
     // A hand as `InteractionHand`'s ordinal.
     impl Host<'_, '_> {{
@@ -5329,6 +5362,16 @@ fn {id}_state_for_placement(
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.level.native_state_text(pos)
         }}
+        // The level's clocks and weather, as the hook's level holds them.
+        fn game_time(&self) -> i64 {{
+            self.level.world.game_time
+        }}
+        fn day_time(&self) -> i64 {{
+            self.level.world.day_time
+        }}
+        fn weather(&self) -> (f32, f32) {{
+            (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
+        }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
         }}
@@ -5415,6 +5458,16 @@ fn {id}_update_shape(
     impl {c}::host::Host for Host<'_, '_, '_> {{
         fn block_state(&self, pos: [i32; 3]) -> String {{
             self.level.native_state_text(pos)
+        }}
+        // The level's clocks and weather, as the hook's level holds them.
+        fn game_time(&self) -> i64 {{
+            self.level.world.game_time
+        }}
+        fn day_time(&self) -> i64 {{
+            self.level.world.day_time
+        }}
+        fn weather(&self) -> (f32, f32) {{
+            (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)

@@ -618,6 +618,10 @@ public class Fixture {
             r += (lock.validate(stamp) ? 100000000 : 0) + (lock.isWriteLocked() ? 1 : 0);
             long write = lock.writeLock();
             lock.unlockWrite(write);
+            // The thread's stack begins with the question, then the class that asked (Kotlin's
+            // null checks look for their own class there).
+            StackTraceElement[] trace = Thread.currentThread().getStackTrace();
+            r += trace[0].getMethodName().equals("getStackTrace") && trace[1].getClassName().equals("Fixture") ? 200000000 : 0;
             return r + k;
         } catch (Throwable e) {
             return -1;
