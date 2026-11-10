@@ -379,7 +379,8 @@ fn player_size(rt: &Rt) -> (f32, f32) {
 /// Vanilla enums whose constants are plain values, one object each (`api_enum`): their statics,
 /// `values()` and `valueOf`.
 const POSE: &str = "net/minecraft/world/entity/Pose";
-const PLAIN_ENUMS: [(&str, &[&str]); 34] = [
+const PLAIN_ENUMS: [(&str, &[&str]); 35] = [
+    ("java/text/Normalizer$Form", &["NFD", "NFC", "NFKD", "NFKC"]),
     // The camera's views (a mod adds its own to them: Sable's sub-level views).
     (
         "net/minecraft/client/CameraType",
@@ -2120,6 +2121,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 "elapsed" if desc.starts_with("(Ljava/util/concurrent/TimeUnit;)") => {
                     let unit = rt.get_field(a(1), "$ordinal").i().max(0) as usize;
                     V::J(time_convert(elapsed(rt), 0, unit))
+                }
+                "elapsed" => {
+                    let nanos = elapsed(rt);
+                    duration(rt, i128::from(nanos))
                 }
                 "toString" => {
                     let ms = elapsed(rt) as f64 / 1e6;

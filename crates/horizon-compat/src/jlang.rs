@@ -1065,6 +1065,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner == UNSAFE {
         return unsafe_call(rt, name, args);
     }
+    // `Normalizer.normalize(text, form)`: the decomposed forms take the Latin letters apart
+    // into letter and marks (what a mod strips accents with); text is taken to be composed
+    // already for the others.
+    if owner == "java/text/Normalizer" && name == "normalize" {
+        let given = text(rt, args.first().copied().unwrap_or_default());
+        let form =
+            crate::api_common::enum_name(rt, args.get(1).copied().unwrap_or_default(), false);
+        let out = if matches!(rt.str_of(form), Some("NFD" | "NFKD")) {
+            decomposed(&given)
+        } else {
+            given
+        };
+        return Some(rt.string(&out));
+    }
     if !owner.starts_with("java/lang/") && owner != ABSTRACT_HANDLER {
         return None;
     }
@@ -1141,6 +1155,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 V::Void
             }
             "refersTo" => V::I((rt.get_field(a(0), "$referent") == a(1) || (a(1) == V::NULL && rt.get_field(a(0), "$referent") == V::Void)) as i32),
+            "enqueue" | "isEnqueued" => V::I(0),
+            _ => return None,
+        }),
+        // A queue of references whose objects were collected: none is ever put there (what a
+        // mod would clean up after an object went is cleaned with the object here).
+        "java/lang/ref/ReferenceQueue" => Some(match name {
+            "<init>" => V::Void,
+            "poll" | "remove" => V::NULL,
+            _ => return None,
+        }),
+        // A phantom reference never gives its object.
+        "java/lang/ref/PhantomReference" => Some(match name {
+            "<init>" | "clear" => V::Void,
+            "get" => V::NULL,
             "enqueue" | "isEnqueued" => V::I(0),
             _ => return None,
         }),
@@ -1325,6 +1353,33 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             // No `Unsafe` here: JOML is told so by its own switch, and copies its numbers field
             // by field.
             "getProperty" if rt.str_of(a(0)) == Some("joml.nounsafe") => rt.string("true"),
+            // What the mods set themselves is theirs to read back: `setProperty` answers what
+            // the key was (as the JVM's own would be read), `clearProperty` takes it away.
+            "setProperty" | "clearProperty" => {
+                let key = format!("compat:system-property/{}", text(rt, a(0)));
+                let was = match rt.interned.get(&key).copied() {
+                    Some(was) => was,
+                    None => match system_property(rt, &text(rt, a(0))) {
+                        Some(value) => rt.string(&value),
+                        None => V::NULL,
+                    },
+                };
+                match name {
+                    "setProperty" => rt.interned.insert(key, a(1)),
+                    _ => rt.interned.insert(key, V::NULL),
+                };
+                was
+            }
+            "getProperty"
+                if rt
+                    .interned
+                    .contains_key(&format!("compat:system-property/{}", text(rt, a(0)))) =>
+            {
+                match rt.interned[&format!("compat:system-property/{}", text(rt, a(0)))] {
+                    V::R(0) if ks.len() == 2 => a(1),
+                    value => value,
+                }
+            }
             // The properties every JVM has ([`system_property`]); any other is not set: its
             // default, else null.
             "getProperty" => match rt
@@ -2012,10 +2067,135 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "availableProcessors" => V::I(std::thread::available_parallelism().map_or(4, |n| n.get() as i32)),
             "maxMemory" | "totalMemory" => V::J(4 << 30),
             "freeMemory" => V::J(1 << 30),
+            // What a mod would run as the JVM goes down (a cache it saves, a thread it
+            // stops): there is no JVM to go down; the game saves what is its own.
+            "addShutdownHook" | "gc" | "runFinalization" => V::Void,
+            "removeShutdownHook" => V::I(0),
             _ => return None,
         }),
         _ => None,
     }
+}
+
+/// `text` with each Latin letter that is a letter and marks in one written as the letter and
+/// its combining marks (canonical decomposition, for U+00C0 to U+017F and U+1E00 to U+1EFF).
+fn decomposed(text: &str) -> String {
+    /// Each such letter, then what it is made of, `|` after each.
+    const LETTERS: &str = "\
+        \u{c0}A\u{300}|\u{c1}A\u{301}|\u{c2}A\u{302}|\u{c3}A\u{303}|\u{c4}A\u{308}|\
+        \u{c5}A\u{30a}|\u{c7}C\u{327}|\u{c8}E\u{300}|\u{c9}E\u{301}|\u{ca}E\u{302}|\
+        \u{cb}E\u{308}|\u{cc}I\u{300}|\u{cd}I\u{301}|\u{ce}I\u{302}|\u{cf}I\u{308}|\
+        \u{d1}N\u{303}|\u{d2}O\u{300}|\u{d3}O\u{301}|\u{d4}O\u{302}|\u{d5}O\u{303}|\
+        \u{d6}O\u{308}|\u{d9}U\u{300}|\u{da}U\u{301}|\u{db}U\u{302}|\u{dc}U\u{308}|\
+        \u{dd}Y\u{301}|\u{e0}a\u{300}|\u{e1}a\u{301}|\u{e2}a\u{302}|\u{e3}a\u{303}|\
+        \u{e4}a\u{308}|\u{e5}a\u{30a}|\u{e7}c\u{327}|\u{e8}e\u{300}|\u{e9}e\u{301}|\
+        \u{ea}e\u{302}|\u{eb}e\u{308}|\u{ec}i\u{300}|\u{ed}i\u{301}|\u{ee}i\u{302}|\
+        \u{ef}i\u{308}|\u{f1}n\u{303}|\u{f2}o\u{300}|\u{f3}o\u{301}|\u{f4}o\u{302}|\
+        \u{f5}o\u{303}|\u{f6}o\u{308}|\u{f9}u\u{300}|\u{fa}u\u{301}|\u{fb}u\u{302}|\
+        \u{fc}u\u{308}|\u{fd}y\u{301}|\u{ff}y\u{308}|\u{100}A\u{304}|\u{101}a\u{304}|\
+        \u{102}A\u{306}|\u{103}a\u{306}|\u{104}A\u{328}|\u{105}a\u{328}|\u{106}C\u{301}|\
+        \u{107}c\u{301}|\u{108}C\u{302}|\u{109}c\u{302}|\u{10a}C\u{307}|\u{10b}c\u{307}|\
+        \u{10c}C\u{30c}|\u{10d}c\u{30c}|\u{10e}D\u{30c}|\u{10f}d\u{30c}|\u{112}E\u{304}|\
+        \u{113}e\u{304}|\u{114}E\u{306}|\u{115}e\u{306}|\u{116}E\u{307}|\u{117}e\u{307}|\
+        \u{118}E\u{328}|\u{119}e\u{328}|\u{11a}E\u{30c}|\u{11b}e\u{30c}|\u{11c}G\u{302}|\
+        \u{11d}g\u{302}|\u{11e}G\u{306}|\u{11f}g\u{306}|\u{120}G\u{307}|\u{121}g\u{307}|\
+        \u{122}G\u{327}|\u{123}g\u{327}|\u{124}H\u{302}|\u{125}h\u{302}|\u{128}I\u{303}|\
+        \u{129}i\u{303}|\u{12a}I\u{304}|\u{12b}i\u{304}|\u{12c}I\u{306}|\u{12d}i\u{306}|\
+        \u{12e}I\u{328}|\u{12f}i\u{328}|\u{130}I\u{307}|\u{134}J\u{302}|\u{135}j\u{302}|\
+        \u{136}K\u{327}|\u{137}k\u{327}|\u{139}L\u{301}|\u{13a}l\u{301}|\u{13b}L\u{327}|\
+        \u{13c}l\u{327}|\u{13d}L\u{30c}|\u{13e}l\u{30c}|\u{143}N\u{301}|\u{144}n\u{301}|\
+        \u{145}N\u{327}|\u{146}n\u{327}|\u{147}N\u{30c}|\u{148}n\u{30c}|\u{14c}O\u{304}|\
+        \u{14d}o\u{304}|\u{14e}O\u{306}|\u{14f}o\u{306}|\u{150}O\u{30b}|\u{151}o\u{30b}|\
+        \u{154}R\u{301}|\u{155}r\u{301}|\u{156}R\u{327}|\u{157}r\u{327}|\u{158}R\u{30c}|\
+        \u{159}r\u{30c}|\u{15a}S\u{301}|\u{15b}s\u{301}|\u{15c}S\u{302}|\u{15d}s\u{302}|\
+        \u{15e}S\u{327}|\u{15f}s\u{327}|\u{160}S\u{30c}|\u{161}s\u{30c}|\u{162}T\u{327}|\
+        \u{163}t\u{327}|\u{164}T\u{30c}|\u{165}t\u{30c}|\u{168}U\u{303}|\u{169}u\u{303}|\
+        \u{16a}U\u{304}|\u{16b}u\u{304}|\u{16c}U\u{306}|\u{16d}u\u{306}|\u{16e}U\u{30a}|\
+        \u{16f}u\u{30a}|\u{170}U\u{30b}|\u{171}u\u{30b}|\u{172}U\u{328}|\u{173}u\u{328}|\
+        \u{174}W\u{302}|\u{175}w\u{302}|\u{176}Y\u{302}|\u{177}y\u{302}|\u{178}Y\u{308}|\
+        \u{179}Z\u{301}|\u{17a}z\u{301}|\u{17b}Z\u{307}|\u{17c}z\u{307}|\u{17d}Z\u{30c}|\
+        \u{17e}z\u{30c}|\u{1e00}A\u{325}|\u{1e01}a\u{325}|\u{1e02}B\u{307}|\u{1e03}b\u{307}|\
+        \u{1e04}B\u{323}|\u{1e05}b\u{323}|\u{1e06}B\u{331}|\u{1e07}b\u{331}|\
+        \u{1e08}C\u{327}\u{301}|\u{1e09}c\u{327}\u{301}|\u{1e0a}D\u{307}|\u{1e0b}d\u{307}|\
+        \u{1e0c}D\u{323}|\u{1e0d}d\u{323}|\u{1e0e}D\u{331}|\u{1e0f}d\u{331}|\u{1e10}D\u{327}|\
+        \u{1e11}d\u{327}|\u{1e12}D\u{32d}|\u{1e13}d\u{32d}|\u{1e14}E\u{304}\u{300}|\
+        \u{1e15}e\u{304}\u{300}|\u{1e16}E\u{304}\u{301}|\u{1e17}e\u{304}\u{301}|\
+        \u{1e18}E\u{32d}|\u{1e19}e\u{32d}|\u{1e1a}E\u{330}|\u{1e1b}e\u{330}|\
+        \u{1e1c}E\u{327}\u{306}|\u{1e1d}e\u{327}\u{306}|\u{1e1e}F\u{307}|\u{1e1f}f\u{307}|\
+        \u{1e20}G\u{304}|\u{1e21}g\u{304}|\u{1e22}H\u{307}|\u{1e23}h\u{307}|\u{1e24}H\u{323}|\
+        \u{1e25}h\u{323}|\u{1e26}H\u{308}|\u{1e27}h\u{308}|\u{1e28}H\u{327}|\u{1e29}h\u{327}|\
+        \u{1e2a}H\u{32e}|\u{1e2b}h\u{32e}|\u{1e2c}I\u{330}|\u{1e2d}i\u{330}|\
+        \u{1e2e}I\u{308}\u{301}|\u{1e2f}i\u{308}\u{301}|\u{1e30}K\u{301}|\u{1e31}k\u{301}|\
+        \u{1e32}K\u{323}|\u{1e33}k\u{323}|\u{1e34}K\u{331}|\u{1e35}k\u{331}|\u{1e36}L\u{323}|\
+        \u{1e37}l\u{323}|\u{1e38}L\u{323}\u{304}|\u{1e39}l\u{323}\u{304}|\u{1e3a}L\u{331}|\
+        \u{1e3b}l\u{331}|\u{1e3c}L\u{32d}|\u{1e3d}l\u{32d}|\u{1e3e}M\u{301}|\u{1e3f}m\u{301}|\
+        \u{1e40}M\u{307}|\u{1e41}m\u{307}|\u{1e42}M\u{323}|\u{1e43}m\u{323}|\u{1e44}N\u{307}|\
+        \u{1e45}n\u{307}|\u{1e46}N\u{323}|\u{1e47}n\u{323}|\u{1e48}N\u{331}|\u{1e49}n\u{331}|\
+        \u{1e4a}N\u{32d}|\u{1e4b}n\u{32d}|\u{1e4c}O\u{303}\u{301}|\u{1e4d}o\u{303}\u{301}|\
+        \u{1e4e}O\u{303}\u{308}|\u{1e4f}o\u{303}\u{308}|\u{1e50}O\u{304}\u{300}|\
+        \u{1e51}o\u{304}\u{300}|\u{1e52}O\u{304}\u{301}|\u{1e53}o\u{304}\u{301}|\
+        \u{1e54}P\u{301}|\u{1e55}p\u{301}|\u{1e56}P\u{307}|\u{1e57}p\u{307}|\u{1e58}R\u{307}|\
+        \u{1e59}r\u{307}|\u{1e5a}R\u{323}|\u{1e5b}r\u{323}|\u{1e5c}R\u{323}\u{304}|\
+        \u{1e5d}r\u{323}\u{304}|\u{1e5e}R\u{331}|\u{1e5f}r\u{331}|\u{1e60}S\u{307}|\
+        \u{1e61}s\u{307}|\u{1e62}S\u{323}|\u{1e63}s\u{323}|\u{1e64}S\u{301}\u{307}|\
+        \u{1e65}s\u{301}\u{307}|\u{1e66}S\u{30c}\u{307}|\u{1e67}s\u{30c}\u{307}|\
+        \u{1e68}S\u{323}\u{307}|\u{1e69}s\u{323}\u{307}|\u{1e6a}T\u{307}|\u{1e6b}t\u{307}|\
+        \u{1e6c}T\u{323}|\u{1e6d}t\u{323}|\u{1e6e}T\u{331}|\u{1e6f}t\u{331}|\u{1e70}T\u{32d}|\
+        \u{1e71}t\u{32d}|\u{1e72}U\u{324}|\u{1e73}u\u{324}|\u{1e74}U\u{330}|\u{1e75}u\u{330}|\
+        \u{1e76}U\u{32d}|\u{1e77}u\u{32d}|\u{1e78}U\u{303}\u{301}|\u{1e79}u\u{303}\u{301}|\
+        \u{1e7a}U\u{304}\u{308}|\u{1e7b}u\u{304}\u{308}|\u{1e7c}V\u{303}|\u{1e7d}v\u{303}|\
+        \u{1e7e}V\u{323}|\u{1e7f}v\u{323}|\u{1e80}W\u{300}|\u{1e81}w\u{300}|\u{1e82}W\u{301}|\
+        \u{1e83}w\u{301}|\u{1e84}W\u{308}|\u{1e85}w\u{308}|\u{1e86}W\u{307}|\u{1e87}w\u{307}|\
+        \u{1e88}W\u{323}|\u{1e89}w\u{323}|\u{1e8a}X\u{307}|\u{1e8b}x\u{307}|\u{1e8c}X\u{308}|\
+        \u{1e8d}x\u{308}|\u{1e8e}Y\u{307}|\u{1e8f}y\u{307}|\u{1e90}Z\u{302}|\u{1e91}z\u{302}|\
+        \u{1e92}Z\u{323}|\u{1e93}z\u{323}|\u{1e94}Z\u{331}|\u{1e95}z\u{331}|\u{1e96}h\u{331}|\
+        \u{1e97}t\u{308}|\u{1e98}w\u{30a}|\u{1e99}y\u{30a}|\u{1e9b}\u{17f}\u{307}|\
+        \u{1ea0}A\u{323}|\u{1ea1}a\u{323}|\u{1ea2}A\u{309}|\u{1ea3}a\u{309}|\
+        \u{1ea4}A\u{302}\u{301}|\u{1ea5}a\u{302}\u{301}|\u{1ea6}A\u{302}\u{300}|\
+        \u{1ea7}a\u{302}\u{300}|\u{1ea8}A\u{302}\u{309}|\u{1ea9}a\u{302}\u{309}|\
+        \u{1eaa}A\u{302}\u{303}|\u{1eab}a\u{302}\u{303}|\u{1eac}A\u{323}\u{302}|\
+        \u{1ead}a\u{323}\u{302}|\u{1eae}A\u{306}\u{301}|\u{1eaf}a\u{306}\u{301}|\
+        \u{1eb0}A\u{306}\u{300}|\u{1eb1}a\u{306}\u{300}|\u{1eb2}A\u{306}\u{309}|\
+        \u{1eb3}a\u{306}\u{309}|\u{1eb4}A\u{306}\u{303}|\u{1eb5}a\u{306}\u{303}|\
+        \u{1eb6}A\u{323}\u{306}|\u{1eb7}a\u{323}\u{306}|\u{1eb8}E\u{323}|\u{1eb9}e\u{323}|\
+        \u{1eba}E\u{309}|\u{1ebb}e\u{309}|\u{1ebc}E\u{303}|\u{1ebd}e\u{303}|\
+        \u{1ebe}E\u{302}\u{301}|\u{1ebf}e\u{302}\u{301}|\u{1ec0}E\u{302}\u{300}|\
+        \u{1ec1}e\u{302}\u{300}|\u{1ec2}E\u{302}\u{309}|\u{1ec3}e\u{302}\u{309}|\
+        \u{1ec4}E\u{302}\u{303}|\u{1ec5}e\u{302}\u{303}|\u{1ec6}E\u{323}\u{302}|\
+        \u{1ec7}e\u{323}\u{302}|\u{1ec8}I\u{309}|\u{1ec9}i\u{309}|\u{1eca}I\u{323}|\
+        \u{1ecb}i\u{323}|\u{1ecc}O\u{323}|\u{1ecd}o\u{323}|\u{1ece}O\u{309}|\u{1ecf}o\u{309}|\
+        \u{1ed0}O\u{302}\u{301}|\u{1ed1}o\u{302}\u{301}|\u{1ed2}O\u{302}\u{300}|\
+        \u{1ed3}o\u{302}\u{300}|\u{1ed4}O\u{302}\u{309}|\u{1ed5}o\u{302}\u{309}|\
+        \u{1ed6}O\u{302}\u{303}|\u{1ed7}o\u{302}\u{303}|\u{1ed8}O\u{323}\u{302}|\
+        \u{1ed9}o\u{323}\u{302}|\u{1eda}O\u{31b}\u{301}|\u{1edb}o\u{31b}\u{301}|\
+        \u{1edc}O\u{31b}\u{300}|\u{1edd}o\u{31b}\u{300}|\u{1ede}O\u{31b}\u{309}|\
+        \u{1edf}o\u{31b}\u{309}|\u{1ee0}O\u{31b}\u{303}|\u{1ee1}o\u{31b}\u{303}|\
+        \u{1ee2}O\u{31b}\u{323}|\u{1ee3}o\u{31b}\u{323}|\u{1ee4}U\u{323}|\u{1ee5}u\u{323}|\
+        \u{1ee6}U\u{309}|\u{1ee7}u\u{309}|\u{1ee8}U\u{31b}\u{301}|\u{1ee9}u\u{31b}\u{301}|\
+        \u{1eea}U\u{31b}\u{300}|\u{1eeb}u\u{31b}\u{300}|\u{1eec}U\u{31b}\u{309}|\
+        \u{1eed}u\u{31b}\u{309}|\u{1eee}U\u{31b}\u{303}|\u{1eef}u\u{31b}\u{303}|\
+        \u{1ef0}U\u{31b}\u{323}|\u{1ef1}u\u{31b}\u{323}|\u{1ef2}Y\u{300}|\u{1ef3}y\u{300}|\
+        \u{1ef4}Y\u{323}|\u{1ef5}y\u{323}|\u{1ef6}Y\u{309}|\u{1ef7}y\u{309}|\u{1ef8}Y\u{303}|\
+        \u{1ef9}y\u{303}|";
+    static APART: std::sync::OnceLock<std::collections::HashMap<char, &'static str>> =
+        std::sync::OnceLock::new();
+    let apart = APART.get_or_init(|| {
+        LETTERS
+            .split_terminator('|')
+            .filter_map(|row| {
+                let letter = row.chars().next()?;
+                Some((letter, &row[letter.len_utf8()..]))
+            })
+            .collect()
+    });
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match apart.get(&c) {
+            Some(parts) => out.push_str(parts),
+            None => out.push(c),
+        }
+    }
+    out
 }
 
 /// Java's `(offset, count)` range of a `length`-long array, kept inside it.
@@ -2542,6 +2722,27 @@ fn builder(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Opti
         }
         // How much room the builder keeps is its own business: the text is the same.
         "trimToSize" | "ensureCapacity" => V::Void,
+        "appendCodePoint" => {
+            let mut s = cur(rt);
+            s.push(char::from_u32(a(1).i() as u32).unwrap_or('\u{fffd}'));
+            set(rt, s);
+            this
+        }
+        "setCharAt" => {
+            let mut u = utf16(&cur(rt));
+            match u.get_mut(a(1).i().max(0) as usize) {
+                Some(at) if a(1).i() >= 0 => *at = a(2).i() as u16,
+                _ => {
+                    return Some(throw_with(
+                        rt,
+                        "java/lang/StringIndexOutOfBoundsException",
+                        &format!("index {},length {}", a(1).i(), u.len()),
+                    ));
+                }
+            }
+            set(rt, from16(&u));
+            V::Void
+        }
         "deleteCharAt" => {
             let mut u = utf16(&cur(rt));
             let i = a(1).i().max(0) as usize;
@@ -3556,6 +3757,160 @@ fn bool_value(rt: &Rt, v: V) -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A handful of the JDK's own that mods of the pack call: a builder's code points, the
+    /// properties a mod sets for itself, a shutdown hook (never run), accents taken off a name
+    /// by decomposing it, a `SecureRandom`, a blocking deque, a stopwatch's `Duration`.
+    #[test]
+    fn small_things_of_the_jdk() {
+        crate::install();
+        let mut rt = Rt::new();
+        let call = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let b = rt.new_object("java/lang/StringBuilder");
+        call(&mut rt, "java/lang/StringBuilder.<init>.()V", &[b]);
+        call(
+            &mut rt,
+            "java/lang/StringBuilder.appendCodePoint.(I)Ljava/lang/StringBuilder;",
+            &[b, V::I(0x1F600)],
+        );
+        call(
+            &mut rt,
+            "java/lang/StringBuilder.appendCodePoint.(I)Ljava/lang/StringBuilder;",
+            &[b, V::I('a' as i32)],
+        );
+        call(
+            &mut rt,
+            "java/lang/StringBuilder.setCharAt.(IC)V",
+            &[b, V::I(2), V::I('b' as i32)],
+        );
+        let s = call(
+            &mut rt,
+            "java/lang/StringBuilder.toString.()Ljava/lang/String;",
+            &[b],
+        );
+        assert_eq!(rt.str_of(s), Some("\u{1F600}b"));
+        call(
+            &mut rt,
+            "java/lang/StringBuilder.setCharAt.(IC)V",
+            &[b, V::I(9), V::I('x' as i32)],
+        );
+        assert_eq!(
+            rt.thrown.take().map(|e| rt.class_of(e)),
+            Some("java/lang/StringIndexOutOfBoundsException")
+        );
+
+        let (key, value) = (rt.string("mymod.debug"), rt.string("on"));
+        let get = "java/lang/System.getProperty.(Ljava/lang/String;)Ljava/lang/String;";
+        assert_eq!(call(&mut rt, get, &[key]), V::NULL);
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/lang/System.setProperty.(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[key, value]
+            ),
+            V::NULL
+        );
+        assert_eq!(call(&mut rt, get, &[key]), value);
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/lang/System.clearProperty.(Ljava/lang/String;)Ljava/lang/String;",
+                &[key]
+            ),
+            value
+        );
+        assert_eq!(call(&mut rt, get, &[key]), V::NULL);
+
+        let runtime = call(
+            &mut rt,
+            "java/lang/Runtime.getRuntime.()Ljava/lang/Runtime;",
+            &[],
+        );
+        let thread = rt.new_object("java/lang/Thread");
+        call(
+            &mut rt,
+            "java/lang/Runtime.addShutdownHook.(Ljava/lang/Thread;)V",
+            &[runtime, thread],
+        );
+
+        let nfd = crate::api::get_static(&mut rt, "java/text/Normalizer$Form.NFD");
+        let name = rt.string("Cr\u{e8}me br\u{fb}l\u{e9}e \u{1ebf}");
+        let apart = call(
+            &mut rt,
+            "java/text/Normalizer.normalize.(Ljava/lang/CharSequence;Ljava/text/Normalizer$Form;)Ljava/lang/String;",
+            &[name, nfd],
+        );
+        assert_eq!(
+            rt.str_of(apart),
+            Some("Cre\u{300}me bru\u{302}le\u{301}e e\u{302}\u{301}")
+        );
+        let nfc = crate::api::get_static(&mut rt, "java/text/Normalizer$Form.NFC");
+        let same = call(
+            &mut rt,
+            "java/text/Normalizer.normalize.(Ljava/lang/CharSequence;Ljava/text/Normalizer$Form;)Ljava/lang/String;",
+            &[name, nfc],
+        );
+        assert_eq!(rt.str_of(same), rt.str_of(name));
+
+        let random = rt.new_object("java/security/SecureRandom");
+        call(&mut rt, "java/security/SecureRandom.<init>.()V", &[random]);
+        let n = call(
+            &mut rt,
+            "java/security/SecureRandom.nextInt.(I)I",
+            &[random, V::I(10)],
+        );
+        assert!((0..10).contains(&n.i()), "{n:?}");
+
+        let deque = rt.new_object("java/util/concurrent/LinkedBlockingDeque");
+        call(
+            &mut rt,
+            "java/util/concurrent/LinkedBlockingDeque.<init>.()V",
+            &[deque],
+        );
+        call(
+            &mut rt,
+            "java/util/Deque.push.(Ljava/lang/Object;)V",
+            &[deque, key],
+        );
+        call(
+            &mut rt,
+            "java/util/Deque.push.(Ljava/lang/Object;)V",
+            &[deque, value],
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/Deque.pop.()Ljava/lang/Object;",
+                &[deque]
+            ),
+            value
+        );
+        assert_eq!(call(&mut rt, "java/util/Deque.size.()I", &[deque]), V::I(1));
+
+        let watch = call(
+            &mut rt,
+            "com/google/common/base/Stopwatch.createStarted.()Lcom/google/common/base/Stopwatch;",
+            &[],
+        );
+        let took = call(
+            &mut rt,
+            "com/google/common/base/Stopwatch.elapsed.()Ljava/time/Duration;",
+            &[watch],
+        );
+        assert!(call(&mut rt, "java/time/Duration.toNanos.()J", &[took]).j() >= 0);
+        let queue = rt.new_object("java/lang/ref/ReferenceQueue");
+        call(&mut rt, "java/lang/ref/ReferenceQueue.<init>.()V", &[queue]);
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/lang/ref/ReferenceQueue.poll.()Ljava/lang/ref/Reference;",
+                &[queue]
+            ),
+            V::NULL
+        );
+        assert!(rt.thrown.is_none());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// A dynamic proxy hands every call to its handler, with the method and the arguments boxed
     /// (an empty array for none, under Guava's `AbstractInvocationHandler`), and what the

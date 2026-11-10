@@ -1443,10 +1443,17 @@ fn kind_of(class: &str) -> Option<&'static str> {
     let simple = class.rsplit('/').next().unwrap_or(class);
     Some(match simple {
         "ArrayList" | "LinkedList" | "ArrayDeque" | "Vector" | "Stack" | "CopyOnWriteArrayList"
-        | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" => "list",
+        | "ConcurrentLinkedQueue" | "ConcurrentLinkedDeque" | "LinkedBlockingQueue" | "LinkedBlockingDeque" => "list",
         // fastutil's lists and queues of each element type (`ReferenceArrayList`, `LongArrayList`,
-        // `IntArrayFIFOQueue`...).
-        s if class.starts_with("it/unimi/dsi/fastutil/") && (s.ends_with("ArrayList") || s.ends_with("FIFOQueue") || s.ends_with("BigArrayBigList")) => "list",
+        // `IntArrayFIFOQueue`, `IntImmutableList`...).
+        s if class.starts_with("it/unimi/dsi/fastutil/")
+            && (s.ends_with("ArrayList")
+                || s.ends_with("FIFOQueue")
+                || s.ends_with("BigArrayBigList")
+                || s.ends_with("ImmutableList")) =>
+        {
+            "list"
+        }
         "TreeMap" | "TreeSet" | "ConcurrentSkipListMap" | "ConcurrentSkipListSet" => "sorted",
         s if s.ends_with("Map") || s.ends_with("Set") => "table",
         // `Hashtable` and its `Properties`: a map as any other here (one thread).
@@ -1685,8 +1692,13 @@ fn joiner(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only
 /// to the modules that claim it ([`crate::api`]'s chain), so this covers every arm, guards aside.
 pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
-    util_owner(owner) || owner.starts_with("com/google/common/") || owner == "org/apache/commons/lang3/ArrayUtils"
+    util_owner(owner)
+        || owner.starts_with("com/google/common/")
+        || matches!(owner, "org/apache/commons/lang3/ArrayUtils" | SECURE_RANDOM)
 }
+
+/// A `SecureRandom` is a `Random` here: its numbers are no secret a mod of the game keeps.
+const SECURE_RANDOM: &str = "java/security/SecureRandom";
 
 /// A `java.util` call (`owner.name.desc`), or None when this module doesn't model it.
 pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
@@ -1771,7 +1783,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner.starts_with("com/google/common/cache/") {
         return cache_call(rt, owner, name, args);
     }
-    if matches!(owner, "java/util/Random" | "java/util/concurrent/ThreadLocalRandom") {
+    if matches!(
+        owner,
+        "java/util/Random" | "java/util/concurrent/ThreadLocalRandom" | SECURE_RANDOM
+    ) {
         return random_call(rt, name, desc, args);
     }
     // Guava's immutable collection builders: filled in place, `build` copies.

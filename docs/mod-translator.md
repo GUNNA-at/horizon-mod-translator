@@ -10603,6 +10603,20 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - A whole collection waits while an entry is in progress, and one left by a call that never
     came back is dropped by the next. The heap's first object answers no captured values.
   - Tests: 21 compat-core.
+- [x] 2026-11-10 Part 178: `URI`, and a handful of the JDK launch 17 asked for.
+  - Launch 17's unmapped calls, without those made on nothing or on a stand-in (the trace
+    names the call that gave a stand-in since Part 173): 715 are causes. Ranked by the jars
+    of the pack that make each call (`unmapped_rank.py`, scratch).
+  - `java.net.URI` was no class here at all (24 jars `URI.create`, 20 `new URI`): its text
+    as a `URL`'s, its parts with `null` for the absent ones, `resolve`, `toURL` and back,
+    `Path.toUri()` and `new File(uri)` (a mod's config folder came out `null`).
+  - `StringBuilder.appendCodePoint` and `setCharAt`; `System.setProperty` and
+    `clearProperty`, read back by `getProperty`; `Runtime.addShutdownHook` (never run);
+    `Normalizer.normalize` (the decomposed forms take Latin letters apart, U+00C0 to U+017F
+    and U+1E00 to U+1EFF, which is how a mod strips accents); `SecureRandom` as a `Random`;
+    `LinkedBlockingDeque` and fastutil's immutable lists as lists; `Stopwatch.elapsed()` as a
+    `Duration`; `ReferenceQueue` (never fed) and `PhantomReference`.
+  - Tests: 834 compat.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

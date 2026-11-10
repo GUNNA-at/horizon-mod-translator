@@ -7,6 +7,8 @@ const RUN: &str = "java/lang/Runnable.run.()V";
 const CALENDAR: &str = "java/util/GregorianCalendar";
 const DATE: &str = "java/util/Date";
 const URL: &str = "java/net/URL";
+/// A `URI` is kept as a `URL` is: its text.
+const URI: &str = "java/net/URI";
 const RESPONSE: &str = "java/net/http/HttpResponse";
 const IO_EXCEPTION: &str = "java/io/IOException";
 const OFFLINE: &str = "a mod has no network here";
@@ -30,7 +32,8 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
         || owner.starts_with(LOCKS)
         || matches!(
             owner,
-            URL | "java/net/URLConnection"
+            URL | URI
+                | "java/net/URLConnection"
                 | "java/net/HttpURLConnection"
                 | "javax/net/ssl/HttpsURLConnection"
                 | LATCH
@@ -420,6 +423,194 @@ pub(crate) fn calendar(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &
     })
 }
 
+/// A `URI` of `spec`, or the `URL` (`class`).
+pub(crate) fn locator(rt: &mut Rt, class: &'static str, spec: &str) -> V {
+    let u = rt.new_object(class);
+    let text = rt.string(spec);
+    rt.put_field(u, "$spec", text);
+    u
+}
+
+/// The text of a `URI` or `URL`.
+pub(crate) fn locator_text(rt: &Rt, u: V) -> Option<String> {
+    rt.str_of(rt.get_field(u, "$spec")).map(str::to_owned)
+}
+
+/// What a `URI` has that a `URL` has not, or under another name: made by `create` or from its
+/// parts, absent parts answered `null`, another reference resolved against it. The parts both
+/// have are read as the `URL`'s are (None here).
+fn uri_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let spec = |rt: &Rt, v: V| rt.str_of(rt.get_field(v, "$spec")).unwrap_or("").to_owned();
+    // The text of an argument; none for `null`.
+    let given = |rt: &Rt, v: V| (v.r() != 0).then(|| crate::jlang::text(rt, v));
+    let scheme = |s: &str| {
+        s.split_once(':')
+            .map(|(scheme, _)| scheme)
+            .filter(|scheme| {
+                !scheme.is_empty()
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                    && !scheme.contains('/')
+            })
+            .map(str::to_owned)
+    };
+    Some(match name {
+        "create" => {
+            let text = crate::jlang::text(rt, a(0));
+            locator(rt, URI, &text)
+        }
+        "<init>" => {
+            let text = match desc {
+                "(Ljava/lang/String;)V" => crate::jlang::text(rt, a(1)),
+                // `(scheme, userInfo, host, port, path, query, fragment)`.
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" =>
+                {
+                    let mut out = String::new();
+                    if let Some(scheme) = given(rt, a(1)) {
+                        out.push_str(&format!("{scheme}:"));
+                    }
+                    if let Some(host) = given(rt, a(3)) {
+                        out.push_str("//");
+                        if let Some(user) = given(rt, a(2)) {
+                            out.push_str(&format!("{user}@"));
+                        }
+                        out.push_str(&host);
+                        if a(4).i() >= 0 {
+                            out.push_str(&format!(":{}", a(4).i()));
+                        }
+                    }
+                    out.push_str(&given(rt, a(5)).unwrap_or_default());
+                    if let Some(query) = given(rt, a(6)) {
+                        out.push_str(&format!("?{query}"));
+                    }
+                    if let Some(fragment) = given(rt, a(7)) {
+                        out.push_str(&format!("#{fragment}"));
+                    }
+                    out
+                }
+                // `(scheme, host, path, fragment)` and `(scheme, schemeSpecificPart, fragment)`.
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" => {
+                    let mut out = given(rt, a(1)).map_or(String::new(), |s| format!("{s}:"));
+                    if let Some(host) = given(rt, a(2)) {
+                        out.push_str(&format!("//{host}"));
+                    }
+                    out.push_str(&given(rt, a(3)).unwrap_or_default());
+                    if let Some(fragment) = given(rt, a(4)) {
+                        out.push_str(&format!("#{fragment}"));
+                    }
+                    out
+                }
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" => {
+                    let mut out = given(rt, a(1)).map_or(String::new(), |s| format!("{s}:"));
+                    out.push_str(&given(rt, a(2)).unwrap_or_default());
+                    if let Some(fragment) = given(rt, a(3)) {
+                        out.push_str(&format!("#{fragment}"));
+                    }
+                    out
+                }
+                _ => return None,
+            };
+            let text = rt.string(&text);
+            rt.put_field(a(0), "$spec", text);
+            V::Void
+        }
+        "toURL" => {
+            let s = spec(rt, a(0));
+            locator(rt, URL, &s)
+        }
+        "toASCIIString" => rt.get_field(a(0), "$spec"),
+        "getScheme" => match scheme(&spec(rt, a(0))) {
+            Some(s) => rt.string(&s),
+            None => V::NULL,
+        },
+        "isAbsolute" => V::I(scheme(&spec(rt, a(0))).is_some() as i32),
+        "isOpaque" => {
+            let s = spec(rt, a(0));
+            V::I(scheme(&s).is_some_and(|scheme| !s[scheme.len() + 1..].starts_with('/')) as i32)
+        }
+        "getSchemeSpecificPart" | "getRawSchemeSpecificPart" => {
+            let s = spec(rt, a(0));
+            let rest = match scheme(&s) {
+                Some(scheme) => s[scheme.len() + 1..].to_owned(),
+                None => s,
+            };
+            let rest = rest.split('#').next().unwrap_or("").to_owned();
+            rt.string(&rest)
+        }
+        "getFragment" | "getRawFragment" => match spec(rt, a(0)).split_once('#') {
+            Some((_, fragment)) => rt.string(fragment),
+            None => V::NULL,
+        },
+        "normalize" | "parseServerAuthority" => a(0),
+        // Another reference against this one: one with a scheme stands for itself, one from
+        // the root replaces the path, any other the last name of the path.
+        "resolve" => {
+            let (base, other) = (
+                spec(rt, a(0)),
+                if rt.class_of(a(1)) == URI {
+                    spec(rt, a(1))
+                } else {
+                    crate::jlang::text(rt, a(1))
+                },
+            );
+            let resolved = if scheme(&other).is_some() || base.is_empty() {
+                other
+            } else {
+                let base = base.split(['?', '#']).next().unwrap_or("");
+                let path_at = match base.find("://") {
+                    Some(i) => base[i + 3..].find('/').map_or(base.len(), |j| i + 3 + j),
+                    None => scheme(base).map_or(0, |s| s.len() + 1),
+                };
+                if other.starts_with('/') {
+                    format!("{}{other}", &base[..path_at])
+                } else {
+                    let dir = base[path_at..]
+                        .rfind('/')
+                        .map_or(path_at, |i| path_at + i + 1);
+                    format!(
+                        "{}{}{other}",
+                        &base[..dir],
+                        if dir == path_at && path_at == base.len() && base.contains("://") {
+                            "/"
+                        } else {
+                            ""
+                        }
+                    )
+                }
+            };
+            locator(rt, URI, &resolved)
+        }
+        "compareTo" => V::I(match spec(rt, a(0)).cmp(&spec(rt, a(1))) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }),
+        "equals" => V::I((rt.class_of(a(1)) == URI && spec(rt, a(0)) == spec(rt, a(1))) as i32),
+        "getRawPath" | "getRawQuery" | "getAuthority" | "getRawAuthority" | "getUserInfo" => {
+            let s = spec(rt, a(0));
+            let after = scheme(&s).map_or(s.as_str(), |scheme| &s[scheme.len() + 1..]);
+            let (authority, file) = match after.strip_prefix("//") {
+                Some(rest) => rest.split_at(rest.find('/').unwrap_or(rest.len())),
+                None => ("", after),
+            };
+            let file = file.split('#').next().unwrap_or("");
+            let part = match name {
+                "getRawPath" => Some(file.split('?').next().unwrap_or("").to_owned()),
+                "getRawQuery" => file.split_once('?').map(|p| p.1.to_owned()),
+                "getUserInfo" => authority.rsplit_once('@').map(|p| p.0.to_owned()),
+                _ => (!authority.is_empty()).then(|| authority.to_owned()),
+            };
+            match part {
+                Some(text) => rt.string(&text),
+                None => V::NULL,
+            }
+        }
+        _ => return None,
+    })
+}
+
 /// `java.net.http` and `java.net.URL`'s connections, on a machine with no network for a mod: a
 /// request is built as the mod builds it and then fails as one does offline (an `IOException`
 /// where it is sent and waited for, a 503 where it is sent to be answered later), so an update
@@ -488,7 +679,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let offline = |rt: &mut Rt| crate::jlang::throw_with(rt, IO_EXCEPTION, OFFLINE);
-    if owner == URL {
+    if owner == URI
+        && let Some(v) = uri_call(rt, name, desc, args)
+    {
+        return Some(v);
+    }
+    if owner == URL || owner == URI {
         let spec = |rt: &Rt| rt.str_of(rt.get_field(a(0), "$spec")).unwrap_or("").to_owned();
         // `scheme://host[:port]/path?query#fragment`, as far as the text has them.
         let part = |rt: &Rt, what: &str| {
@@ -523,8 +719,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let s = spec(rt);
                 rt.string(&s)
             }
+            // `url.toURI()`, and `URL.of(uri, handler)`: the same text, as the other kind.
+            "toURI" => {
+                let s = spec(rt);
+                locator(rt, URI, &s)
+            }
+            "of" if desc.starts_with("(Ljava/net/URI;") => {
+                let s = spec(rt);
+                locator(rt, URL, &s)
+            }
             "getPort" => V::I(part(rt, name).parse().unwrap_or(-1)),
             "getDefaultPort" => V::I(if spec(rt).starts_with("https:") { 443 } else { 80 }),
+            // (A `URI` answers `null` for a host it has none of.)
+            "getHost" if owner == URI && part(rt, name).is_empty() => V::NULL,
             "getProtocol" | "getHost" | "getPath" | "getFile" => {
                 let s = part(rt, name);
                 rt.string(&s)
@@ -646,6 +853,155 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
     use super::*;
+
+    /// A `URI` is its text: its parts (`null` for those it has none of), another reference
+    /// resolved against it, the `URL` of it and back; and a path's is the `file:` one a `File`
+    /// is made of again (a mod asks its config folder so).
+    #[test]
+    fn a_uri_is_its_text_and_a_path_s_is_a_file_s() {
+        let mut rt = Rt::new();
+        let text = |rt: &mut Rt, key: &'static str, on: V| {
+            let v = c(rt, key, &[on]);
+            rt.str_of(v).map(str::to_owned)
+        };
+        let spec = rt.string("https://user@example.org:8443/a/b.json?x=1#top");
+        let uri = c(
+            &mut rt,
+            "java/net/URI.create.(Ljava/lang/String;)Ljava/net/URI;",
+            &[spec],
+        );
+        assert_eq!(
+            text(&mut rt, "java/net/URI.getScheme.()Ljava/lang/String;", uri).as_deref(),
+            Some("https")
+        );
+        assert_eq!(
+            text(&mut rt, "java/net/URI.getHost.()Ljava/lang/String;", uri).as_deref(),
+            Some("example.org")
+        );
+        assert_eq!(c(&mut rt, "java/net/URI.getPort.()I", &[uri]), V::I(8443));
+        assert_eq!(
+            text(&mut rt, "java/net/URI.getPath.()Ljava/lang/String;", uri).as_deref(),
+            Some("/a/b.json")
+        );
+        assert_eq!(
+            text(
+                &mut rt,
+                "java/net/URI.getRawQuery.()Ljava/lang/String;",
+                uri
+            )
+            .as_deref(),
+            Some("x=1")
+        );
+        assert_eq!(
+            text(
+                &mut rt,
+                "java/net/URI.getFragment.()Ljava/lang/String;",
+                uri
+            )
+            .as_deref(),
+            Some("top")
+        );
+        assert_eq!(
+            text(
+                &mut rt,
+                "java/net/URI.getUserInfo.()Ljava/lang/String;",
+                uri
+            )
+            .as_deref(),
+            Some("user")
+        );
+        assert_eq!(c(&mut rt, "java/net/URI.isAbsolute.()Z", &[uri]), V::I(1));
+        let url = c(&mut rt, "java/net/URI.toURL.()Ljava/net/URL;", &[uri]);
+        assert_eq!(
+            text(&mut rt, "java/net/URL.getHost.()Ljava/lang/String;", url).as_deref(),
+            Some("example.org")
+        );
+        let back = c(&mut rt, "java/net/URL.toURI.()Ljava/net/URI;", &[url]);
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/net/URI.equals.(Ljava/lang/Object;)Z",
+                &[uri, back]
+            ),
+            V::I(1)
+        );
+        for (other, resolved) in [
+            ("c.json", "https://user@example.org:8443/a/c.json"),
+            ("/d", "https://user@example.org:8443/d"),
+            ("mailto:x@y", "mailto:x@y"),
+        ] {
+            let other = rt.string(other);
+            let r = c(
+                &mut rt,
+                "java/net/URI.resolve.(Ljava/lang/String;)Ljava/net/URI;",
+                &[uri, other],
+            );
+            assert_eq!(
+                text(&mut rt, "java/net/URI.toString.()Ljava/lang/String;", r).as_deref(),
+                Some(resolved)
+            );
+        }
+        // One with no scheme and no host.
+        let plain = rt.new_object("java/net/URI");
+        let relative = rt.string("config/mod.toml");
+        c(
+            &mut rt,
+            "java/net/URI.<init>.(Ljava/lang/String;)V",
+            &[plain, relative],
+        );
+        assert_eq!(
+            text(
+                &mut rt,
+                "java/net/URI.getScheme.()Ljava/lang/String;",
+                plain
+            ),
+            None
+        );
+        assert_eq!(
+            text(&mut rt, "java/net/URI.getHost.()Ljava/lang/String;", plain),
+            None
+        );
+        assert_eq!(c(&mut rt, "java/net/URI.isAbsolute.()Z", &[plain]), V::I(0));
+        // A path's, and the file made of it.
+        let dir = std::env::temp_dir().join(format!("hz-uri-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let game_dir = rt.string(&dir.to_string_lossy());
+        rt.statics.insert(crate::GAME_DIR, game_dir);
+        let name = rt.string("config");
+        let none = rt.alloc("[Ljava/lang/String;", crate::Data::Array(Vec::new()));
+        let path = c(
+            &mut rt,
+            "java/nio/file/Path.of.(Ljava/lang/String;[Ljava/lang/String;)Ljava/nio/file/Path;",
+            &[name, none],
+        );
+        let of_path = c(
+            &mut rt,
+            "java/nio/file/Path.toUri.()Ljava/net/URI;",
+            &[path],
+        );
+        assert_eq!(
+            text(
+                &mut rt,
+                "java/net/URI.getScheme.()Ljava/lang/String;",
+                of_path
+            )
+            .as_deref(),
+            Some("file")
+        );
+        let file = rt.new_object("java/io/File");
+        c(
+            &mut rt,
+            "java/io/File.<init>.(Ljava/net/URI;)V",
+            &[file, of_path],
+        );
+        assert_eq!(c(&mut rt, "java/io/File.isDirectory.()Z", &[file]), V::I(1));
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         crate::api::call(rt, key, args)

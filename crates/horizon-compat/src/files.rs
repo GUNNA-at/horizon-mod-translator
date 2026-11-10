@@ -452,6 +452,15 @@ fn path_method(rt: &mut Rt, name: &str, p: &str, args: &[V]) -> Option<V> {
             rt.alloc("java/util/Iterator", Data::Iter(items, 0))
         }
         "toFile" => new_file(rt, p),
+        // `file:///...`: the path where it is on the disk.
+        "toUri" => {
+            let at = on_disk(rt, p);
+            crate::jsystem::locator(
+                rt,
+                "java/net/URI",
+                &format!("file://{}", at.to_string_lossy()),
+            )
+        }
         "equals" => {
             let o = a(1);
             V::I((o.r() != 0 && rt.class_of(o) == PATH && rt.str_of(o) == Some(p)) as i32)
@@ -475,6 +484,11 @@ fn file_method(rt: &mut Rt, name: &str, f: &str, args: &[V]) -> Option<V> {
     let disk = on_disk(rt, f);
     Some(match name {
         "toPath" => new_path(rt, f),
+        "toURI" => crate::jsystem::locator(
+            rt,
+            "java/net/URI",
+            &format!("file://{}", disk.to_string_lossy()),
+        ),
         "getPath" | "toString" => rt.string(f),
         "getName" => {
             let n = names(f).last().copied().unwrap_or("").to_owned();
@@ -768,6 +782,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         FILE if name == "<init>" => {
             let joined = match desc {
                 "(Ljava/lang/String;)V" => text(rt, a(1))?,
+                // `new File(uri)`: a `file:` one's path.
+                "(Ljava/net/URI;)V" => {
+                    let uri = crate::jsystem::locator_text(rt, a(1))?;
+                    let path = uri.strip_prefix("file:").unwrap_or(&uri);
+                    let path = path
+                        .strip_prefix("//")
+                        .map_or(path, |p| &p[p.find('/').unwrap_or(0)..]);
+                    path.to_owned()
+                }
                 // `new File(parent, child)`: the child under the parent, though it start with a
                 // `/` (`new File(dir, "/data")` is `dir/data`: the JDK's `UnixFileSystem.resolve`,
                 // not `Path.resolve`); a null parent is the child alone.
