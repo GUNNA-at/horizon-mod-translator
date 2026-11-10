@@ -846,6 +846,16 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
     let mut held = all.clone();
     held.extend([m, barrier, profiler, executor]);
     for l in all {
+        // Each listener is a piece of the mods' code of its own, as each listener of an event
+        // is: the calls nothing maps are counted for it alone. Counted for the hook, which
+        // runs every listener of the pack, one that made a million of them left each one
+        // after it an error at its first (and JourneyMap, handed that error, looked through
+        // its causes without end).
+        let misses = (
+            std::mem::take(&mut rt.hook_misses),
+            rt.hook_first_miss.take(),
+        );
+        crate::api::new_piece();
         // A mod's own listener or a lambda dispatches (to its `reload`, else to vanilla's base's,
         // which comes back here as `reload_one`).
         if rt.cid(l) != 0 {
@@ -853,6 +863,7 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
         } else {
             reload_one(rt, l, barrier, m, profiler);
         }
+        (rt.hook_misses, rt.hook_first_miss) = misses;
         rt.report_thrown("resource reload listener");
         // What one listener left behind goes before the next begins: a pack's listeners
         // together make far more garbage than fits (those who run this hold nothing more).

@@ -310,8 +310,11 @@ fn keep_null(rt: &mut Rt, key: &str) {
 /// Whether API key `key` is a constructor's (`<class>.<init>.<descriptor>`): asked of every
 /// call, so by the one character no other key has.
 fn is_constructor(key: &str) -> bool {
-    key.find('<')
-        .is_some_and(|at| key[at..].starts_with("<init>.("))
+    // (It returns nothing: only such a key is read through for the name.)
+    key.ends_with(")V")
+        && key
+            .find('<')
+            .is_some_and(|at| key[at..].starts_with("<init>.("))
 }
 
 fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
@@ -416,7 +419,15 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             .hook_first_miss
             .map_or(RUNAWAY_TIME.as_secs(), |t| t.elapsed().as_secs());
         let n = rt.hook_misses.max(RUNAWAY_MISSES);
-        crate::jlang::throw_with(rt, "java/lang/Error", &format!("horizon-compat: {key} isn't translated, and this hook kept calling what isn't ({n} calls in {secs} s): a loop waiting on its stand-in answer"));
+        // What a JVM throws at a method that is not there, which is what this is: code that
+        // falls back on such an error does, and code that sorts errors by kind knows this one.
+        crate::jlang::throw_with(
+            rt,
+            "java/lang/NoSuchMethodError",
+            &format!(
+                "horizon-compat: {key} isn't translated, and this hook kept calling what isn't ({n} calls in {secs} s): a loop waiting on its stand-in answer"
+            ),
+        );
         return r;
     }
     chained(rt, key, args).unwrap_or(r)
@@ -477,7 +488,10 @@ const RUNAWAY_TIME: std::time::Duration = std::time::Duration::from_secs(10);
 /// asked `Character.UnicodeBlock.of` of each character and escaped every one, the escapes too)
 /// takes all the machine's memory in seconds, long before a million rounds.
 const RUNAWAY_FEW: u64 = 1_000;
-const RUNAWAY_BYTES: u64 = 1 << 30;
+/// (One text or array of this size, made meanwhile: what the loop allocated in all says
+/// nothing now that garbage is collected while a hook runs, and a listener that reads a
+/// thousand files allocates more than a gigabyte in passing.)
+const RUNAWAY_BYTES: u64 = 256 << 20;
 /// Or made this many objects: a loop that makes one on each round (a server thread's accept loop,
 /// run on the game's thread) holds them all until its hook ends, which it never does.
 const RUNAWAY_OBJECTS: usize = 8_000_000;
@@ -498,18 +512,48 @@ thread_local! {
 /// the mod's constructor or listener it is in, so the mods after it load.
 fn runaway(rt: &mut Rt, key: &'static str) -> bool {
     if rt.host().is_none() {
-        return LOADING.with(|run| run.borrow_mut().stuck(key, (rt.allocated, rt.heap.len())));
+        let stuck = LOADING.with(|run| run.borrow_mut().stuck(key, (rt.largest, rt.heap.len())));
+        if stuck {
+            tell_most_asked(rt);
+        }
+        return stuck;
     }
     rt.hook_misses += 1;
     if rt.hook_misses == 1 {
-        HOOK_ALLOCATED.set((rt.allocated, rt.heap.len()));
+        rt.largest = 0;
+        HOOK_ALLOCATED.set((0, rt.heap.len()));
     }
     let first = *rt.hook_first_miss.get_or_insert_with(std::time::Instant::now);
-    let (bytes, objects) = HOOK_ALLOCATED.get();
-    let grown = rt.allocated.saturating_sub(bytes) >= RUNAWAY_BYTES
-        || rt.heap.len().saturating_sub(objects) >= RUNAWAY_OBJECTS;
-    (rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME)
-        || (rt.hook_misses >= RUNAWAY_FEW && grown)
+    let (_, objects) = HOOK_ALLOCATED.get();
+    let grown =
+        rt.largest >= RUNAWAY_BYTES || rt.heap.len().saturating_sub(objects) >= RUNAWAY_OBJECTS;
+    let stuck = (rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME)
+        || (rt.hook_misses >= RUNAWAY_FEW && grown);
+    if stuck {
+        tell_most_asked(rt);
+    }
+    stuck
+}
+
+/// When tracing: the calls nothing maps that were made most, where a loop on one was just
+/// stopped: the trace names each such call once, at its first, and the one a loop went
+/// round a million times may be far up the log.
+fn tell_most_asked(rt: &Rt) {
+    thread_local!(static TOLD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+    if !Rt::tracing() || TOLD.with(|t| t.replace(t.get() + 1)) >= 20 {
+        return;
+    }
+    let mut most: Vec<(&&'static str, &u64)> = rt.unmapped.iter().collect();
+    most.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    let text: Vec<String> = most
+        .iter()
+        .take(5)
+        .map(|(key, n)| format!("{n} x {key}"))
+        .collect();
+    eprintln!(
+        "horizon-compat: stopped a loop on calls nothing maps; asked most so far: {}",
+        text.join("; ")
+    );
 }
 
 /// The unmapped calls of a loop while the mods load, where no hook bounds them: the few keys the
@@ -543,9 +587,10 @@ impl Run {
         }
         self.calls += 1;
         let since = *self.since.get_or_insert_with(std::time::Instant::now);
-        let (bytes, objects) = *self.allocated.get_or_insert(allocated);
-        let grown = allocated.0.saturating_sub(bytes) >= RUNAWAY_BYTES
-            || allocated.1.saturating_sub(objects) >= RUNAWAY_OBJECTS;
+        let (_, objects) = *self.allocated.get_or_insert(allocated);
+        // (The largest single text or array so far, and how far the heap grew.)
+        let grown =
+            allocated.0 >= RUNAWAY_BYTES || allocated.1.saturating_sub(objects) >= RUNAWAY_OBJECTS;
         let stuck = (self.calls >= RUNAWAY_MISSES && since.elapsed() >= RUNAWAY_TIME)
             || (self.calls >= RUNAWAY_FEW && grown);
         if stuck {
@@ -1532,6 +1577,10 @@ const BE_GET_POS: &str = "net/minecraft/world/level/block/entity/BlockEntity.get
 const BE_GET_STATE: &str = "net/minecraft/world/level/block/entity/BlockEntity.getBlockState.()Lnet/minecraft/world/level/block/state/BlockState;";
 const MAP_VALUES: &str = "java/util/Map.values.()Ljava/util/Collection;";
 const COLLECTION_FOR_EACH: &str = "java/util/Collection.forEach.(Ljava/util/function/Consumer;)V";
+const ITERATOR_HAS_NEXT: &str = "java/util/Iterator.hasNext.()Z";
+const ITERATOR_NEXT: &str = "java/util/Iterator.next.()Ljava/lang/Object;";
+const ENTRY_GET_KEY: &str = "java/util/Map$Entry.getKey.()Ljava/lang/Object;";
+const ENTRY_GET_VALUE: &str = "java/util/Map$Entry.getValue.()Ljava/lang/Object;";
 
 /// The API's intrinsics, and whether each only reads (then tests check its every answer against
 /// the chain's): the calls mods make most, in their block entities' ticks (Create's kinetic
@@ -1552,6 +1601,11 @@ fn intrinsic(key: &str) -> Option<(Intrinsic, bool)> {
         BE_GET_STATE => (|rt, args| Some(rt.get_field(this(args), "$state")), true),
         MAP_VALUES => (crate::jutil::plain_map_values, false),
         COLLECTION_FOR_EACH => (crate::jutil::plain_list_for_each, false),
+        // A walk over a collection: every loop of the mods' code makes these for each element.
+        ITERATOR_HAS_NEXT => (crate::jutil::iterator_has_next, true),
+        ITERATOR_NEXT => (crate::jutil::iterator_next, false),
+        ENTRY_GET_KEY => (|rt, args| crate::jutil::entry_part(rt, args, false), true),
+        ENTRY_GET_VALUE => (|rt, args| crate::jutil::entry_part(rt, args, true), true),
         _ => return None,
     })
 }
@@ -4249,7 +4303,14 @@ mod tests {
             assert!(intrinsic(key).is_some(), "{key}");
             assert_eq!(first(key), "world", "{key}");
         }
-        for key in [MAP_VALUES, COLLECTION_FOR_EACH] {
+        for key in [
+            MAP_VALUES,
+            COLLECTION_FOR_EACH,
+            ITERATOR_HAS_NEXT,
+            ITERATOR_NEXT,
+            ENTRY_GET_KEY,
+            ENTRY_GET_VALUE,
+        ] {
             assert!(intrinsic(key).is_some(), "{key}");
             assert_eq!(first(key), "jutil", "{key}");
         }
@@ -5202,14 +5263,15 @@ mod tests {
             allocated: Some((0, 10)),
         };
         assert!(run.stuck(key, (0, 10 + RUNAWAY_OBJECTS)));
-        // And one that has allocated a gigabyte meanwhile, after far fewer calls and at once.
+        // And one that has made a single text of a quarter of a gigabyte meanwhile (a string
+        // doubled each round), after far fewer calls and at once.
         let mut run = Run {
             keys: vec![key],
             calls: RUNAWAY_FEW - 1,
             since: Some(std::time::Instant::now()),
             allocated: Some((5, 0)),
         };
-        assert!(run.stuck(key, (5 + RUNAWAY_BYTES, 0)) && run.calls == 0);
+        assert!(run.stuck(key, (RUNAWAY_BYTES, 0)) && run.calls == 0);
         let mut run = Run {
             keys: vec![key],
             calls: RUNAWAY_FEW - 1,
@@ -5217,8 +5279,8 @@ mod tests {
             allocated: Some((5, 0)),
         };
         assert!(
-            !run.stuck(key, (RUNAWAY_BYTES, RUNAWAY_OBJECTS - 1)),
-            "a thousand calls that allocated less are loading going on"
+            !run.stuck(key, (RUNAWAY_BYTES - 1, RUNAWAY_OBJECTS - 1)),
+            "a thousand calls that made nothing so large are loading going on"
         );
         LOADING.with(|run| {
             *run.borrow_mut() = Run {
@@ -5233,7 +5295,7 @@ mod tests {
             .thrown
             .take()
             .expect("a constructor stuck on an unmapped call is stopped");
-        assert_eq!(rt.class_of(e), "java/lang/Error");
+        assert_eq!(rt.class_of(e), "java/lang/NoSuchMethodError");
         let mut game = Game;
         rt.with_host(&mut game, |rt| {
             call(rt, key, &[]);
@@ -5242,7 +5304,14 @@ mod tests {
             rt.hook_first_miss = Some(long_ago());
             call(rt, key, &[]);
             let e = rt.thrown.take().expect("a hook stuck on an unmapped call is stopped");
-            assert_eq!(rt.class_of(e), "java/lang/Error");
+            // As a method that is not there: an error of linkage, and an `Error`.
+            assert_eq!(rt.class_of(e), "java/lang/NoSuchMethodError");
+            assert!(
+                rt.instance_of(e, "java/lang/LinkageError")
+                    && rt.instance_of(e, "java/lang/Error")
+                    && rt.instance_of(e, "java/lang/Throwable")
+            );
+            assert!(!rt.instance_of(e, "java/lang/Exception"));
             assert!(rt.str_of(rt.get_field(e, "message")).is_some_and(|m| m.contains(key)));
         });
         rt.with_host(&mut game, |rt| {

@@ -499,6 +499,14 @@ fn lambda_of(rt: &Rt, lid: u32, args: &[V]) -> Option<(LambdaFn, Vec<V>)> {
     Some((f, full))
 }
 
+/// [`lambda_call`] with the lambda and its arguments apart: no list of both is made first.
+pub(crate) fn lambda_run(rt: &mut Rt, lid: u32, lambda: V, args: &[V]) -> Option<V> {
+    let f = rt.linked?.lambdas.get(lid as usize).copied().flatten()?;
+    let mut full = rt.captured(lambda);
+    full.extend_from_slice(args);
+    Some(rt.entered(move |rt| f(rt, full), |r| *r))
+}
+
 /// A call on a lambda object (`lid`: its implementation's id), `args[0]` the lambda, from the
 /// runtime's own code: an entry into the mods' ([`Rt::entered`]).
 pub fn lambda_call(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {

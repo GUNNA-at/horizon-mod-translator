@@ -10647,6 +10647,36 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `getArmorSlots()` and its other slot lists (from its saved equipment),
     `MinecraftServer.isSingleplayer()`, the player list's view distance.
   - Tests: 836 compat.
+- [x] 2026-11-10 Part 181: a walk over a map costs half.
+  - The reload listener of Parts 177 and 179 is, at bottom, a loop over a three-entry map made
+    some ten million times. Measured in a release build (a scratch bench): `entrySet()`,
+    `iterator()`, and for each entry `hasNext()`, `next()`, `getKey()`, `getValue()` took
+    1,237 ns and made 5 objects; `getKey()` alone 68 ns, for it copied the entry's list, and
+    `hasNext()` 45, found among everything `java.util` answers.
+  - The four are intrinsics of the API now (answered before the modules are asked, for the
+    runtime's own iterators and entries; the test that holds each intrinsic to the chain's
+    answer covers them): 15 to 19 ns each. An entry's two values are read, not copied. A call
+    of a lambda or of a mod's object from the runtime's code makes one list less. The walk
+    takes 610 ns.
+  - What is left of it is the entry set itself (308 ns: an object for each entry, a table
+    with its index, a note of each one's source), which is the next thing to make lighter.
+  - Launch 18 (Parts 175 to 178: 2,359 s, 570 crates, 2.001 GB) is the first to come through
+    that listener: the game held 6 to 10 GB where launches 16 and 17 passed 40, with 52
+    collections inside the hook, each 50 to 170 ms on a heap of 7 to 12 million objects (the
+    largest freed 2.97 million objects as one file's codec call ended). The handlers no
+    longer run on the number 31: Sable's 343 errors a launch at the head of `ServerLevel.tick`
+    are gone, with Moonlight's, Cucumber's, MineColonies' and Biomes O' Plenty's of launch 17.
+  - It then stood still in JourneyMap's listener, for a reason of the runtime's own: the
+    guard that stops a hook looping on calls nothing maps counted them for the whole hook,
+    which runs every reload listener of the pack; past a million, each later listener was
+    handed an `Error` at its first such call, and JourneyMap's handler of that error walks
+    the causes of anything that is no `Exception` without end. Each reload listener is a
+    piece of its own for that guard now, as each listener of an event is; what it throws is
+    `NoSuchMethodError`, which is what a call nothing translates is to the code that made it
+    (code that falls back on a missing method does); it judges a loop's growth by the largest
+    single text or array made meanwhile, not by all that was allocated, which garbage
+    collected inside the hook makes meaningless; and when it stops a loop it names the calls
+    asked most, since the trace names each only at its first.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

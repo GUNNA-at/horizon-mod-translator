@@ -264,6 +264,33 @@ fn java_is_a(c: &str, class: &str) -> bool {
                     | "java/nio/ReadOnlyBufferException"
             )
         }
+        // A method, field or class that is not there (what a call nothing translates is to
+        // the code that made it): errors of linkage.
+        "java/lang/LinkageError" | "java/lang/IncompatibleClassChangeError"
+            if matches!(
+                c,
+                "java/lang/NoSuchMethodError"
+                    | "java/lang/NoSuchFieldError"
+                    | "java/lang/AbstractMethodError"
+                    | "java/lang/IllegalAccessError"
+            ) =>
+        {
+            true
+        }
+        "java/lang/LinkageError"
+            if matches!(
+                c,
+                "java/lang/LinkageError"
+                    | "java/lang/IncompatibleClassChangeError"
+                    | "java/lang/NoClassDefFoundError"
+                    | "java/lang/ExceptionInInitializerError"
+                    | "java/lang/UnsatisfiedLinkError"
+                    | "java/lang/ClassFormatError"
+                    | "java/lang/VerifyError"
+            ) && c != class =>
+        {
+            true
+        }
         "com/google/gson/JsonParseException" => matches!(c, "com/google/gson/JsonSyntaxException" | "com/google/gson/JsonIOException"),
         "java/lang/IllegalArgumentException" => matches!(c, "java/lang/NumberFormatException" | "java/util/IllegalFormatException"),
         "java/lang/IndexOutOfBoundsException" => matches!(c, "java/lang/ArrayIndexOutOfBoundsException" | "java/lang/StringIndexOutOfBoundsException"),

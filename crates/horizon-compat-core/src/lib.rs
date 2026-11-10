@@ -343,6 +343,10 @@ pub struct Rt {
     /// that grows a string without end runs up between two collections (none frees inside a
     /// hook), for whoever watches for one.
     pub allocated: u64,
+    /// The bytes of the largest text, array or list made since this was last set to 0: one
+    /// of hundreds of megabytes is what a loop that doubles a string each round makes, where
+    /// what was allocated in all says nothing since garbage is collected inside a hook.
+    pub largest: u64,
     /// The calls from the runtime's own code into the mods' that are in progress, outermost
     /// first ([`Rt::entered`]).
     pub entries: Vec<gc::Entry>,
@@ -426,6 +430,7 @@ impl Default for Rt {
             hook_misses: 0,
             hook_first_miss: None,
             allocated: 0,
+            largest: 0,
             entries: Vec::new(),
             native: 1,
             made: 0,
@@ -616,8 +621,6 @@ impl Rt {
 
     /// Calls a functional-interface method on `target` (a lambda or a mod object).
     pub fn call_functional(&mut self, key: &'static str, target: V, args: &[V]) -> V {
-        let mut all = vec![target];
-        all.extend_from_slice(args);
         let class = self.class_of(target);
         if class == "compat:apply" {
             // `Function.apply(captured[1])` on captured[0]: a registerBlock factory with its properties.
@@ -626,16 +629,42 @@ impl Rt {
             return self.call_functional("java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;", f, &[arg]);
         }
         let cid = self.cid(target);
+        // A lambda of the linked code: what it captured and the arguments, in the one list it
+        // runs with (every element of every `forEach` and `filter` comes through here).
+        if cid & LAMBDA != 0
+            && self.lambda_call.is_some_and(|f| {
+                std::ptr::fn_addr_eq(
+                    f,
+                    linked::lambda_call as fn(&mut Rt, u32, &[V]) -> Option<V>,
+                )
+            })
+            && let Some(r) = linked::lambda_run(self, cid & !LAMBDA, target, args)
+        {
+            return self.adapt_return(r, key);
+        }
+        // The target, then the arguments: on the stack for the few a call has.
+        let mut few = [V::Void; 8];
+        let many: Vec<V>;
+        let all: &[V] = if args.len() < few.len() {
+            few[0] = target;
+            few[1..=args.len()].copy_from_slice(args);
+            &few[..=args.len()]
+        } else {
+            many = std::iter::once(target)
+                .chain(args.iter().copied())
+                .collect();
+            &many
+        };
         if cid & LAMBDA != 0
             && let Some(lc) = self.lambda_call
-            && let Some(r) = lc(self, cid & !LAMBDA, &all)
+            && let Some(r) = lc(self, cid & !LAMBDA, all)
         {
             return self.adapt_return(r, key);
         }
         // A mod object implementing the interface: dispatch on its class by `name.desc`.
         let short: &'static str = key.split_once('.').map_or(key, |(_, r)| r);
         match self.vcall {
-            Some(vc) => vc(self, key, short, &all),
+            Some(vc) => vc(self, key, short, all),
             None => V::Void,
         }
     }
@@ -706,11 +735,13 @@ impl Rt {
     }
 
     pub fn alloc_cid(&mut self, class: &'static str, cid: u32, data: Data) -> V {
-        self.allocated += match &data {
+        let bytes = match &data {
             Data::Str(s) => s.len() as u64,
             Data::Array(v) | Data::List(v) => 16 * v.len() as u64,
             _ => 0,
         };
+        self.allocated += bytes;
+        self.largest = self.largest.max(bytes);
         self.made += 1;
         let born = self.next_born() - 1;
         let object = Object {
