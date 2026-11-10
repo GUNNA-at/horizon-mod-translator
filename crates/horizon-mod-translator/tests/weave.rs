@@ -118,6 +118,9 @@ const CASES: &[(&str, &str, i32, &str)] = &[
     // first), and on an object the game made, before the first of the mixin's methods (0 + 10).
     ("vecSum", "(I)I", 4, "17"),
     ("vecZero", "()I", 0, "10"),
+    // The default methods of the interface it adds: the interface's own on the game's object
+    // (twice (3 + 4 + 0) + 10), and the game's own `length()` (5) where its class declares it.
+    ("vecDefaults", "(I)I", 3, "3405"),
 ];
 
 #[test]

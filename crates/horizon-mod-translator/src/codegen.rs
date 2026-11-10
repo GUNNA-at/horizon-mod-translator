@@ -1783,11 +1783,79 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             }
             _ => String::new(),
         };
+        let id = self.cid(&c.name);
+        // The default methods of the mods' interfaces it adds: a class it is mixed into has
+        // them as any class has its interfaces' (Architectury's `arch$registryName()` of an
+        // item, of a block, of an entity type). Not one the mixin has for itself, nor one a
+        // target's own classes declare, since a class's method comes before an interface's
+        // default; of one that two of the interfaces have, the one of the interface below.
+        // A call reaches it through one of those interfaces on an object of a target, or
+        // written on the target.
+        let below = |this: &Self, a: &str, b: &str| {
+            let mut queue = vec![a];
+            let mut seen: Vec<&str> = Vec::new();
+            while let Some(i) = queue.pop() {
+                if seen.contains(&i) {
+                    continue;
+                }
+                seen.push(i);
+                if let Some(k) = this.classes.get(i) {
+                    queue.extend(k.interfaces.iter().map(String::as_str));
+                }
+            }
+            a != b && seen.contains(&b)
+        };
+        let mut defaults: Vec<(String, &str)> = Vec::new();
+        for &i in &adds {
+            let Some(ik) = self.classes.get(i) else {
+                continue;
+            };
+            for m in ik
+                .methods
+                .iter()
+                .filter(|m| m.code.is_some() && m.access & 0x000a == 0 && !m.name.starts_with('<'))
+            {
+                let nd = format!("{}.{}", m.name, m.desc);
+                if c.methods
+                    .iter()
+                    .any(|x| x.name == m.name && x.desc == m.desc)
+                    || targets
+                        .iter()
+                        .any(|t| horizon_compat::api::game_class_declares(t, &nd))
+                {
+                    continue;
+                }
+                match defaults.iter_mut().find(|(k, _)| *k == nd) {
+                    Some((_, of)) if below(self, i, of) => *of = i,
+                    Some(_) => {}
+                    None => defaults.push((nd, i)),
+                }
+            }
+        }
+        let through: Vec<&str> = adds
+            .iter()
+            .copied()
+            .filter(|a| self.classes.contains_key(a))
+            .collect();
+        for (j, (nd, of)) in defaults.iter().enumerate() {
+            let (name, desc) = nd.split_once('.').unwrap_or((nd.as_str(), ""));
+            let _ = write!(
+                code,
+                "fn ai_{id}_{j}(rt: &mut Rt, args: &[V]) -> V {{\n    {}{}(rt, args)\n}}\n\n",
+                self.ensure(of),
+                fn_name(of, name, desc)
+            );
+            let owners: Vec<String> = targets.iter().map(|t| format!("{t}.{nd}")).collect();
+            let checked: Vec<String> = through.iter().map(|a| format!("{a}.{nd}")).collect();
+            let _ = writeln!(
+                added,
+                "        Added {{ key: {nd:?}, run: ai_{id}_{j}, owners: &{owners:?}, checked: &{checked:?}, targets: &{targets:?} }},"
+            );
+        }
         if list.is_empty() {
             return;
         }
         let ensure = self.ensure(&c.name);
-        let id = self.cid(&c.name);
         for (i, (nd, a)) in list.iter().enumerate() {
             let (name, desc) = nd.split_once('.').unwrap_or((nd.as_str(), ""));
             let _ = write!(code, "fn a_{id}_{i}(rt: &mut Rt, args: &[V]) -> V {{\n    {ensure}{init}{}(rt, args)\n}}\n\n", fn_name(&c.name, name, desc));

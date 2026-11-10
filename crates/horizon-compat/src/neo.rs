@@ -2928,6 +2928,58 @@ mod tests {
         assert_eq!(rt.class_of(server), "net/minecraft/server/MinecraftServer");
         let overworld = crate::api::call(&mut rt, "net/minecraft/server/MinecraftServer.overworld.()Lnet/minecraft/server/level/ServerLevel;", &[server]);
         assert_eq!(overworld, level);
+        // What it says of itself: it runs, on the thread that asks, at the game's own rate.
+        let running = crate::api::call(
+            &mut rt,
+            "net/minecraft/server/MinecraftServer.getRunningThread.()Ljava/lang/Thread;",
+            &[server],
+        );
+        assert_eq!(
+            running,
+            crate::api::call(
+                &mut rt,
+                "java/lang/Thread.currentThread.()Ljava/lang/Thread;",
+                &[]
+            )
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "net/minecraft/server/MinecraftServer.isRunning.()Z",
+                &[server]
+            ),
+            V::I(1)
+        );
+        let rate = crate::api::call(
+            &mut rt,
+            "net/minecraft/server/MinecraftServer.tickRateManager.()Lnet/minecraft/server/ServerTickRateManager;",
+            &[server],
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "net/minecraft/server/ServerTickRateManager.tickrate.()F",
+                &[rate]
+            ),
+            V::F(20.0)
+        );
+        let times = crate::api::call(
+            &mut rt,
+            "net/minecraft/server/MinecraftServer.getTickTimesNanos.()[J",
+            &[server],
+        );
+        assert_eq!(rt.array_len(times), 100);
+        let keys = crate::api::call(
+            &mut rt,
+            "net/minecraft/server/MinecraftServer.levelKeys.()Ljava/util/Set;",
+            &[server],
+        );
+        let keys: Vec<String> = crate::jutil::elements(&rt, keys)
+            .iter()
+            .map(|k| rt.str_of(*k).unwrap_or("").to_owned())
+            .collect();
+        assert_eq!(keys, ["dimension#minecraft:overworld"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         let mut client = Rt::new();
         client.interned.insert("side:client".into(), V::I(1));
         crate::glue::level(&mut client);

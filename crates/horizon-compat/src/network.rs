@@ -1409,6 +1409,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let b = byte_array(rt, a(0));
                 buffer_with(rt, b)
             }
+            // Of a buffer, or of several one after another: what each has left to read.
+            "wrappedBuffer" | "copiedBuffer" | "unreleasableBuffer" | "unmodifiableBuffer"
+                if desc.starts_with("(Lio/netty/buffer/ByteBuf;)")
+                    || desc.starts_with("([Lio/netty/buffer/ByteBuf;)") =>
+            {
+                let parts = if desc.starts_with("([") {
+                    crate::jutil::elements(rt, a(0))
+                } else {
+                    vec![a(0)]
+                };
+                let mut all = Vec::new();
+                for part in parts {
+                    let (bytes, at) =
+                        bytes_mut(rt, part).map_or((Vec::new(), 0), |(v, at)| (v.clone(), *at));
+                    all.extend_from_slice(&bytes[at.min(bytes.len())..]);
+                }
+                buffer_with(rt, all)
+            }
             _ => return None,
         }),
         // `ByteBufUtil`: a buffer's bytes as an array (what is left to read, or a stretch of
@@ -1725,9 +1743,40 @@ fn buffer_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             put(rt, b, &bytes);
             b
         }
-        "writeBytes" if desc.starts_with("([B") => {
+        "writeBytes" if desc.starts_with("([B)") => {
             let bytes = byte_array(rt, a(1));
             put(rt, b, &bytes);
+            b
+        }
+        // `writeBytes(array, from, length)`; from another buffer what it has left to read
+        // (`writeBytes(buffer)`, or `length` of it), which that buffer has then read; or
+        // `writeBytes(buffer, from, length)`, which leaves it as it was.
+        "writeBytes" => {
+            let params = crate::jlang::kinds(desc).len();
+            let (all, at, moves) = if desc.starts_with("([B") {
+                (byte_array(rt, a(1)), a(2).i().max(0) as usize, false)
+            } else {
+                let (all, at) =
+                    bytes_mut(rt, a(1)).map_or((Vec::new(), 0), |(v, at)| (v.clone(), *at));
+                if params == 3 {
+                    (all, a(2).i().max(0) as usize, false)
+                } else {
+                    (all, at, true)
+                }
+            };
+            let length = match params {
+                1 => all.len().saturating_sub(at),
+                n => a(n).i().max(0) as usize,
+            };
+            match all.get(at..at.saturating_add(length)) {
+                Some(part) => {
+                    put(rt, b, part);
+                    if moves && let Some((_, read)) = bytes_mut(rt, a(1)) {
+                        *read += length;
+                    }
+                }
+                None => rt.throw_new("java/lang/IndexOutOfBoundsException"),
+            }
             b
         }
         // (value, encoder): instance and static (`writeNullable(buf, value, encoder)`) alike.
@@ -1883,7 +1932,345 @@ fn buffer_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             b
         }
         "release" => V::I(1),
-        "retain" | "copy" | "slice" | "duplicate" | "asReadOnly" => b,
+        "retain" | "asReadOnly" | "touch" | "ensureWritable" => b,
+        "refCnt" => V::I(1),
+        "isWritable" | "hasArray" => V::I(1),
+        "arrayOffset" => V::I(0),
+        "isDirect" => V::I(0),
+        "writableBytes" | "maxWritableBytes" => {
+            V::I(i32::MAX - bytes_mut(rt, b).map_or(0, |(v, _)| v.len() as i32))
+        }
+        "maxCapacity" => V::I(i32::MAX),
+        // The next bytes: as a buffer of their own (`readBytes(n)`, `readSlice(n)`), into an
+        // array (all of it, or `length` from an index), or into another buffer.
+        "readSlice" | "readRetainedSlice" => match take(rt, b, a(1).i().max(0) as usize) {
+            Some(part) => buffer_with(rt, part),
+            None => V::NULL,
+        },
+        "readBytes" if desc.starts_with("(I)") => match take(rt, b, a(1).i().max(0) as usize) {
+            Some(part) => buffer_with(rt, part),
+            None => V::NULL,
+        },
+        "readBytes" if desc.starts_with("([B") => {
+            let (at, length) = if desc.starts_with("([BII)") {
+                (a(2).i().max(0), a(3).i().max(0) as usize)
+            } else {
+                (0, rt.array_len(a(1)).max(0) as usize)
+            };
+            if let Some(part) = take(rt, b, length) {
+                for (i, byte) in part.iter().enumerate() {
+                    rt.array_set(a(1), at + i as i32, V::I(i32::from(*byte as i8)));
+                }
+            }
+            b
+        }
+        "readBytes" => {
+            let left = bytes_mut(rt, b).map_or(0, |(v, at)| v.len() - *at);
+            let length = if crate::jlang::kinds(desc).len() >= 2 {
+                a(2).i().max(0) as usize
+            } else {
+                left
+            };
+            if let Some(part) = take(rt, b, length) {
+                put(rt, a(1), &part);
+            }
+            b
+        }
+        "skipBytes" => {
+            take(rt, b, a(1).i().max(0) as usize);
+            b
+        }
+        // A buffer of the same bytes: what is left to read (`slice()`, `copy()`), a stretch
+        // by index, or all of it read as far (`duplicate()`). Each is a buffer of its own
+        // here: what is written to one afterwards the other does not see.
+        "slice" | "retainedSlice" | "copy" | "duplicate" | "retainedDuplicate" => {
+            let (all, at) = bytes_mut(rt, b).map_or((Vec::new(), 0), |(v, at)| (v.clone(), *at));
+            if desc.starts_with("(II)") {
+                let from = a(1).i().max(0) as usize;
+                match all.get(from..from.saturating_add(a(2).i().max(0) as usize)) {
+                    Some(part) => buffer_with(rt, part.to_vec()),
+                    None => crate::jlang::throw_with(
+                        rt,
+                        "java/lang/IndexOutOfBoundsException",
+                        "the stretch is outside the buffer",
+                    ),
+                }
+            } else if name.ends_with("uplicate") {
+                rt.alloc(BUF, Data::Bytes(all, at))
+            } else {
+                buffer_with(rt, all[at.min(all.len())..].to_vec())
+            }
+        }
+        // The indexes a buffer remembers and goes back to.
+        "markReaderIndex" | "markWriterIndex" => {
+            let (length, at) = bytes_mut(rt, b).map_or((0, 0), |(v, at)| (v.len(), *at));
+            let inner = backing(rt, b);
+            if name == "markReaderIndex" {
+                rt.put_field(inner, "$markedReader", V::I(at as i32));
+            } else {
+                rt.put_field(inner, "$markedWriter", V::I(length as i32));
+            }
+            b
+        }
+        "resetReaderIndex" | "resetWriterIndex" => {
+            let inner = backing(rt, b);
+            let marked = rt
+                .get_field(
+                    inner,
+                    if name == "resetReaderIndex" {
+                        "$markedReader"
+                    } else {
+                        "$markedWriter"
+                    },
+                )
+                .i()
+                .max(0) as usize;
+            if let Some((v, at)) = bytes_mut(rt, b) {
+                if name == "resetReaderIndex" {
+                    *at = marked.min(v.len());
+                } else {
+                    v.truncate(marked);
+                    *at = (*at).min(v.len());
+                }
+            }
+            b
+        }
+        "discardReadBytes" | "discardSomeReadBytes" => {
+            if let Some((v, at)) = bytes_mut(rt, b) {
+                v.drain(..(*at).min(v.len()));
+                *at = 0;
+            }
+            b
+        }
+        // What is left to read, or a stretch by index, as text.
+        "toString" if desc.ends_with("Ljava/nio/charset/Charset;)Ljava/lang/String;") => {
+            let (all, at) = bytes_mut(rt, b).map_or((Vec::new(), 0), |(v, at)| (v.clone(), *at));
+            let (from, length) = if desc.starts_with("(II") {
+                (a(1).i().max(0) as usize, a(2).i().max(0) as usize)
+            } else {
+                (at, all.len().saturating_sub(at))
+            };
+            match all.get(from..from.saturating_add(length)) {
+                Some(part) => rt.string(&String::from_utf8_lossy(part)),
+                None => crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IndexOutOfBoundsException",
+                    "the stretch is outside the buffer",
+                ),
+            }
+        }
+        // `writeById(idOf, value)` and `readById(byId)`: a value as the number a function
+        // gives it.
+        "writeById" => {
+            let id = rt.call_functional(TO_INT, a(1), &[a(2)]).i();
+            put_var(rt, b, u64::from(id as u32));
+            b
+        }
+        "readById" => {
+            let id = read_var_int(rt, b).unwrap_or(0);
+            rt.call_functional(INT_FUNCTION, a(1), &[V::I(id)])
+        }
+        // A resource key as its location; read back under the registry's key given.
+        "writeResourceKey" => {
+            let key = text(rt, a(1));
+            put_utf(
+                rt,
+                b,
+                key.rsplit_once('#')
+                    .map_or(key.as_str(), |(_, location)| location),
+            );
+            V::Void
+        }
+        "readResourceKey" => {
+            let registry = text(rt, a(1));
+            match read_utf(rt, b) {
+                Some(location) => rt.string(&format!("{registry}#{location}")),
+                None => V::NULL,
+            }
+        }
+        // Arrays of longs and of ints, each after its length.
+        "writeLongArray" => {
+            let items = crate::jutil::elements(rt, a(1));
+            put_var(rt, b, items.len() as u64);
+            for v in items {
+                put(rt, b, &v.j().to_be_bytes());
+            }
+            b
+        }
+        "readLongArray" => {
+            let mut out = Vec::new();
+            for _ in 0..read_count(rt, b).unwrap_or(0) {
+                match take_n(rt, b) {
+                    Some(bytes) => out.push(V::J(i64::from_be_bytes(bytes))),
+                    None => break,
+                }
+            }
+            rt.alloc("[J", Data::Array(out))
+        }
+        "writeVarIntArray" => {
+            let items = crate::jutil::elements(rt, a(1));
+            put_var(rt, b, items.len() as u64);
+            for v in items {
+                put_var(rt, b, u64::from(v.i() as u32));
+            }
+            b
+        }
+        "readVarIntArray" => {
+            let mut out = Vec::new();
+            for _ in 0..read_count(rt, b).unwrap_or(0) {
+                match read_var_int(rt, b) {
+                    Some(i) => out.push(V::I(i)),
+                    None => break,
+                }
+            }
+            rt.alloc("[I", Data::Array(out))
+        }
+        // A chunk's position as one long, a block's hit as the game writes it (the place in
+        // the block as three floats), a position in a dimension.
+        "writeChunkPos" => {
+            let packed =
+                crate::api::call(rt, "net/minecraft/world/level/ChunkPos.toLong.()J", &[a(1)]).j();
+            put(rt, b, &packed.to_be_bytes());
+            b
+        }
+        "readChunkPos" => {
+            let packed = take_n(rt, b).map_or(0, i64::from_be_bytes);
+            crate::api_common::chunk_pos(rt, packed as i32, (packed >> 32) as i32)
+        }
+        "writeGlobalPos" => {
+            let dimension = crate::api::call(
+                rt,
+                "net/minecraft/core/GlobalPos.dimension.()Lnet/minecraft/resources/ResourceKey;",
+                &[a(1)],
+            );
+            let pos = crate::api::call(
+                rt,
+                "net/minecraft/core/GlobalPos.pos.()Lnet/minecraft/core/BlockPos;",
+                &[a(1)],
+            );
+            let key = text(rt, dimension);
+            put_utf(
+                rt,
+                b,
+                key.rsplit_once('#')
+                    .map_or(key.as_str(), |(_, location)| location),
+            );
+            put_pos(rt, b, pos);
+            V::Void
+        }
+        "readGlobalPos" => {
+            let dimension = match read_utf(rt, b) {
+                Some(location) => rt.string(&format!("dimension#{location}")),
+                None => return Some(V::NULL),
+            };
+            let pos = read_pos(rt, b).unwrap_or(V::NULL);
+            crate::api::call(
+                rt,
+                "net/minecraft/core/GlobalPos.of.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/GlobalPos;",
+                &[dimension, pos],
+            )
+        }
+        "writeBlockHitResult" => {
+            let c = crate::api::call;
+            let pos = c(
+                rt,
+                "net/minecraft/world/phys/BlockHitResult.getBlockPos.()Lnet/minecraft/core/BlockPos;",
+                &[a(1)],
+            );
+            let direction = c(
+                rt,
+                "net/minecraft/world/phys/BlockHitResult.getDirection.()Lnet/minecraft/core/Direction;",
+                &[a(1)],
+            );
+            let at = c(
+                rt,
+                "net/minecraft/world/phys/HitResult.getLocation.()Lnet/minecraft/world/phys/Vec3;",
+                &[a(1)],
+            );
+            let inside = c(
+                rt,
+                "net/minecraft/world/phys/BlockHitResult.isInside.()Z",
+                &[a(1)],
+            )
+            .i();
+            let corner = crate::api::pos_of(rt, pos);
+            put_pos(rt, b, pos);
+            let o = ordinal(rt, direction);
+            put_var(rt, b, o as u64);
+            for (axis, field) in ["x", "y", "z"].into_iter().enumerate() {
+                let within = (rt.get_field(at, field).d() - f64::from(corner[axis])) as f32;
+                put(rt, b, &within.to_be_bytes());
+            }
+            put(rt, b, &[u8::from(inside != 0)]);
+            V::Void
+        }
+        "readBlockHitResult" => {
+            let pos = read_pos(rt, b).unwrap_or(V::NULL);
+            let direction = read_var_int(rt, b).unwrap_or(0);
+            let corner = crate::api::pos_of(rt, pos);
+            let mut at = [0.0f64; 3];
+            for (axis, place) in at.iter_mut().enumerate() {
+                *place = f64::from(corner[axis])
+                    + f64::from(take_n(rt, b).map_or(0.0, f32::from_be_bytes));
+            }
+            let inside = take(rt, b, 1).is_some_and(|v| v[0] != 0);
+            let (at, direction) = (
+                vec3(rt, at[0], at[1], at[2]),
+                crate::api_common::direction(rt, i64::from(direction.clamp(0, 5))),
+            );
+            let hit = rt.new_object("net/minecraft/world/phys/BlockHitResult");
+            crate::api::call(
+                rt,
+                "net/minecraft/world/phys/BlockHitResult.<init>.(Lnet/minecraft/world/phys/Vec3;Lnet/minecraft/core/Direction;Lnet/minecraft/core/BlockPos;Z)V",
+                &[hit, at, direction, pos, V::I(i32::from(inside))],
+            );
+            hit
+        }
+        // A value through a codec, as a tag (`writeWithCodec(ops, codec, value)`) or as the
+        // text of its JSON (`writeJsonWithCodec(codec, value)`).
+        "writeWithCodec" | "writeJsonWithCodec" => {
+            let (codec, value) = if name == "writeWithCodec" {
+                (a(2), a(3))
+            } else {
+                (a(1), a(2))
+            };
+            match crate::codecs::encode(rt, codec, value) {
+                Ok(n) if name == "writeWithCodec" => put_nbt(rt, b, Some(&n)),
+                Ok(n) => put_utf(rt, b, &crate::recipes::nbt_json(&n).to_string()),
+                Err(e) => throw_with(
+                    rt,
+                    "io/netty/handler/codec/EncoderException",
+                    &format!("Failed to encode: {e}"),
+                ),
+            }
+            if name == "writeWithCodec" { b } else { V::Void }
+        }
+        "readWithCodec" | "readWithCodecTrusted" | "readJsonWithCodec" => {
+            let json = name == "readJsonWithCodec";
+            let codec = if json { a(1) } else { a(2) };
+            let read = if json {
+                read_utf(rt, b).and_then(|t| serde_json::from_str(&t).ok())
+            } else {
+                read_nbt(rt, b)
+                    .flatten()
+                    .map(|n| crate::recipes::nbt_json(&n))
+            };
+            let decoded = match read {
+                Some(value) => crate::codecs::decode(rt, codec, &value),
+                None => Err("nothing to read".to_owned()),
+            };
+            match decoded {
+                Ok(v) => v,
+                Err(e) => {
+                    throw_with(
+                        rt,
+                        "io/netty/handler/codec/DecoderException",
+                        &format!("Failed to decode: {e}"),
+                    );
+                    V::NULL
+                }
+            }
+        }
         "array" => {
             let all = bytes(rt, b);
             new_byte_array(rt, &all)
@@ -1911,6 +2298,202 @@ mod tests {
         let v = decode(rt, codec, back);
         assert!(rt.thrown.is_none());
         (bytes, v)
+    }
+
+    /// A buffer hands its bytes to another and to arrays, goes back to the indexes it marked,
+    /// and writes arrays, keys and positions as the game does.
+    #[test]
+    fn a_buffer_hands_its_bytes_on_and_goes_back_to_its_marks() {
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let a = new_buffer(&mut rt);
+        for i in 1..=6 {
+            c(
+                &mut rt,
+                "net/minecraft/network/FriendlyByteBuf.writeByte.(I)Lnet/minecraft/network/FriendlyByteBuf;",
+                &[a, V::I(i)],
+            );
+        }
+        // A stretch of another buffer by index leaves that buffer as it was; what it has left
+        // to read, it has then read.
+        let b = new_buffer(&mut rt);
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.writeBytes.(Lio/netty/buffer/ByteBuf;II)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[b, a, V::I(1), V::I(3)],
+        );
+        assert_eq!(bytes(&rt, b), [2, 3, 4]);
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readerIndex.()I", &[a]),
+            V::I(0)
+        );
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readByte.()B", &[a]),
+            V::I(1)
+        );
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.writeBytes.(Lio/netty/buffer/ByteBuf;)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[b, a],
+        );
+        assert_eq!(bytes(&rt, b), [2, 3, 4, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readableBytes.()I", &[a]),
+            V::I(0)
+        );
+        // The next bytes as a buffer of their own; a copy read without the buffer moving.
+        let slice = c(
+            &mut rt,
+            "io/netty/buffer/ByteBuf.readRetainedSlice.(I)Lio/netty/buffer/ByteBuf;",
+            &[b, V::I(2)],
+        );
+        assert_eq!(bytes(&rt, slice), [2, 3]);
+        let copy = c(
+            &mut rt,
+            "io/netty/buffer/ByteBuf.copy.()Lio/netty/buffer/ByteBuf;",
+            &[b],
+        );
+        assert_eq!(bytes(&rt, copy), [4, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readByte.()B", &[copy]),
+            V::I(4)
+        );
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readerIndex.()I", &[b]),
+            V::I(2)
+        );
+        let twin = c(
+            &mut rt,
+            "io/netty/buffer/ByteBuf.duplicate.()Lio/netty/buffer/ByteBuf;",
+            &[b],
+        );
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readerIndex.()I", &[twin]),
+            V::I(2)
+        );
+        let part = c(
+            &mut rt,
+            "io/netty/buffer/ByteBuf.slice.(II)Lio/netty/buffer/ByteBuf;",
+            &[b, V::I(6), V::I(2)],
+        );
+        assert_eq!(bytes(&rt, part), [5, 6]);
+        // A mark, bytes skipped, and back; past the end is an error.
+        c(
+            &mut rt,
+            "io/netty/buffer/ByteBuf.markReaderIndex.()Lio/netty/buffer/ByteBuf;",
+            &[b],
+        );
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.skipBytes.(I)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[b, V::I(3)],
+        );
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readerIndex.()I", &[b]),
+            V::I(5)
+        );
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.resetReaderIndex.()Lnet/minecraft/network/FriendlyByteBuf;",
+            &[b],
+        );
+        assert_eq!(
+            c(&mut rt, "io/netty/buffer/ByteBuf.readerIndex.()I", &[b]),
+            V::I(2)
+        );
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.skipBytes.(I)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[b, V::I(99)],
+        );
+        let thrown = rt.thrown.take().expect("past the end");
+        assert_eq!(rt.class_of(thrown), "java/lang/IndexOutOfBoundsException");
+        // Into an array from an index; several buffers as one.
+        let array = rt.alloc("[B", Data::Array(vec![V::I(0); 4]));
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.readBytes.([BII)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[b, array, V::I(1), V::I(2)],
+        );
+        assert_eq!(byte_array(&rt, array), [0, 4, 2, 0]);
+        let both = rt.alloc("[Lio/netty/buffer/ByteBuf;", Data::Array(vec![slice, part]));
+        let joined = c(
+            &mut rt,
+            "io/netty/buffer/Unpooled.wrappedBuffer.([Lio/netty/buffer/ByteBuf;)Lio/netty/buffer/ByteBuf;",
+            &[both],
+        );
+        assert_eq!(bytes(&rt, joined), [2, 3, 5, 6]);
+        // Arrays after their lengths, a value by its number, a key by its location.
+        let d = new_buffer(&mut rt);
+        let longs = rt.alloc("[J", Data::Array(vec![V::J(-1), V::J(1 << 40)]));
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.writeLongArray.([J)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[d, longs],
+        );
+        let ints = rt.alloc("[I", Data::Array(vec![V::I(300), V::I(-1)]));
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.writeVarIntArray.([I)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[d, ints],
+        );
+        let key = rt.string("dimension#minecraft:the_nether");
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.writeResourceKey.(Lnet/minecraft/resources/ResourceKey;)V",
+            &[d, key],
+        );
+        let chunk = crate::api_common::chunk_pos(&mut rt, -3, 7);
+        c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.writeChunkPos.(Lnet/minecraft/world/level/ChunkPos;)Lnet/minecraft/network/FriendlyByteBuf;",
+            &[d, chunk],
+        );
+        assert_eq!(
+            bytes(&rt, d).len(),
+            1 + 16 + 1 + 2 + 5 + 1 + "minecraft:the_nether".len() + 8
+        );
+        let back = c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.readLongArray.()[J",
+            &[d],
+        );
+        assert_eq!(crate::jutil::elements(&rt, back), [V::J(-1), V::J(1 << 40)]);
+        let back = c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.readVarIntArray.()[I",
+            &[d],
+        );
+        assert_eq!(crate::jutil::elements(&rt, back), [V::I(300), V::I(-1)]);
+        let registry = rt.string("dimension");
+        let back = c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.readResourceKey.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/resources/ResourceKey;",
+            &[d, registry],
+        );
+        assert_eq!(rt.str_of(back), Some("dimension#minecraft:the_nether"));
+        let back = c(
+            &mut rt,
+            "net/minecraft/network/FriendlyByteBuf.readChunkPos.()Lnet/minecraft/world/level/ChunkPos;",
+            &[d],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "net/minecraft/world/level/ChunkPos.toLong.()J",
+                &[back]
+            ),
+            c(
+                &mut rt,
+                "net/minecraft/world/level/ChunkPos.toLong.()J",
+                &[chunk]
+            )
+        );
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
     }
 
     /// Create's packets write lengths with `VarInt.write(buf, n)` itself, not through a codec.

@@ -76,6 +76,23 @@ pub struct Added {
     pub targets: &'static [&'static str],
 }
 
+impl Added {
+    /// Whether the mixin adds the method to its targets, where a call written on a target
+    /// itself is the method's whatever the receiver (its key on each target is among
+    /// `owners`): not a method of the target's own that the mixin overwrites, which a class
+    /// below the target may have its own of.
+    fn adds(&self) -> bool {
+        !self.targets.is_empty()
+            && self.targets.iter().all(|t| {
+                self.owners.iter().any(|o| {
+                    o.strip_prefix(t)
+                        .and_then(|rest| rest.strip_prefix('.'))
+                        .is_some_and(|rest| rest == self.key)
+                })
+            })
+    }
+}
+
 /// What one part of the translated code registers.
 pub struct Registry {
     pub classes: &'static [ClassDef],
@@ -99,7 +116,9 @@ pub struct Linked {
     /// Each class's mixins' methods, in their order. By class id.
     mixed: Vec<Box<[(u64, Method)]>>,
     lambdas: Vec<Option<LambdaFn>>,
-    added: HashMap<u64, Vec<&'static Added>>,
+    /// The methods mixins add to the game's classes, by key hash; with each, whether it is
+    /// one its mixin adds to its targets ([`Added::adds`]), not one it overwrites there.
+    added: HashMap<u64, Vec<(&'static Added, bool)>>,
     /// `META-INF/services`: an interface's implementations.
     services: HashMap<&'static str, &'static [&'static str]>,
     registries: Vec<&'static Registry>,
@@ -158,7 +177,10 @@ impl Linked {
                 l.lambdas[i] = Some(f);
             }
             for a in r.added {
-                l.added.entry(key_hash(a.key)).or_default().push(a);
+                l.added
+                    .entry(key_hash(a.key))
+                    .or_default()
+                    .push((a, a.adds()));
             }
         }
         l.registries = registries;
@@ -429,15 +451,28 @@ fn dispatch_unobserved(
         && *r != 0
         && let Some(list) = l.added.get(&kh)
     {
-        for a in list.iter().filter(|a| a.key == key) {
-            if a.owners.contains(&owner_key) {
+        // The method of the mixin whose target the receiver is: a duck interface that
+        // mixins into several of the game's classes implement is each one's own there
+        // (Architectury's `arch$holder()` of an item, of a block, of an entity type). The
+        // call may name the mixin or an interface it adds, the target, or a class below the
+        // target, which has what a mixin adds to the class above it (`ServerPlayer` what
+        // one adds to `Player`). Failing a target, the first whose owner the call names, as
+        // the call's own key says whose it is.
+        let mut named = None;
+        for &(a, adds) in list.iter().filter(|(a, _)| a.key == key) {
+            let names = a.owners.contains(&owner_key);
+            if !(names || adds || a.checked.contains(&owner_key)) {
+                continue;
+            }
+            if a.targets.iter().any(|t| rt.instance_of(args[0], t)) {
                 return (a.run)(rt, args);
             }
-            if a.checked.contains(&owner_key)
-                && a.targets.iter().any(|t| rt.instance_of(args[0], t))
-            {
-                return (a.run)(rt, args);
+            if names && named.is_none() {
+                named = Some(a);
             }
+        }
+        if let Some(a) = named {
+            return (a.run)(rt, args);
         }
     }
     miss(rt, cid, owner_key, key, args)
@@ -893,6 +928,9 @@ mod tests {
     fn mixin_name(_: &mut Rt, _: &[V]) -> V {
         V::I(7)
     }
+    fn stack_name(_: &mut Rt, _: &[V]) -> V {
+        V::I(8)
+    }
     fn to_string(rt: &mut Rt, _: &[V]) -> V {
         rt.string("machine")
     }
@@ -985,16 +1023,34 @@ mod tests {
         },
     ];
 
-    static ADDED: [Added; 1] = [Added {
-        key: NAME,
-        run: mixin_name,
-        owners: &[
-            "m/EntityMixin.name.()I",
-            "net/minecraft/world/entity/Entity.name.()I",
-        ],
-        checked: &["net/minecraft/world/Nameable.name.()I"],
-        targets: &[ENTITY],
-    }];
+    const STACK: &str = "net/minecraft/world/item/ItemStack";
+
+    // Two mixins give two of the game's classes the same method, each through the duck
+    // interface `m/Named` too.
+    static ADDED: [Added; 2] = [
+        Added {
+            key: NAME,
+            run: mixin_name,
+            owners: &[
+                "m/EntityMixin.name.()I",
+                "m/Named.name.()I",
+                "net/minecraft/world/entity/Entity.name.()I",
+            ],
+            checked: &["net/minecraft/world/Nameable.name.()I"],
+            targets: &[ENTITY],
+        },
+        Added {
+            key: NAME,
+            run: stack_name,
+            owners: &[
+                "m/StackMixin.name.()I",
+                "m/Named.name.()I",
+                "net/minecraft/world/item/ItemStack.name.()I",
+            ],
+            checked: &[],
+            targets: &[STACK],
+        },
+    ];
 
     static REGISTRY: Registry = Registry {
         classes: &CLASSES,
@@ -1077,51 +1133,36 @@ mod tests {
         assert_eq!(vcall(&mut rt, owner, "tick.()V", &[child]).i(), 2);
     }
 
-    /// A method a mixin adds to a game class answers a call whose owner key is its own (the mixin's,
-    /// its target's), on any object; a call through an interface it adds only on an object of its
-    /// target. A lambda never takes it.
+    /// A method a mixin adds to a game class answers a call on an object of its target: one
+    /// that names the mixin, the target, an interface it adds, or a class below the target
+    /// (which has what the class above it was given). Two mixins that give two classes the
+    /// same method each answer for their own. On an object of neither, the call's own key
+    /// says whose it is; a call through an interface of the game's is the method's only on
+    /// an object of its target. A lambda never takes it.
     #[test]
-    fn a_method_a_mixin_adds_to_the_game_answers_by_the_calls_owner() {
+    fn a_method_a_mixin_adds_to_the_game_answers_by_the_receiver() {
         let mut rt = runtime();
         let entity = rt.new_object(ENTITY);
-        let stack = rt.new_object("net/minecraft/world/item/ItemStack");
-        assert_eq!(
-            call(
-                &mut rt,
-                entity,
-                "net/minecraft/world/entity/Entity.name.()I",
-                NAME
-            ),
-            7
-        );
-        assert_eq!(call(&mut rt, stack, "m/EntityMixin.name.()I", NAME), 7);
-        assert_eq!(
-            call(
-                &mut rt,
-                entity,
-                "net/minecraft/world/Nameable.name.()I",
-                NAME
-            ),
-            7
-        );
-        assert_eq!(
-            call(
-                &mut rt,
-                stack,
-                "net/minecraft/world/Nameable.name.()I",
-                NAME
-            ),
-            -1
-        );
-        assert_eq!(
-            call(
-                &mut rt,
-                entity,
-                "net/minecraft/world/entity/Mob.name.()I",
-                NAME
-            ),
-            -1
-        );
+        let stack = rt.new_object(STACK);
+        let other = rt.new_object("net/minecraft/core/BlockPos");
+        for (receiver, owner, want) in [
+            (entity, "net/minecraft/world/entity/Entity.name.()I", 7),
+            (entity, "net/minecraft/world/Nameable.name.()I", 7),
+            // Written on a class below the target (`ServerPlayer` of a mixin into `Player`).
+            (entity, "net/minecraft/world/entity/Mob.name.()I", 7),
+            // The duck interface both mixins implement: each object's own.
+            (entity, "m/Named.name.()I", 7),
+            (stack, "m/Named.name.()I", 8),
+            (stack, "net/minecraft/world/item/ItemStack.name.()I", 8),
+            (stack, "net/minecraft/world/Nameable.name.()I", 8),
+            // An object of neither target: by the key alone, where it names a mixin.
+            (other, "m/EntityMixin.name.()I", 7),
+            (other, "m/StackMixin.name.()I", 8),
+            (other, "net/minecraft/world/Nameable.name.()I", -1),
+            (other, "net/minecraft/core/BlockPos.name.()I", -1),
+        ] {
+            assert_eq!(call(&mut rt, receiver, owner, NAME), want, "{owner}");
+        }
         assert!(rt.instance_of(entity, "m/EntityAccess"));
     }
 

@@ -686,6 +686,27 @@ fn declares(class: &str, hash: u32) -> Option<bool> {
     )
 }
 
+/// Whether the game's or the loader's class `class`, or a class above it, declares the method
+/// `rest` (`name.descriptor`) itself, by their class files ([`crate::game_classes`]). What a
+/// class has of its own no interface's default method replaces: the translator asks before it
+/// gives a class of the game's the default methods of an interface a mixin adds to it. False
+/// for a class that is not one of theirs.
+pub fn game_class_declares(class: &str, rest: &str) -> bool {
+    let hash = method_hash(rest);
+    let mut c = class;
+    loop {
+        match declares(c, hash) {
+            Some(true) => return true,
+            Some(false) => {}
+            None => return false,
+        }
+        match game_parents(c) {
+            Some((above, _)) if !above.is_empty() => c = above,
+            _ => return false,
+        }
+    }
+}
+
 /// The class whose method a call of the method of hash `hash` through the game's class `class`
 /// runs, as the JVM resolves it, where that is not `class` itself: the nearest class above it
 /// that declares the method, its superclasses before the interfaces. None where `class`
@@ -3083,11 +3104,42 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 let all = crate::jutil::elements(rt, made);
                 crate::jutil::new_list(rt, all)
             }
-            "isDedicatedServer" | "isPublished" | "isHardcore" => V::I(0),
+            "isDedicatedServer" | "isPublished" | "isHardcore" | "isStopped" => V::I(0),
             // The window's own server, as a world opened from the menu has it.
-            "isSingleplayer" => V::I(1),
+            "isSingleplayer" | "isSingleplayerOwner" | "isRunning" => V::I(1),
             "isSameThread" => V::I(1),
+            // The thread the server's hooks run on is the one asking (Immersive Portals checks
+            // `Thread.currentThread() == server.getRunningThread()` at every packet).
+            "getRunningThread" => call(
+                rt,
+                "java/lang/Thread.currentThread.()Ljava/lang/Thread;",
+                &[],
+            ),
             "getPlayerList" => crate::events::player_list(rt),
+            "tickRateManager" => rt.intern("compat:tick-rate".into(), |rt| {
+                rt.new_object("net/minecraft/server/ServerTickRateManager")
+            }),
+            // The times of the last hundred ticks (the server's, or NeoForge's for one level):
+            // none is measured for the mods.
+            "getTickTimesNanos" | "getTickTime" => rt.alloc("[J", Data::Array(vec![V::J(0); 100])),
+            "getAverageTickTimeNanos" => V::J(0),
+            "getCurrentSmoothedTickTime" => V::F(0.0),
+            // The keys of the levels it has (`getAllLevels`).
+            "levelKeys" => {
+                let levels = call(
+                    rt,
+                    "net/minecraft/server/MinecraftServer.getAllLevels.()Ljava/lang/Iterable;",
+                    &[a(0)],
+                );
+                let mut keys = Vec::new();
+                for level in crate::jutil::elements(rt, levels) {
+                    keys.push(call(rt, "net/minecraft/world/level/Level.dimension.()Lnet/minecraft/resources/ResourceKey;", &[level]));
+                }
+                crate::jutil::new_set_of(rt, &keys)
+            }
+            "getProfiler" => {
+                get_static(rt, "net/minecraft/util/profiling/InactiveProfiler.INSTANCE")
+            }
             _ => return None,
         },
 

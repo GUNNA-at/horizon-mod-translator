@@ -253,4 +253,11 @@ public class Probe {
     public static int vecZero() {
         return ((Measured) (Object) net.minecraft.world.phys.Vec3.ZERO).weave$sum();
     }
+
+    // The default methods of the interface `Vec3Mixin` adds, on the game's `Vec3`: the
+    // interface's own, and one the game's class has for itself.
+    public static int vecDefaults(int n) {
+        Measured v = (Measured) (Object) new net.minecraft.world.phys.Vec3(n, 4, 0);
+        return v.weave$twice() * 100 + (int) v.length();
+    }
 }

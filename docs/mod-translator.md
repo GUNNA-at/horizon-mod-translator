@@ -10750,6 +10750,40 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     ticks the server once in 270 ms, and something in each tick makes 516,000 objects.
   - 71 parts of three cases compared with the JVM in the fixture (`atomics`,
     `reflectionMore`), with the two of Part 182.
+- [x] 2026-11-10 Part 184: launch 19 shows the whole pack's world; what a mixin adds reaches the
+  classes below its target.
+  - Launch 19 (Parts 179 to 181: 2,249 s, 570 crates, 2,001,250,880 bytes) is the first that
+    comes through loading with all 365 mods: ready after 334 s, with the game at 6 to 9 GB.
+    26 exceptions went uncaught in it, where launch 18 had 967 and launch 17 1,306, and 2
+    of the mods' constructors failed (a second Fabric renderer, and Lucene's index for
+    GuideME). `/give` hands out Create's shafts and `/setblock` sets a shaft and a creative
+    motor. 355 collections ran inside hooks, 38 ms at the median. Thirteen of them took 3 to
+    5 s each, 52 s in all: my own tests were running beside the game, the machine was
+    compressing memory, and each look through the whole heap paged it back in. The server
+    ticks once in 270 ms there (200 ticks in 54 s), which is the next thing to find.
+  - A method a mixin adds to a class of the game's was found by the name the call was
+    written on: the mixin, an interface it adds, its target. flightlib's mixin is `Player`'s
+    and its code asks a `ServerPlayer` (`ServerPlayer.flightlib$get()`): unanswered, and
+    Kotlin's null check ended its login listener. A call written on a class below the
+    target has what the class above was given now, as long as the mixin adds the method
+    and does not overwrite one of the target's own, which a class below may have for
+    itself. Two mixins that give two classes the same method through one duck interface
+    each answer for the objects of their own target: the first listed answered for both.
+  - The default methods of an interface a mixin adds to a class of the game's are that
+    class's too, as any class has its interfaces' (Architectury's `arch$registryName()` of
+    an item, a block or an entity type, whose `arch$holder()` each sub-interface gives its
+    own). Not one the mixin has for itself, nor one the target's own classes declare by the
+    game's class files, since a class's method comes before an interface's default.
+  - Buffers: the rest of what the pack's own packet code calls. Bytes to and from another
+    buffer and an array by index, `readSlice`, `copy`, `slice` and `duplicate` as buffers
+    of their own (they were the buffer itself, so reading a copy moved the original),
+    `skipBytes`, the marked indexes, `writeById`, resource keys, long and int arrays, chunk
+    and global positions, a block hit, and a value through a codec as a tag or as JSON.
+    Create Railways Navigator's settings packet is built with `writeBytes(buffer, from,
+    length)` and read back with `readRetainedSlice`: it failed on its first read.
+  - The server answers more of itself: the thread it runs on (Immersive Portals logged an
+    error at every packet for not being on it), that it runs, its tick rate manager, the
+    keys of its levels.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
