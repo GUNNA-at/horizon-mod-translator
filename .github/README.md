@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**91.1%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **95.6%** of their call sites. Java's libraries: **96.0%** of the calls. Create alone: **98.0%** of its call sites. Run 54, 10 November 2026.
+**92.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **96.1%** of their call sites. Java's libraries: **96.9%** of the calls. Create alone: **98.2%** of its call sites. Run 55, 11 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -39,13 +39,13 @@ game's own code: a method the runtime doesn't have counts when the game's own me
 player's NeoForge install, can answer it.</sub>
 
 <!-- progress:table -->
-| Run 54, 367 jars | Methods answered | Call sites answered |
+| Run 55, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **91.1%**<br><sub>120,505 of 132,302</sub> | **95.6%**<br><sub>360,241 of 376,860</sub> |
-| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.0%**<br><sub>7,959 of 132,302</sub> | **2.9%**<br><sub>11,105 of 376,860</sub> |
-| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **88.1%**<br><sub>67,575 of 76,713</sub> | **96.0%**<br><sub>358,525 of 373,410</sub> |
-| Create 6.0.10, its API calls | **89.8%**<br><sub>3,571 of 3,976</sub> | **98.0%**<br><sub>24,732 of 25,245</sub> |
-| Create 6.0.10, its library calls | **84.4%**<br><sub>1,352 of 1,602</sub> | **97.7%**<br><sub>14,081 of 14,416</sub> |
+| Minecraft and NeoForge API | **92.0%**<br><sub>121,668 of 132,304</sub> | **96.1%**<br><sub>362,284 of 376,864</sub> |
+| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **5.7%**<br><sub>7,597 of 132,304</sub> | **2.8%**<br><sub>10,639 of 376,864</sub> |
+| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **90.0%**<br><sub>69,022 of 76,713</sub> | **96.9%**<br><sub>361,768 of 373,410</sub> |
+| Create 6.0.10, its API calls | **90.7%**<br><sub>3,608 of 3,976</sub> | **98.2%**<br><sub>24,783 of 25,245</sub> |
+| Create 6.0.10, its library calls | **86.0%**<br><sub>1,377 of 1,602</sub> | **97.9%**<br><sub>14,111 of 14,416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -63,6 +63,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 55 | 2026-11-11 | 92.0% | 96.1% | 98.2% |
 | 54 | 2026-11-10 | 91.1% | 95.6% | 98.0% |
 | 53 | 2026-11-10 | 91.0% | 95.6% | 98.0% |
 | 51 | 2026-11-09 | 91.1% | 95.6% | 98.0% |
@@ -285,14 +286,14 @@ The API methods the most jars still miss, from the latest run:
 <!-- progress:gaps -->
 | Missing API method | Jars | Call sites |
 |---|---:|---:|
-| `Minecraft.getTextureManager()` | 47 | 107 |
 | `RenderSystem.getModelViewStack()` | 25 | 41 |
-| `TextureManager.register(ResourceLocation, AbstractTexture)` | 24 | 40 |
 | `ChunkMap.getPlayers(ChunkPos, boolean)` | 23 | 33 |
 | `Level.broadcastEntityEvent(Entity, byte)` | 22 | 78 |
-| `new DynamicTexture(NativeImage)` | 22 | 39 |
 | `BlockEntityRenderDispatcher.getRenderer(BlockEntity)` | 21 | 33 |
 | `PlayerEvent.PlayerChangedDimensionEvent.getEntity()` | 21 | 22 |
+| `MinecraftServer.reloadableRegistries()` | 20 | 43 |
+| `SpriteContents.height()` | 20 | 30 |
+| `BakedModel.getOverrides()` | 19 | 30 |
 <!-- /progress -->
 
 <details>
@@ -305,10 +306,10 @@ The API methods the most jars still miss, from the latest run:
 | `Field.getType()` | 44 | 99 |
 | `Matrix4fStack.popMatrix()` | 24 | 37 |
 | `Matrix4fStack.pushMatrix()` | 24 | 37 |
-| `ByteBuffer.allocate(int)` | 19 | 66 |
 | `new Vector2f(float, float)` | 19 | 44 |
 | `Field.getGenericType()` | 18 | 29 |
 | `Vector2f.set(float, float)` | 18 | 22 |
+| `ParameterizedType.getActualTypeArguments()` | 17 | 28 |
 <!-- /progress -->
 
 </details>

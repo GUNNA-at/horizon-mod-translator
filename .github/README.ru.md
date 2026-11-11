@@ -14,7 +14,7 @@ Java Edition. JVM не запускается ни на одном шаге. Б�
 для любого мода, а не для списка поддерживаемых. Create и аддоны к нему служат проверкой.
 
 <!-- progress:headline -->
-Rust отвечает на **91,1 %** методов Minecraft и NeoForge, которые вызывают 367 джаров пака, это **95,6 %** мест вызова. Библиотеки Java: **96,0 %** вызовов. Create: **98,0 %** его вызовов. Прогон 54, 10 ноября 2026.
+Rust отвечает на **92,0 %** методов Minecraft и NeoForge, которые вызывают 367 джаров пака, это **96,1 %** мест вызова. Библиотеки Java: **96,9 %** вызовов. Create: **98,2 %** его вызовов. Прогон 55, 11 ноября 2026.
 <!-- /progress -->
 
 | Если вам это показали | Если вы работаете над Horizon |
@@ -40,13 +40,13 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 у игрока.</sub>
 
 <!-- progress:table -->
-| Прогон 54, 367 джаров | Отвечено методов | Отвечено вызовов |
+| Прогон 55, 367 джаров | Отвечено методов | Отвечено вызовов |
 |---|---:|---:|
-| API Minecraft и NeoForge | **91,1 %**<br><sub>120 505 из 132 302</sub> | **95,6 %**<br><sub>360 241 из 376 860</sub> |
-| …из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub> | **6,0 %**<br><sub>7 959 из 132 302</sub> | **2,9 %**<br><sub>11 105 из 376 860</sub> |
-| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **88,1 %**<br><sub>67 575 из 76 713</sub> | **96,0 %**<br><sub>358 525 из 373 410</sub> |
-| Create 6.0.10, вызовы API | **89,8 %**<br><sub>3 571 из 3 976</sub> | **98,0 %**<br><sub>24 732 из 25 245</sub> |
-| Create 6.0.10, вызовы библиотек | **84,4 %**<br><sub>1 352 из 1 602</sub> | **97,7 %**<br><sub>14 081 из 14 416</sub> |
+| API Minecraft и NeoForge | **92,0 %**<br><sub>121 668 из 132 304</sub> | **96,1 %**<br><sub>362 284 из 376 864</sub> |
+| …из них собственным кодом игры<br><sub>переведён из установки NeoForge у игрока</sub> | **5,7 %**<br><sub>7 597 из 132 304</sub> | **2,8 %**<br><sub>10 639 из 376 864</sub> |
+| Библиотеки Java<br><sub>JDK, Guava, Gson, fastutil, JOML и другие</sub> | **90,0 %**<br><sub>69 022 из 76 713</sub> | **96,9 %**<br><sub>361 768 из 373 410</sub> |
+| Create 6.0.10, вызовы API | **90,7 %**<br><sub>3 608 из 3 976</sub> | **98,2 %**<br><sub>24 783 из 25 245</sub> |
+| Create 6.0.10, вызовы библиотек | **86,0 %**<br><sub>1 377 из 1 602</sub> | **97,9 %**<br><sub>14 111 из 14 416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -64,6 +64,7 @@ Selection 2, Create Aeronautics и аддоны к ним). Для каждог�
 <!-- progress:history -->
 | Прогон | Дата | Методы API | Вызовы | Create, вызовы |
 |---:|---|---:|---:|---:|
+| 55 | 2026-11-11 | 92,0 % | 96,1 % | 98,2 % |
 | 54 | 2026-11-10 | 91,1 % | 95,6 % | 98,0 % |
 | 53 | 2026-11-10 | 91,0 % | 95,6 % | 98,0 % |
 | 51 | 2026-11-09 | 91,1 % | 95,6 % | 98,0 % |
@@ -284,14 +285,14 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 <!-- progress:gaps -->
 | Метод API, которого нет | Джаров | Вызовов |
 |---|---:|---:|
-| `Minecraft.getTextureManager()` | 47 | 107 |
 | `RenderSystem.getModelViewStack()` | 25 | 41 |
-| `TextureManager.register(ResourceLocation, AbstractTexture)` | 24 | 40 |
 | `ChunkMap.getPlayers(ChunkPos, boolean)` | 23 | 33 |
 | `Level.broadcastEntityEvent(Entity, byte)` | 22 | 78 |
-| `new DynamicTexture(NativeImage)` | 22 | 39 |
 | `BlockEntityRenderDispatcher.getRenderer(BlockEntity)` | 21 | 33 |
 | `PlayerEvent.PlayerChangedDimensionEvent.getEntity()` | 21 | 22 |
+| `MinecraftServer.reloadableRegistries()` | 20 | 43 |
+| `SpriteContents.height()` | 20 | 30 |
+| `BakedModel.getOverrides()` | 19 | 30 |
 <!-- /progress -->
 
 <details>
@@ -304,10 +305,10 @@ horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative 
 | `Field.getType()` | 44 | 99 |
 | `Matrix4fStack.popMatrix()` | 24 | 37 |
 | `Matrix4fStack.pushMatrix()` | 24 | 37 |
-| `ByteBuffer.allocate(int)` | 19 | 66 |
 | `new Vector2f(float, float)` | 19 | 44 |
 | `Field.getGenericType()` | 18 | 29 |
 | `Vector2f.set(float, float)` | 18 | 22 |
+| `ParameterizedType.getActualTypeArguments()` | 17 | 28 |
 <!-- /progress -->
 
 </details>
