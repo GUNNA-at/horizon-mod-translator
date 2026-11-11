@@ -1645,7 +1645,7 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 621] = [
     ("net/neoforged/neoforge/server/permission/nodes/PermissionType", "i(Ljava/lang/Class;Ljava/lang/String;)V=typeToken,typeName|gtypeToken()Ljava/lang/Class;=typeToken|gtypeName()Ljava/lang/String;=typeName|e=typeToken,typeName"),
 ];
 
-pub(crate) const ENUMS: [&str; 488] = [
+pub(crate) const ENUMS: [&str; 485] = [
     "com/mojang/blaze3d/audio/Library$Pool",
     "com/mojang/blaze3d/pipeline/MainTarget$AttachmentState",
     "com/mojang/blaze3d/platform/GlStateManager$DestFactor",
@@ -1663,8 +1663,6 @@ pub(crate) const ENUMS: [&str; 488] = [
     "com/mojang/blaze3d/vertex/VertexFormat$Mode",
     "com/mojang/blaze3d/vertex/VertexFormatElement$Type",
     "com/mojang/blaze3d/vertex/VertexFormatElement$Usage",
-    "com/mojang/math/OctahedralGroup",
-    "com/mojang/math/SymmetricGroup3",
     "com/mojang/realmsclient/RealmsAvailability$Type",
     "com/mojang/realmsclient/RealmsMainScreen$LayoutState",
     "com/mojang/realmsclient/Unit",
@@ -1752,7 +1750,6 @@ pub(crate) const ENUMS: [&str; 488] = [
     "net/minecraft/client/resources/PlayerSkin$Model",
     "net/minecraft/client/resources/metadata/animation/VillagerMetaDataSection$Hat",
     "net/minecraft/client/resources/metadata/gui/GuiSpriteScaling$Type",
-    "net/minecraft/client/resources/model/BlockModelRotation",
     "net/minecraft/client/resources/server/PackLoadFeedback$FinalResult",
     "net/minecraft/client/resources/server/PackLoadFeedback$Update",
     "net/minecraft/client/resources/server/ServerPackManager$ActivationStatus",
@@ -2180,7 +2177,7 @@ pub(crate) const FACTORIES: [(&str, &str); 38] = [
 ];
 
 /// The constants of the enums the runtime doesn't model by hand, in ordinal order.
-pub(crate) const ENUM_CONSTANTS: [(&str, &str); 362] = [
+pub(crate) const ENUM_CONSTANTS: [(&str, &str); 359] = [
     ("com/mojang/blaze3d/audio/Library$Pool", "STATIC,STREAMING"),
     ("com/mojang/blaze3d/pipeline/MainTarget$AttachmentState", "NONE,COLOR,DEPTH,COLOR_DEPTH"),
     ("com/mojang/blaze3d/platform/GlStateManager$LogicOp", "AND,AND_INVERTED,AND_REVERSE,CLEAR,COPY,COPY_INVERTED,EQUIV,INVERT,NAND,NOOP,NOR,OR,OR_INVERTED,OR_REVERSE,SET,XOR"),
@@ -2194,8 +2191,6 @@ pub(crate) const ENUM_CONSTANTS: [(&str, &str); 362] = [
     ("com/mojang/blaze3d/vertex/VertexFormat$IndexType", "SHORT,INT"),
     ("com/mojang/blaze3d/vertex/VertexFormatElement$Type", "FLOAT,UBYTE,BYTE,USHORT,SHORT,UINT,INT"),
     ("com/mojang/blaze3d/vertex/VertexFormatElement$Usage", "POSITION,NORMAL,COLOR,UV,GENERIC"),
-    ("com/mojang/math/OctahedralGroup", "IDENTITY,ROT_180_FACE_XY,ROT_180_FACE_XZ,ROT_180_FACE_YZ,ROT_120_NNN,ROT_120_NNP,ROT_120_NPN,ROT_120_NPP,ROT_120_PNN,ROT_120_PNP,ROT_120_PPN,ROT_120_PPP,ROT_180_EDGE_XY_NEG,ROT_180_EDGE_XY_POS,ROT_180_EDGE_XZ_NEG,ROT_180_EDGE_XZ_POS,ROT_180_EDGE_YZ_NEG,ROT_180_EDGE_YZ_POS,ROT_90_X_NEG,ROT_90_X_POS,ROT_90_Y_NEG,ROT_90_Y_POS,ROT_90_Z_NEG,ROT_90_Z_POS,INVERSION,INVERT_X,INVERT_Y,INVERT_Z,ROT_60_REF_NNN,ROT_60_REF_NNP,ROT_60_REF_NPN,ROT_60_REF_NPP,ROT_60_REF_PNN,ROT_60_REF_PNP,ROT_60_REF_PPN,ROT_60_REF_PPP,SWAP_XY,SWAP_YZ,SWAP_XZ,SWAP_NEG_XY,SWAP_NEG_YZ,SWAP_NEG_XZ,ROT_90_REF_X_NEG,ROT_90_REF_X_POS,ROT_90_REF_Y_NEG,ROT_90_REF_Y_POS,ROT_90_REF_Z_NEG,ROT_90_REF_Z_POS"),
-    ("com/mojang/math/SymmetricGroup3", "P123,P213,P132,P231,P312,P321"),
     ("com/mojang/realmsclient/RealmsAvailability$Type", "SUCCESS,INCOMPATIBLE_CLIENT,NEEDS_PARENTAL_CONSENT,AUTHENTICATION_ERROR,UNEXPECTED_ERROR"),
     ("com/mojang/realmsclient/RealmsMainScreen$LayoutState", "LOADING,NO_REALMS,LIST"),
     ("com/mojang/realmsclient/Unit", "B,KB,MB,GB"),
@@ -2274,7 +2269,6 @@ pub(crate) const ENUM_CONSTANTS: [(&str, &str); 362] = [
     ("net/minecraft/client/resources/PlayerSkin$Model", "SLIM,WIDE"),
     ("net/minecraft/client/resources/metadata/animation/VillagerMetaDataSection$Hat", "NONE,PARTIAL,FULL"),
     ("net/minecraft/client/resources/metadata/gui/GuiSpriteScaling$Type", "STRETCH,TILE,NINE_SLICE"),
-    ("net/minecraft/client/resources/model/BlockModelRotation", "X0_Y0,X0_Y90,X0_Y180,X0_Y270,X90_Y0,X90_Y90,X90_Y180,X90_Y270,X180_Y0,X180_Y90,X180_Y180,X180_Y270,X270_Y0,X270_Y90,X270_Y180,X270_Y270"),
     ("net/minecraft/client/resources/server/PackLoadFeedback$FinalResult", "DECLINED,APPLIED,DISCARDED,DOWNLOAD_FAILED,ACTIVATION_FAILED"),
     ("net/minecraft/client/resources/server/PackLoadFeedback$Update", "ACCEPTED,DOWNLOADED"),
     ("net/minecraft/client/resources/server/ServerPackManager$ActivationStatus", "INACTIVE,PENDING,ACTIVE"),

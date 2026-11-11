@@ -26,6 +26,17 @@ import sys
 import zipfile
 
 
+# Enums that are more than their constants' names: each constant holds what its constructor computed
+# and the class's initialiser builds tables of them (a symmetry group's products and inverses, a model
+# rotation's matrix). No row here can stand for them: left out, their own code is translated with the
+# mods that use them, as any class of the game's the runtime doesn't model.
+CARRIED_ENUMS = (
+    "com/mojang/math/OctahedralGroup",
+    "com/mojang/math/SymmetricGroup3",
+    "net/minecraft/client/resources/model/BlockModelRotation",
+)
+
+
 def parse(data):
     if data[:4] != b"\xca\xfe\xba\xbe":
         return None
@@ -407,6 +418,8 @@ def main():
             if c is None:
                 continue
             if c["access"] & ACC_ENUM:
+                if c["name"] in CARRIED_ENUMS:
+                    continue
                 enums.append(c["name"])
                 # Its constants: the fields flagged as enum constants, in declaration (ordinal) order.
                 constants[c["name"]] = [n for acc, n, _, _ in c["fields"] if acc & ACC_ENUM]

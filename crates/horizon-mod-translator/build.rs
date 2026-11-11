@@ -26,6 +26,12 @@ fn named_classes() {
     /// name there is no model of the class (read for names, it made each of them the
     /// runtime's, and none of the game's own code was carried).
     const EVERY_CLASS: &str = "game_classes.rs";
+    /// The runtime's generated table of vanilla's records, data classes and enums: a row is
+    /// about the class it starts with, a whole text there. The types of a record's
+    /// components, of a constructor's arguments and of what a getter gives stand inside the
+    /// row's other text and say nothing of who models them (`com/mojang/math/Transformation`
+    /// was the runtime's for being a model state's component, with nothing to answer for it).
+    const ROWS: &str = "vanilla_records.rs";
     let Ok(here) = std::env::var("CARGO_MANIFEST_DIR") else {
         return;
     };
@@ -40,7 +46,12 @@ fn named_classes() {
                 if p.is_dir() {
                     todo.push(p);
                 } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with(EVERY_CLASS) {
-                    names_in(&std::fs::read_to_string(&p).unwrap_or_default(), &mut names);
+                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                    if p.ends_with(ROWS) {
+                        rows_in(&text, &mut names);
+                    } else {
+                        names_in(&text, &mut names);
+                    }
                 }
             }
         }
@@ -80,6 +91,23 @@ fn names_in(text: &str, names: &mut std::collections::BTreeSet<String>) {
                 names.insert(name.to_owned());
             }
             from = start + len.max(1);
+        }
+    }
+}
+
+/// Each class name that is a whole text in `text` (`"net/minecraft/core/GlobalPos"`): what a
+/// table's rows are about, the names inside their other texts left out.
+fn rows_in(text: &str, names: &mut std::collections::BTreeSet<String>) {
+    for root in ["\"net/minecraft/", "\"net/neoforged/", "\"com/mojang/"] {
+        for (at, _) in text.match_indices(root) {
+            let start = at + 1;
+            let len = text[start..]
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'_' | b'$'))
+                .count();
+            if text[start + len..].starts_with('"') {
+                names.insert(text[start..start + len].to_owned());
+            }
         }
     }
 }
