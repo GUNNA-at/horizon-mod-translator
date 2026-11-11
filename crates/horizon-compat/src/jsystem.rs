@@ -214,15 +214,14 @@ fn locks(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option
                 _ => waited,
             }
         }
-        "lock"
-        | "unlock"
-        | "lockInterruptibly"
-        | "acquire"
-        | "acquireUninterruptibly"
-        | "release"
-        | "signal"
-        | "signalAll"
-        | "unpark" => V::Void,
+        // A permit may be the pools' work's to release: that runs first, as beside a wait.
+        "acquire" | "acquireUninterruptibly" => {
+            crate::tasks::run_pending(rt);
+            V::Void
+        }
+        "lock" | "unlock" | "lockInterruptibly" | "release" | "signal" | "signalAll" | "unpark" => {
+            V::Void
+        }
         "tryLock" | "tryAcquire" | "isHeldByCurrentThread" | "isWriteLockedByCurrentThread" => {
             V::I(1)
         }
@@ -240,12 +239,15 @@ pub(crate) fn in_started_thread() -> bool {
 }
 
 /// A wait (`Thread.sleep`, a lock's) where it is asked. On the game's own thread it is over at
-/// once. In the body of a thread a mod started, which runs on the game's thread too
-/// ([`thread`]), it can't be waited out: the thread is interrupted, as a mod stops one of its
-/// own, and its loop ends the way the mod wrote it to.
+/// once, the work the pools hold run meanwhile as their threads would run it beside the one
+/// waiting ([`crate::tasks`]): what the code waits for may be that work's doing. In the body of
+/// a thread a mod started, which runs on the game's thread too ([`thread`]), it can't be waited
+/// out: the thread is interrupted, as a mod stops one of its own, and its loop ends the way the
+/// mod wrote it to.
 pub(crate) fn wait(rt: &mut Rt) -> V {
     let (depth, waits) = STARTED.with(|s| s.get());
     if depth == 0 {
+        crate::tasks::run_pending(rt);
         return V::Void;
     }
     STARTED.with(|s| s.set((depth, waits + 1)));
@@ -408,7 +410,14 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         "getStackTrace" => crate::jlang::thread_frames(rt),
         "getThreadGroup" => rt.intern("compat:thread-group".into(), |rt| rt.new_object("java/lang/ThreadGroup")),
         "getContextClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
-        "join" | "interrupt" | "yield" | "onSpinWait" | "setPriority" | "setUncaughtExceptionHandler" | "setDefaultUncaughtExceptionHandler" | "setContextClassLoader" | "checkAccess" => {
+        // Giving the other threads a turn: the pools' work has it ([`crate::tasks`]).
+        "yield" | "onSpinWait" => {
+            if !in_started_thread() {
+                crate::tasks::run_pending(rt);
+            }
+            V::Void
+        }
+        "join" | "interrupt" | "setPriority" | "setUncaughtExceptionHandler" | "setDefaultUncaughtExceptionHandler" | "setContextClassLoader" | "checkAccess" => {
             V::Void
         }
         _ => return None,

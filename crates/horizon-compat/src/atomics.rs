@@ -241,6 +241,8 @@ fn operate(rt: &mut Rt, cell: &Cell, zero: V, name: &str, x: &[V]) -> Option<V> 
                 (V::I(_), true) => "java/util/function/IntBinaryOperator.applyAsInt.(II)I",
                 (V::J(_), false) => "java/util/function/LongUnaryOperator.applyAsLong.(J)J",
                 (V::J(_), true) => "java/util/function/LongBinaryOperator.applyAsLong.(JJ)J",
+                (V::D(_), false) => "java/util/function/DoubleUnaryOperator.applyAsDouble.(D)D",
+                (V::D(_), true) => "java/util/function/DoubleBinaryOperator.applyAsDouble.(DD)D",
                 (_, false) => {
                     "java/util/function/Function.apply.(Ljava/lang/Object;)Ljava/lang/Object;"
                 }
@@ -320,6 +322,32 @@ pub(crate) fn call(rt: &mut Rt, class: &str, name: &str, desc: &str, args: &[V])
                         rt.string(&n.to_string())
                     }
                 },
+                _ => return None,
+            })
+        }
+        // Guava's `AtomicDouble`: a double kept as the others keep theirs.
+        "AtomicDouble" => {
+            if name == "<init>" {
+                rt.put_field(this, "value", args.get(1).copied().unwrap_or(V::D(0.0)));
+                return Some(V::Void);
+            }
+            if let Some(v) = operate(rt, &Cell::Named(this, "value"), V::D(0.0), name, rest(1)) {
+                return Some(v);
+            }
+            let held = match rt.get_field(this, "value") {
+                V::D(d) => d,
+                _ => 0.0,
+            };
+            Some(match name {
+                "doubleValue" => V::D(held),
+                "floatValue" => V::F(held as f32),
+                "intValue" => V::I(held as i32),
+                "longValue" => V::J(held as i64),
+                "toString" => crate::api::call(
+                    rt,
+                    "java/lang/String.valueOf.(D)Ljava/lang/String;",
+                    &[V::D(held)],
+                ),
                 _ => return None,
             })
         }

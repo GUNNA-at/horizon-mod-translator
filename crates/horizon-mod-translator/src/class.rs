@@ -220,10 +220,38 @@ fn stack_map_offsets(body: &[u8]) -> Result<Vec<u16>, String> {
     Ok(out)
 }
 
-/// Java's "modified UTF-8": close enough to UTF-8 for names; nulls and
-/// surrogate pairs are decoded leniently.
-fn mutf8(b: &[u8]) -> String {
-    String::from_utf8(b.to_vec()).unwrap_or_else(|_| String::from_utf8_lossy(b).into_owned())
+/// Java's "modified UTF-8", as a class file keeps its strings: UTF-16 code units of one to
+/// three bytes each, where a NUL is `C0 80` (never a zero byte) and a character beyond the BMP
+/// is its two surrogates, three bytes each. Most strings are the same bytes in UTF-8; the ones
+/// that are not are decoded unit by unit. Read as UTF-8 with what doesn't fit replaced, each
+/// NUL came out as two U+FFFD: a protobuf schema packs its numbers into such a string, and
+/// spark's read a field count of 335,527,933 out of one, for which it made an array of
+/// a billion ints. A surrogate without its partner is no character a string here can hold,
+/// and reads as U+FFFD.
+pub(crate) fn mutf8(b: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(b) {
+        return s.to_owned();
+    }
+    let mut units: Vec<u16> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let x = b[i];
+        let more = |k: usize| b.get(i + k).is_some_and(|c| c & 0xC0 == 0x80);
+        let (unit, len) = match x {
+            0x00..=0x7F => (u16::from(x), 1),
+            0xC0..=0xDF if more(1) => ((u16::from(x & 0x1F) << 6) | u16::from(b[i + 1] & 0x3F), 2),
+            0xE0..=0xEF if more(1) && more(2) => (
+                (u16::from(x & 0x0F) << 12)
+                    | (u16::from(b[i + 1] & 0x3F) << 6)
+                    | u16::from(b[i + 2] & 0x3F),
+                3,
+            ),
+            _ => (0xFFFD, 1),
+        };
+        units.push(unit);
+        i += len;
+    }
+    String::from_utf16_lossy(&units)
 }
 
 impl ClassFile {
@@ -816,5 +844,33 @@ mod param_tests {
             super::param_classes("(Lnet/neoforged/bus/api/IEventBus;Lnet/neoforged/fml/ModContainer;I[J)V"),
             ["net/neoforged/bus/api/IEventBus", "net/neoforged/fml/ModContainer", "I", "[J"]
         );
+    }
+
+    /// A class file's strings are Java's modified UTF-8: a NUL is two bytes and is one
+    /// character, a character beyond the BMP is its two surrogates of three bytes each, and a
+    /// private-use character (what protobuf packs a number's high bits into) is itself.
+    #[test]
+    fn a_class_files_string_is_read_as_modified_utf8() {
+        assert_eq!(super::mutf8(b"plain"), "plain");
+        assert_eq!(
+            super::mutf8("\u{e9}t\u{e9} \u{4e2d}".as_bytes()),
+            "\u{e9}t\u{e9} \u{4e2d}"
+        );
+        assert_eq!(super::mutf8(&[b'a', 0xC0, 0x80, 0x04, b'b']), "a\0\u{4}b");
+        assert_eq!(
+            super::mutf8(&[0xC0, 0x80, 0xEE, 0x84, 0xA3, 0x05])
+                .chars()
+                .map(u32::from)
+                .collect::<Vec<_>>(),
+            [0, 0xE123, 5]
+        );
+        // U+1F600 as javac writes it: D83D, DE00.
+        assert_eq!(
+            super::mutf8(&[b'x', 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80, b'y']),
+            "x\u{1F600}y"
+        );
+        // A surrogate alone, and a byte that begins nothing.
+        assert_eq!(super::mutf8(&[0xED, 0xA0, 0xBD, b'z']), "\u{FFFD}z");
+        assert_eq!(super::mutf8(&[0xC0, 0x80, 0xFF]), "\0\u{FFFD}");
     }
 }

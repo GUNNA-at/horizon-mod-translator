@@ -434,6 +434,40 @@ pub(crate) fn invoke_method(rt: &mut Rt, method: V, obj: V, args: &[V]) -> Optio
     // has one. Only the parameters are known of such a method, so it is asked for as one that
     // returns nothing, then as one that returns an object; its receiver goes first when given.
     if !class.is_empty() && !rt.is_mod_class(&class) {
+        // On one of the mods' objects or lambdas, such a method is an interface's that the
+        // object implements, and the object's own code answers it: Architectury's events call
+        // each listener through the `Method` of the listeners' interface (a `Consumer`, a
+        // `Runnable`, the event's own), and FTB's mods heard none of theirs. The `Method`
+        // says what it returns when it was made of a call (a proxy's); one only named is
+        // found among the methods the mods' classes have code for.
+        if obj.r() != 0 && rt.cid(obj) != 0 {
+            let known = text(rt, rt.get_field(method, "$desc"));
+            let short = if known.is_empty() {
+                rt.vkeys
+                    .range(prefix.as_str()..)
+                    .next()
+                    .copied()
+                    .filter(|k| k.starts_with(&prefix))
+            } else {
+                Some(rt.static_key(&format!("{name}.{known}")))
+            };
+            if let Some(short) = short {
+                let mut all = Vec::with_capacity(args.len());
+                for (v, k) in args
+                    .iter()
+                    .zip(kinds(&short[short.find('(').unwrap_or(0)..]))
+                {
+                    all.push(crate::mixin::unbox(rt, *v, k));
+                }
+                let key = rt.static_key(&format!("{class}.{short}"));
+                let r = rt.call_functional(key, obj, &all);
+                return Some(match return_kind(short) {
+                    'V' => V::NULL,
+                    'L' | '[' => r,
+                    kind => box_as(rt, r, kind),
+                });
+            }
+        }
         let mut all = Vec::with_capacity(args.len() + 1);
         if obj.r() != 0 {
             all.push(obj);
@@ -1630,8 +1664,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 for_each(rt, a(0), a(1), desc);
                 V::Void
             }
-            // One thread runs a runtime: nobody waits on a monitor to be woken.
+            // One thread runs a runtime: nobody waits on a monitor to be woken, and a wait
+            // on one is over as any wait is ([`crate::jsystem::wait`]).
             "notify" | "notifyAll" => V::Void,
+            "wait" => crate::jsystem::wait(rt),
             "clone" => object_clone(rt, a(0)),
             _ => return None,
         }),
@@ -2880,7 +2916,46 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         "equalsIgnoreCase" => V::I(rt.str_of(a(1)).is_some_and(|o| o.to_lowercase() == s.to_lowercase()) as i32),
         "compareTo" => V::I(java_compare(&s, &arg_s(rt, 1))),
         "compareToIgnoreCase" => V::I(compare_ignore_case(&s, &arg_s(rt, 1))),
-        "charAt" | "codePointAt" => V::I(u.get(a(1).i().max(0) as usize).copied().unwrap_or(0) as i32),
+        "charAt" => V::I(u.get(a(1).i().max(0) as usize).copied().unwrap_or(0) as i32),
+        // A code point: where two surrogates meet, the character they make together.
+        "codePointAt" | "codePointBefore" => {
+            let pair = |high: u16, low: u16| {
+                ((0xD800..0xDC00).contains(&high) && (0xDC00..0xE000).contains(&low)).then(|| {
+                    0x10000 + ((i32::from(high) - 0xD800) << 10) + (i32::from(low) - 0xDC00)
+                })
+            };
+            let at = a(1).i().max(0) as usize;
+            let unit = |i: usize| u.get(i).copied();
+            let point = if name == "codePointAt" {
+                unit(at).map(|c| {
+                    unit(at + 1)
+                        .and_then(|low| pair(c, low))
+                        .unwrap_or(i32::from(c))
+                })
+            } else {
+                at.checked_sub(1).and_then(unit).map(|c| {
+                    at.checked_sub(2)
+                        .and_then(unit)
+                        .and_then(|high| pair(high, c))
+                        .unwrap_or(i32::from(c))
+                })
+            };
+            V::I(point.unwrap_or(0))
+        }
+        "codePointCount" => {
+            let (from, to) = (
+                a(1).i().max(0) as usize,
+                (a(2).i().max(0) as usize).min(u.len()),
+            );
+            let units = u.get(from..to).unwrap_or(&[]);
+            V::I(char::decode_utf16(units.iter().copied()).count() as i32)
+        }
+        "codePoints" => {
+            let points = char::decode_utf16(u.iter().copied())
+                .map(|c| V::I(c.map_or_else(|e| i32::from(e.unpaired_surrogate()), |c| c as i32)))
+                .collect();
+            rt.alloc("java/util/stream/Stream", Data::Stream(points))
+        }
         "startsWith" => {
             let p = utf16(&arg_s(rt, 1));
             let from = if ks.len() > 1 { a(2).i().max(0) as usize } else { 0 };
@@ -4564,6 +4639,11 @@ mod tests {
         // What Architectury's handler does with the method it is handed: each listener, a
         // lambda no class has a method for, is called through a handle of it.
         fn lambda(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            if id == 10 {
+                let took = rt.string(&format!("took {}", rt.str_of(args[1]).unwrap_or("?")));
+                rt.interned.insert("test/took".into(), took);
+                return Some(V::Void);
+            }
             (id == 9).then(|| {
                 let heard = rt.string(&format!(
                     "heard {} and {:?}",
@@ -4607,6 +4687,33 @@ mod tests {
         assert_eq!(
             (rt.class_of(answered), rt.get_field(answered, "value")),
             ("java/lang/Integer", V::I(11))
+        );
+        // And a listener of an interface that is Java's own, as most events' are (a
+        // `Consumer` of the event): the lambda's code all the same, through the interface's
+        // `Method` as the proxy's call made it. FTB's mods heard none of their events.
+        let taker = rt.lambda_id("m/Mod.lambda$hear$0.(Ljava/lang/Object;)V", 10, Vec::new());
+        let class = rt.class_literal("java/util/function/Consumer");
+        let accept = method_object(&mut rt, class, "accept", "(Ljava/lang/Object;)V");
+        let handle = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandles$Lookup.unreflect.(Ljava/lang/reflect/Method;)Ljava/lang/invoke/MethodHandle;",
+            &[lookup, accept],
+        );
+        let bound = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandle.bindTo.(Ljava/lang/Object;)Ljava/lang/invoke/MethodHandle;",
+            &[handle, taker],
+        );
+        let given = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![word]));
+        let answered = crate::api::call(
+            &mut rt,
+            "java/lang/invoke/MethodHandle.invokeWithArguments.([Ljava/lang/Object;)Ljava/lang/Object;",
+            &[bound, given],
+        );
+        assert!(answered.is_null());
+        assert_eq!(
+            rt.interned.get("test/took").and_then(|v| rt.str_of(*v)),
+            Some("took word")
         );
         let of = crate::api::call(
             &mut rt,
@@ -7371,7 +7478,7 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             };
             crate::records::enum_constant(rt, &format!("net/minecraft/Util$OS.{os}"))?
         }
-        // Vanilla's shared pools, one each: what they are given runs at once (one runtime, one thread).
+        // Vanilla's shared pools, one each, a pool as any other ([`crate::tasks`]).
         ("net/minecraft/Util", "backgroundExecutor" | "ioPool" | "nonCriticalIoPool") => {
             rt.intern("compat:util-executor".into(), |rt| crate::api::call(rt, "java/util/concurrent/Executors.newCachedThreadPool.()Ljava/util/concurrent/ExecutorService;", &[]))
         }

@@ -136,6 +136,7 @@ pub mod structures;
 pub mod sounds;
 pub mod tags;
 pub mod tanks;
+pub mod tasks;
 pub mod vanilla_classes;
 pub mod vanilla_effects;
 pub mod vanilla_block_states;

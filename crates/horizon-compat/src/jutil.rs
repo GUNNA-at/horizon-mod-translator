@@ -1503,8 +1503,11 @@ fn blocking_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             if name.starts_with("take") || params == 2 =>
         {
             if len == 0 {
+                // (Waiting for an element lets the pools' work run, which may add one.)
                 crate::jsystem::wait(rt);
-                return Some(V::NULL);
+                if rt.thrown.is_some() || list(rt, this).is_none_or(|l| l.is_empty()) {
+                    return Some(V::NULL);
+                }
             }
             let l = list_mut(rt, this)?;
             if name.ends_with("Last") {
@@ -1903,6 +1906,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     {
         return Some(v);
     }
+    if owner == "com/google/common/util/concurrent/AtomicDouble"
+        && let Some(v) = crate::atomics::call(rt, "AtomicDouble", name, desc, args)
+    {
+        return Some(v);
+    }
     // fastutil's `trim()`: the table's storage, which a runtime table sizes itself.
     if owner.starts_with("it/unimi/dsi/fastutil/") && name == "trim" {
         return Some(V::I(1));
@@ -2096,8 +2104,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
 }
 
-/// A done `CompletableFuture` holding `value`: work runs at once here (one thread), so every
-/// future is complete when made.
+/// A done `CompletableFuture` holding `value`.
 pub fn completed_future(rt: &mut Rt, value: V) -> V {
     let f = rt.new_object("java/util/concurrent/CompletableFuture");
     rt.put_field(f, "$value", value);
@@ -2223,58 +2230,264 @@ const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
 const BI_APPLY: &str = "java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
 const BI_ACCEPT: &str = "java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V";
 
-/// `CompletableFuture` and its stages, run at once (nothing ever fails asynchronously).
+const FUTURE: &str = "java/util/concurrent/CompletableFuture";
+
+/// A future that failed with `thrown`, as one whose work or stage threw it.
+fn failed_future(rt: &mut Rt, thrown: V) -> V {
+    let f = rt.new_object(FUTURE);
+    rt.put_field(f, crate::tasks::FAILED, thrown);
+    f
+}
+
+/// The future of a stage that just ran: done with `value`, or failed with what the stage
+/// threw, which is the future's and not thrown at whoever added the stage.
+fn stage_done(rt: &mut Rt, value: V) -> V {
+    match rt.thrown.take() {
+        Some(thrown) => {
+            rt.unwinding.clear();
+            let held = crate::tasks::completion_of(rt, thrown);
+            failed_future(rt, held)
+        }
+        None => completed_future(rt, value),
+    }
+}
+
+/// `CompletableFuture` and its stages. A future is done when made, and a stage added to it
+/// runs at once, but for the work a pool was given (`runAsync`, `supplyAsync`, a pool's
+/// `submit`): that waits for the code that gave it ([`crate::tasks`]), and runs when something
+/// is asked of its future, if it has not by then. What work or a stage throws is its future's:
+/// the stages after it don't run, `handle`, `whenComplete` and `exceptionally` are handed it,
+/// and `join` and `get` throw it wrapped, as Java's do.
 fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    use crate::tasks::{CANCELLED, FAILED};
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
-    let value = |rt: &Rt| rt.get_field(a(0), "$value");
+    match name {
+        "<init>" => return Some(V::Void),
+        "completedFuture" | "completedStage" => return Some(completed_future(rt, a(0))),
+        "failedFuture" | "failedStage" => return Some(failed_future(rt, a(0))),
+        "supplyAsync" | "runAsync" => {
+            let kind = if name == "runAsync" {
+                crate::tasks::RUN
+            } else {
+                crate::tasks::SUPPLY
+            };
+            // With no executor it is the common pool's.
+            let Some(&executor) = args
+                .get(1)
+                .filter(|e| e.r() != 0 && !crate::api_common::is_pool(rt, **e))
+            else {
+                return Some(crate::tasks::later(rt, a(0), kind, V::Void));
+            };
+            // An executor of the mods' own or the game's: it is handed the work to run when it
+            // chooses (the client's runs it here and now, on its own thread). One that nothing
+            // maps can't have taken it: the work runs here, as on a direct executor.
+            let future = crate::tasks::waiting(rt, a(0), kind, V::Void);
+            let task = crate::functions::task(rt, future);
+            let misses = rt.hook_misses;
+            rt.call_functional(
+                "java/util/concurrent/Executor.execute.(Ljava/lang/Runnable;)V",
+                executor,
+                &[task],
+            );
+            if rt.hook_misses != misses {
+                crate::tasks::force(rt, future);
+            }
+            return Some(future);
+        }
+        // The future of them all: each one's work runs if it has not.
+        "allOf" | "anyOf" => {
+            for f in elements(rt, a(0)) {
+                crate::tasks::force(rt, f);
+            }
+            return Some(completed_future(rt, V::NULL));
+        }
+        // Work that has not run never does once cancelled; what is done can't be.
+        "cancel" => return Some(V::I(crate::tasks::cancel(rt, a(0)) as i32)),
+        "isCancelled" => return Some(V::I(rt.get_field(a(0), CANCELLED).i())),
+        _ => {}
+    }
+    // Anything else is asked of a future: its work runs now if it still waits, and that of a
+    // future handed along (`thenCombine`'s other).
+    for &v in args {
+        crate::tasks::force(rt, v);
+    }
+    let this = a(0);
+    let failed = match rt.get_field(this, FAILED) {
+        e if e.r() != 0 => Some(e),
+        _ => None,
+    };
+    let value = |rt: &Rt| rt.get_field(this, "$value");
+    // What a stage is handed for no value and no failure.
+    let or_null = |v: V| if matches!(v, V::Void) { V::NULL } else { v };
     Some(match name {
-        "<init>" => V::Void,
-        "completedFuture" | "completedStage" => completed_future(rt, a(0)),
-        "supplyAsync" => {
-            let v = rt.call_functional(SUPPLY, a(0), &[]);
-            completed_future(rt, v)
+        "join" | "get" | "getNow" | "resultNow" => {
+            if let Some(e) = failed {
+                // `get` throws an `ExecutionException` around what the work threw; the others
+                // the `CompletionException` the future holds.
+                let thrown = if name == "get" {
+                    let cause = match rt.get_field(e, "cause") {
+                        c if c.r() != 0 && rt.class_of(e) == crate::tasks::COMPLETION => c,
+                        _ => e,
+                    };
+                    let wrapped = rt.new_object("java/util/concurrent/ExecutionException");
+                    let message = rt.get_field(e, "message");
+                    rt.put_field(wrapped, "message", message);
+                    rt.put_field(wrapped, "cause", cause);
+                    wrapped
+                } else {
+                    crate::tasks::completion_of(rt, e)
+                };
+                rt.thrown = Some(thrown);
+                return Some(V::NULL);
+            }
+            if rt.get_field(this, CANCELLED).i() != 0 {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/util/concurrent/CancellationException",
+                    "",
+                ));
+            }
+            // A future the mod completes by hand, from work a pool holds still: whoever waits
+            // for it waits for that work.
+            if matches!(value(rt), V::Void) && name != "getNow" {
+                crate::tasks::run_pending(rt);
+            }
+            match value(rt) {
+                V::Void if name == "getNow" => a(1),
+                v => v,
+            }
         }
-        "runAsync" => {
-            rt.call_functional(RUN, a(0), &[]);
-            completed_future(rt, V::NULL)
-        }
-        "allOf" | "anyOf" => completed_future(rt, V::NULL),
-        "join" | "get" | "getNow" | "resultNow" => value(rt),
         "isDone" => V::I(1),
-        "isCancelled" | "isCompletedExceptionally" | "cancel" => V::I(0),
+        "isCompletedExceptionally" => {
+            V::I((failed.is_some() || rt.get_field(this, CANCELLED).i() != 0) as i32)
+        }
+        "exceptionNow" => failed.unwrap_or(V::NULL),
         "complete" => {
-            rt.put_field(a(0), "$value", a(1));
-            V::I(1)
+            let open = matches!(value(rt), V::Void) && failed.is_none();
+            if open {
+                rt.put_field(this, "$value", a(1));
+            }
+            V::I(open as i32)
+        }
+        "completeExceptionally" => {
+            let open = matches!(value(rt), V::Void) && failed.is_none();
+            if open {
+                rt.put_field(this, FAILED, a(1));
+            }
+            V::I(open as i32)
+        }
+        "getNumberOfDependents" => V::I(0),
+        // The stages after a failure don't run: their futures fail with it.
+        "thenRun"
+        | "thenRunAsync"
+        | "thenAccept"
+        | "thenAcceptAsync"
+        | "thenApply"
+        | "thenApplyAsync"
+        | "thenCompose"
+        | "thenComposeAsync"
+        | "thenCombine"
+        | "thenCombineAsync"
+        | "thenAcceptBoth"
+        | "thenAcceptBothAsync"
+        | "runAfterBoth"
+        | "runAfterBothAsync"
+            if failed.is_some() =>
+        {
+            let held = crate::tasks::completion_of(rt, failed.unwrap_or_default());
+            failed_future(rt, held)
         }
         "thenRun" | "thenRunAsync" => {
             rt.call_functional(RUN, a(1), &[]);
-            completed_future(rt, V::NULL)
+            stage_done(rt, V::NULL)
         }
         "thenAccept" | "thenAcceptAsync" => {
-            let v = value(rt);
+            let v = or_null(value(rt));
             rt.call_functional(ACCEPT, a(1), &[v]);
-            completed_future(rt, V::NULL)
+            stage_done(rt, V::NULL)
         }
         "thenApply" | "thenApplyAsync" => {
-            let v = value(rt);
+            let v = or_null(value(rt));
             let r = rt.call_functional(APPLY, a(1), &[v]);
-            completed_future(rt, r)
+            stage_done(rt, r)
         }
         "thenCompose" | "thenComposeAsync" => {
-            let v = value(rt);
-            rt.call_functional(APPLY, a(1), &[v])
+            let v = or_null(value(rt));
+            let next = rt.call_functional(APPLY, a(1), &[v]);
+            if rt.thrown.is_some() {
+                stage_done(rt, V::NULL)
+            } else {
+                next
+            }
+        }
+        // Two futures' values together: the other's failure is the stage's too.
+        "thenCombine"
+        | "thenCombineAsync"
+        | "thenAcceptBoth"
+        | "thenAcceptBothAsync"
+        | "runAfterBoth"
+        | "runAfterBothAsync" => {
+            let other = a(1);
+            match rt.get_field(other, FAILED) {
+                e if e.r() != 0 => {
+                    let held = crate::tasks::completion_of(rt, e);
+                    failed_future(rt, held)
+                }
+                _ => {
+                    let (v, w) = (or_null(value(rt)), or_null(rt.get_field(other, "$value")));
+                    let r = match name {
+                        "thenCombine" | "thenCombineAsync" => {
+                            rt.call_functional(BI_APPLY, a(2), &[v, w])
+                        }
+                        "thenAcceptBoth" | "thenAcceptBothAsync" => {
+                            rt.call_functional(BI_ACCEPT, a(2), &[v, w]);
+                            V::NULL
+                        }
+                        _ => {
+                            rt.call_functional(RUN, a(2), &[]);
+                            V::NULL
+                        }
+                    };
+                    stage_done(rt, r)
+                }
+            }
         }
         "handle" | "handleAsync" => {
-            let v = value(rt);
-            let r = rt.call_functional(BI_APPLY, a(1), &[v, V::NULL]);
-            completed_future(rt, r)
+            let (v, e) = match failed {
+                Some(e) => (V::NULL, e),
+                None => (or_null(value(rt)), V::NULL),
+            };
+            let r = rt.call_functional(BI_APPLY, a(1), &[v, e]);
+            stage_done(rt, r)
         }
+        // The future it gives is this one's outcome again, unless the action throws.
         "whenComplete" | "whenCompleteAsync" => {
-            let v = value(rt);
-            rt.call_functional(BI_ACCEPT, a(1), &[v, V::NULL]);
-            a(0)
+            let (v, e) = match failed {
+                Some(e) => (V::NULL, e),
+                None => (or_null(value(rt)), V::NULL),
+            };
+            rt.call_functional(BI_ACCEPT, a(1), &[v, e]);
+            if rt.thrown.is_some() && failed.is_none() {
+                stage_done(rt, V::NULL)
+            } else {
+                if rt.thrown.take().is_some() {
+                    rt.unwinding.clear();
+                }
+                this
+            }
         }
-        "exceptionally" | "toCompletableFuture" | "orTimeout" => a(0),
+        "exceptionally" | "exceptionallyAsync" => match failed {
+            Some(e) => {
+                let r = rt.call_functional(APPLY, a(1), &[e]);
+                stage_done(rt, r)
+            }
+            None => this,
+        },
+        "toCompletableFuture"
+        | "orTimeout"
+        | "completeOnTimeout"
+        | "copy"
+        | "minimalCompletionStage" => this,
         _ => return None,
     })
 }

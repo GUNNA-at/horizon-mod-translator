@@ -673,6 +673,16 @@ fn executor(rt: &mut Rt, class: &'static str) -> V {
     rt.new_object(class)
 }
 
+/// Whether `v` is one of the runtime's pools (`Executors.newCachedThreadPool()`, vanilla's
+/// `Util.backgroundExecutor()`, the common pool), which run what they are given later
+/// ([`crate::tasks`]); a mod's own executor, the game's and a direct one are not.
+pub(crate) fn is_pool(rt: &Rt, v: V) -> bool {
+    matches!(
+        rt.class_of(v),
+        THREAD_POOL | SCHEDULED_POOL | FORK_JOIN_POOL
+    )
+}
+
 fn is_executor(class: &str) -> bool {
     matches!(
         class,
@@ -2314,8 +2324,9 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 _ => return None,
             }
         }
-        // Executors: what they are given to run runs at once (one runtime, one thread); a task with
-        // a delay or a period (a scheduled executor's) doesn't run here, its future never done.
+        // Executors: what a pool is given to run waits for the code that gave it
+        // ([`crate::tasks`]); a task with a delay or a period (a scheduled executor's) doesn't
+        // run here, its future never done.
         ("java/util/concurrent/Executors", n) => match n {
             "newSingleThreadExecutor" | "newFixedThreadPool" | "newCachedThreadPool" | "newWorkStealingPool" | "newVirtualThreadPerTaskExecutor" => executor(rt, THREAD_POOL),
             "newSingleThreadScheduledExecutor" | "newScheduledThreadPool" => executor(rt, SCHEDULED_POOL),
@@ -2378,9 +2389,11 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 crate::jutil::new_list(rt, done)
             }
         }
+        // What a pool is given waits for the code that gave it ([`crate::tasks`]): a pool's
+        // thread never runs it inside that code's own call.
         (o, n) if is_executor(o) && is_executor(rt.class_of(a(0))) => match n {
             "execute" => {
-                rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
+                crate::tasks::later(rt, a(1), crate::tasks::RUN, V::Void);
                 V::Void
             }
             "invokeAll" => {
@@ -2398,7 +2411,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                 }
                 crate::jutil::new_list(rt, done)
             }
-            // Nothing waits in a pool that runs each task where it is given.
+            // A pool's own counts: its one thread is the game's, and what waits in it is
+            // not counted.
             "getActiveCount"
             | "getPoolSize"
             | "getLargestPoolSize"
@@ -2430,19 +2444,32 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             "purge" => V::Void,
             "remove" => V::I(0),
             "submit" => {
-                let value = if desc.starts_with("(Ljava/util/concurrent/Callable;)") {
-                    rt.call_functional("java/util/concurrent/Callable.call.()Ljava/lang/Object;", a(1), &[])
+                if desc.starts_with("(Ljava/util/concurrent/Callable;)") {
+                    crate::tasks::later(rt, a(1), crate::tasks::CALL, V::Void)
                 } else {
-                    rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
-                    if desc.starts_with("(Ljava/lang/Runnable;Ljava/lang/Object;)") { a(2) } else { V::NULL }
-                };
-                crate::jutil::completed_future(rt, value)
+                    let result = if desc.starts_with("(Ljava/lang/Runnable;Ljava/lang/Object;)") {
+                        a(2)
+                    } else {
+                        V::Void
+                    };
+                    crate::tasks::later(rt, a(1), crate::tasks::RUN, result)
+                }
             }
             "schedule" | "scheduleAtFixedRate" | "scheduleWithFixedDelay" => rt.new_object(SCHEDULED_FUTURE),
-            "shutdownNow" => crate::jutil::new_list(rt, Vec::new()),
+            // A pool shut down runs what it was given first, and whoever waits for it to end
+            // waits for that.
+            "shutdownNow" => {
+                crate::tasks::run_pending(rt);
+                rt.put_field(a(0), "$shutdown", V::I(1));
+                crate::jutil::new_list(rt, Vec::new())
+            }
             "isShutdown" | "isTerminated" => V::I(rt.get_field(a(0), "$shutdown").i()),
-            "awaitTermination" => V::I(1),
+            "awaitTermination" | "awaitQuiescence" => {
+                crate::tasks::run_pending(rt);
+                V::I(1)
+            }
             "shutdown" | "close" => {
+                crate::tasks::run_pending(rt);
                 rt.put_field(a(0), "$shutdown", V::I(1));
                 V::Void
             }
@@ -3013,10 +3040,13 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "getType") if desc == "()Lnet/minecraft/world/entity/EntityType;" && is_player(o) && is_player_class(rt.class_of(a(0))) => {
             crate::mod_entities::vanilla_type(rt, "minecraft:player")
         }
-        (o, "getUUID" | "getStringUUID" | "getGameProfile" | "getScoreboardName") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
+        // (`$uuid`: the field itself, as the game's own code carried along reads it.)
+        (o, "getUUID" | "$uuid" | "getStringUUID" | "getGameProfile" | "getScoreboardName")
+            if is_player(o) && is_player_class(rt.class_of(a(0))) =>
+        {
             let (uuid, player_name) = player_identity(rt, a(0));
             match name {
-                "getUUID" => uuid,
+                "getUUID" | "$uuid" => uuid,
                 "getStringUUID" => {
                     let (msb, lsb) = crate::tags::uuid_bits(rt, uuid);
                     rt.string(&crate::tags::uuid_text(msb, lsb))
@@ -3033,6 +3063,41 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (o, "getName" | "getDisplayName") if is_player(o) && is_player_class(rt.class_of(a(0))) && desc == "()Lnet/minecraft/network/chat/Component;" => {
             let (_, player_name) = player_identity(rt, a(0));
             crate::api::call(rt, "net/minecraft/network/chat/Component.literal.(Ljava/lang/String;)Lnet/minecraft/network/chat/MutableComponent;", &[player_name])
+        }
+        // What a player in the world is not, asked of them as of any entity: a fake player
+        // (those answer for themselves), removed, named over their head, or credited with a
+        // kill nobody tells of. And one unseen (`isInvisibleTo`) is one invisible.
+        (o, "isFakePlayer" | "isRemoved" | "hasCustomName" | "isCustomNameVisible")
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && rt.class_of(a(0)) != crate::fake_players::FAKE_PLAYER =>
+        {
+            V::I(0)
+        }
+        (o, "getKillCredit") if is_player(o) && is_player_class(rt.class_of(a(0))) => V::NULL,
+        (o, "isInvisibleTo")
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && rt.class_of(a(0)) != crate::fake_players::FAKE_PLAYER =>
+        {
+            let key = rt.static_key(&format!("{o}.isInvisible.()Z"));
+            crate::api::call(rt, key, &[a(0)])
+        }
+        // A player's scoreboard tags, as far as the mods themselves gave them: the set is the
+        // player object's own, and what is added to it stays in it.
+        (o, "getTags")
+            if is_player(o)
+                && is_player_class(rt.class_of(a(0)))
+                && rt.class_of(a(0)) != crate::fake_players::FAKE_PLAYER =>
+        {
+            match rt.get_field(a(0), "$tags") {
+                tags if tags.r() != 0 => tags,
+                _ => {
+                    let tags = crate::jutil::new_set_of(rt, &[]);
+                    rt.put_field(a(0), "$tags", tags);
+                    tags
+                }
+            }
         }
         // The server a server's player plays on (a client's player has none).
         (o, "getServer") if is_player(o) && is_player_class(rt.class_of(a(0))) => {
@@ -3507,10 +3572,10 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
                             .and_then(|uuid| h.player_permission(uuid))
                             .or_else(|| h.client_player().map(|(_, level)| level))
                     });
-                    match level {
-                        Some(level) => V::I(i32::from(i32::from(level) >= a(1).i())),
-                        None => return None,
-                    }
+                    // (Nobody to ask, as while the commands are gathered: no operator.)
+                    V::I(i32::from(
+                        level.is_some_and(|level| i32::from(level) >= a(1).i()),
+                    ))
                 }
                 // Survival and creative players build; the hooks act for one of them.
                 "mayBuild" => V::I(1),

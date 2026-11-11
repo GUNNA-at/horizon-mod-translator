@@ -1061,7 +1061,7 @@ pub(crate) fn run_client_tasks(rt: &mut Rt) {
     }
 }
 
-fn client_calls(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+fn client_calls(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match name {
         "setScreen" => {
@@ -1082,6 +1082,23 @@ fn client_calls(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         // task waits in the queue until the client runs it, its resources there to read by
         // then (Immersive Portals reads its shaders' text in such a task). Here it waits for
         // the client's resources to load ([`run_client_tasks`]).
+        // `submit(Supplier)` gives the future of what the supplier answers: it is asked on
+        // the client's thread as a task is run, and the future asks it when it has to wait.
+        "submit" if desc.starts_with("(Ljava/util/function/Supplier;)") => {
+            let future = crate::tasks::waiting(rt, a(1), crate::tasks::SUPPLY, V::Void);
+            if rt.host().is_none() {
+                let task = crate::functions::task(rt, future);
+                let queue = client_tasks(rt);
+                crate::api::call(
+                    rt,
+                    "java/util/List.add.(Ljava/lang/Object;)Z",
+                    &[queue, task],
+                );
+            } else {
+                crate::tasks::force(rt, future);
+            }
+            future
+        }
         "tell" | "execute" | "submit" => {
             if rt.host().is_none() {
                 let queue = client_tasks(rt);
@@ -1336,7 +1353,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
         }
         LISTENER => listener_call(rt, name, desc, args),
-        MINECRAFT => client_calls(rt, name, args),
+        MINECRAFT => client_calls(rt, name, desc, args),
         "com/mojang/blaze3d/vertex/VertexConsumer" => vertex_call(rt, name, desc, args),
         KEY_MAPPING | crate::keys::REGISTER_EVENT | crate::keys::MODIFIER | crate::keys::CONTEXT | crate::keys::ICONTEXT => {
             crate::keys::call(rt, owner, name, desc, args)

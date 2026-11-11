@@ -700,4 +700,115 @@ public class Fixture {
             }
         }
     }
+
+    // A pool's work: its value where it is waited for, what it threw as `join`, `get` and the
+    // stages are handed it, and that it runs beside the code that gave it, never inside the
+    // call that did.
+    public static int pools(int k) {
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        java.util.concurrent.atomic.AtomicInteger ran = new java.util.concurrent.atomic.AtomicInteger();
+        try {
+            switch (k) {
+                case 0: {
+                    java.util.concurrent.Future<Integer> f = pool.submit(() -> 6 * 7);
+                    return f.get() + (f.isDone() ? 100 : 0);
+                }
+                case 1:
+                    return java.util.concurrent.CompletableFuture.supplyAsync(() -> "a", pool)
+                        .thenApply(s -> s + "b")
+                        .thenCombine(java.util.concurrent.CompletableFuture.supplyAsync(() -> "c"), (x, y) -> x + y)
+                        .join().hashCode();
+                case 2: {
+                    String told = java.util.concurrent.CompletableFuture.<String>supplyAsync(() -> { throw new IllegalStateException("broke"); }, pool)
+                        .handle((v, e) -> e.getClass().getSimpleName() + ":" + e.getCause().getMessage() + ":" + v).join();
+                    return told.hashCode();
+                }
+                case 3: {
+                    java.util.concurrent.CompletableFuture<String> failed =
+                        java.util.concurrent.CompletableFuture.supplyAsync(() -> { throw new IllegalStateException("broke"); }, pool);
+                    int seen = 0;
+                    try { failed.join(); } catch (java.util.concurrent.CompletionException e) { seen += e.getCause().getMessage().length(); }
+                    try { failed.get(); } catch (java.util.concurrent.ExecutionException e) { seen += 10 * e.getCause().getMessage().length(); }
+                    seen += failed.isCompletedExceptionally() ? 1000 : 0;
+                    seen += failed.thenApply(s -> s + "!").isCompletedExceptionally() ? 2000 : 0;
+                    seen += failed.exceptionally(e -> "saved").join().length() * 10000;
+                    return seen;
+                }
+                case 4: {
+                    // The work waits for a gate its giver opens only after giving it.
+                    java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+                    java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+                    int[] order = {0};
+                    pool.execute(() -> {
+                        try { gate.await(); } catch (InterruptedException e) { return; }
+                        order[0] = order[0] * 10 + 2;
+                        done.countDown();
+                    });
+                    order[0] = order[0] * 10 + 1;
+                    gate.countDown();
+                    done.await();
+                    return order[0];
+                }
+                case 5: {
+                    pool.submit(() -> ran.incrementAndGet());
+                    pool.execute(() -> ran.addAndGet(10));
+                    pool.shutdown();
+                    boolean ended = pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+                    return ran.get() + (ended ? 100 : 0) + (pool.isShutdown() ? 1000 : 0);
+                }
+                default: {
+                    // Work cancelled while the pool's one thread is busy with other work never runs.
+                    java.util.concurrent.CountDownLatch gate = new java.util.concurrent.CountDownLatch(1);
+                    pool.execute(() -> {
+                        try { gate.await(); } catch (InterruptedException e) { return; }
+                        ran.incrementAndGet();
+                    });
+                    java.util.concurrent.Future<?> second = pool.submit(() -> { ran.addAndGet(10); });
+                    boolean cancelled = second.cancel(false);
+                    gate.countDown();
+                    pool.shutdown();
+                    pool.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS);
+                    return ran.get() + (cancelled ? 100 : 0) + (second.isCancelled() ? 1000 : 0);
+                }
+            }
+        } catch (InterruptedException | java.util.concurrent.ExecutionException e) {
+            return -1;
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // A string as a class file keeps it: a NUL inside, a private-use character, a character
+    // beyond the BMP, and a number packed into characters as protobuf's schemas pack theirs.
+    public static int packedStrings(int k) {
+        String info = "\u0000\u0004\u0000\u0001\u0409\ue123\u0005x\uD83D\uDE00y";
+        switch (k) {
+            case 0:
+                return info.length() * 1000 + info.codePointCount(0, info.length());
+            case 1:
+                return info.charAt(0) + info.charAt(1) * 10 + info.charAt(4) * 100 + info.charAt(8) + info.charAt(9);
+            case 2: {
+                int i = 5;
+                int next = info.charAt(i++);
+                if (next >= 0xD800) {
+                    int result = next & 0x1FFF;
+                    int shift = 13;
+                    while ((next = info.charAt(i++)) >= 0xD800) {
+                        result |= (next & 0x1FFF) << shift;
+                        shift += 13;
+                    }
+                    next = result | (next << shift);
+                }
+                return next * 10 + i;
+            }
+            case 3:
+                return info.codePointAt(8) + info.indexOf('y') * 7 + info.indexOf("\u0000\u0001") * 100000;
+            case 4:
+                return info.hashCode();
+            default:
+                return info.substring(1, 3).length() + (info.contains("\u0000\u0004") ? 10 : 0)
+                    + info.getBytes(java.nio.charset.StandardCharsets.UTF_8).length * 100
+                    + new String(info.toCharArray(), 7, 4).length() * 10000;
+        }
+    }
 }

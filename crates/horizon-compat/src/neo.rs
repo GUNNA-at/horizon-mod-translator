@@ -234,6 +234,12 @@ pub(crate) fn post_as(rt: &mut Rt, class: &str, event: V, only: Option<&str>) {
         crate::api::timed_end(outer);
         activate(rt, before);
         rt.report_thrown(class);
+        // The listener is done: what it gave the pools runs, when the bus was posted to by
+        // the runtime's own code and none of the mods' waits for this post (a constructor
+        // that posts, another listener).
+        if rt.str_of(before).is_none() {
+            crate::tasks::at_rest(rt);
+        }
     }
 }
 
@@ -666,6 +672,9 @@ pub fn fire_registrations(rt: &mut Rt) {
         post(rt, event, ev);
     }
     crate::network::fire_registration(rt);
+    // What the loading gave the pools is done before the runtime is copied for each thread:
+    // every copy would run it again.
+    crate::tasks::run_pending(rt);
     rt.interned.remove(LOADING);
     crate::api::census_of_all(rt, "the mods' registration");
 }
@@ -1292,6 +1301,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         },
         // `ModLoader.postEvent(event)` (or in mod order, `postEventWrapContainerInModOrder`): a mod
         // posting its own event to every mod's bus (FramedBlocks', Curios' registration events).
+        // Nothing stops the loading here: a mod that fails to load is left out and told of.
+        ("net/neoforged/fml/ModLoader", "hasErrors") => V::I(0),
         ("net/neoforged/fml/ModLoader", "postEvent" | "postEventWrapContainerInModOrder" | "postEventWithReturn") => {
             let class = rt.class_of(a(0));
             post(rt, class, a(0));

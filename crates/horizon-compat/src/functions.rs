@@ -87,6 +87,12 @@ pub(crate) fn bound(rt: &mut Rt, key: &str, receiver: V) -> V {
     combinator(rt, "compat:fn/bound", vec![k, receiver])
 }
 
+/// The `Runnable` an executor is handed for `future`'s work, which waits
+/// ([`crate::tasks::waiting`]): running it runs that work, once.
+pub(crate) fn task(rt: &mut Rt, future: V) -> V {
+    combinator(rt, "compat:fn/task", vec![future])
+}
+
 /// A method of its argument called with one more, fixed argument (`style ->
 /// style.withColor(colour)`): `key` is the method's.
 pub(crate) fn with(rt: &mut Rt, key: &str, extra: V) -> V {
@@ -285,6 +291,11 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
             let k = rt.str_of(part(0)).unwrap_or("").to_owned();
             let k: &'static str = rt.static_key(&k);
             crate::api::call(rt, k, &[args.first().copied().unwrap_or_default(), part(1)])
+        }
+        // The work of a future handed to an executor of the mods' own: run when that runs it.
+        "compat:fn/task" => {
+            crate::tasks::force(rt, part(0));
+            V::Void
         }
         "compat:fn/bound" => {
             let k = rt.str_of(part(0)).unwrap_or("").to_owned();

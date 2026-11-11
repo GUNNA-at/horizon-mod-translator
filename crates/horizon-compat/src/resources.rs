@@ -192,8 +192,15 @@ fn by_namespace(folders: &[PathBuf]) -> ByNamespace {
 /// loader while it is being constructed (Sophisticated Backpacks its models, for its shapes),
 /// before any game is there to ask for a resource.
 fn content_dirs(root: &str, namespace: &str) -> &'static [PathBuf] {
+    content_by_namespace()
+        .get(&(root.to_owned(), namespace.to_owned()))
+        .map_or(&[], Vec::as_slice)
+}
+
+/// The mods' content folders ([`content_dirs`]), by the namespaces each has files for.
+fn content_by_namespace() -> &'static ByNamespace {
     static DIRS: std::sync::OnceLock<ByNamespace> = std::sync::OnceLock::new();
-    let all = DIRS.get_or_init(|| {
+    DIRS.get_or_init(|| {
         let mut folders = Vec::new();
         let mut args = std::env::args_os();
         while let Some(arg) = args.next() {
@@ -209,9 +216,7 @@ fn content_dirs(root: &str, namespace: &str) -> &'static [PathBuf] {
             folders.extend(installed);
         }
         by_namespace(&folders)
-    });
-    all.get(&(root.to_owned(), namespace.to_owned()))
-        .map_or(&[], Vec::as_slice)
+    })
 }
 
 /// The content folders that may hold resource file `path` (`assets/<namespace>/...`).
@@ -306,7 +311,10 @@ pub fn paths(rt: &Rt, prefix: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut out: std::collections::BTreeSet<String> = rt.host().map(|h| h.resource_paths(prefix)).unwrap_or_default().into_iter().collect();
-    for d in fallback_dirs() {
+    // And the mods' own folders: the game lists the assets it merged from them, and of their
+    // data only what it reads itself (recipes, tags, loot), so a mod's own kind of data file
+    // (`data/curios/curios/slots`) is found in the folder its jar's files were put in.
+    for d in fallback_dirs().iter().chain(content_dirs_of(prefix)) {
         walk(d, &d.join(prefix), &mut out);
     }
     out.into_iter().filter(|p| p.starts_with(&format!("{prefix}/"))).collect()
@@ -319,6 +327,12 @@ pub fn namespaces(rt: &Rt, root: &str) -> Vec<String> {
         let Ok(entries) = std::fs::read_dir(d.join(root)) else { continue };
         out.extend(entries.flatten().filter(|e| e.path().is_dir()).filter_map(|e| e.file_name().to_str().map(str::to_owned)));
     }
+    out.extend(
+        content_by_namespace()
+            .keys()
+            .filter(|(r, _)| r == root)
+            .map(|(_, namespace)| namespace.clone()),
+    );
     out.into_iter().collect()
 }
 
@@ -363,8 +377,28 @@ fn resource(rt: &mut Rt, path: &str) -> V {
     r
 }
 
-fn exists(rt: &Rt, path: &str) -> bool {
-    file(rt, path).is_some()
+fn exists(rt: &mut Rt, path: &str) -> bool {
+    held(rt, path).is_some()
+}
+
+/// [`file`], or the file of that path the bundle carries for the mods themselves
+/// ([`crate::FILES`]): one under `assets/` or `data/` that is no kind of file a resource pack
+/// has (Immersive Portals reads `shaders/shader_transformation.yaml` through the resource
+/// manager), which the mods' content folders therefore do not hold.
+fn held(rt: &mut Rt, path: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = file(rt, path) {
+        return Some(bytes);
+    }
+    if !safe(path) {
+        return None;
+    }
+    let bytes = rt.reflect(crate::FILES, path, &[])?;
+    Some(
+        crate::jutil::elements(rt, bytes)
+            .into_iter()
+            .map(|b| b.i() as u8)
+            .collect(),
+    )
 }
 
 /// A stream over `bytes`.
@@ -609,7 +643,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 fn resource_stream(rt: &mut Rt, r: V) -> V {
     let path = rt.get_field(r, "$path");
     match rt.str_of(path).map(str::to_owned) {
-        Some(path) => match file(rt, &path) {
+        Some(path) => match held(rt, &path) {
             Some(bytes) => input_stream(rt, bytes),
             None => crate::jlang::throw_with(rt, "java/io/FileNotFoundException", &path),
         },
@@ -648,7 +682,7 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "open" | "openAsReader" => {
             let path = path_of(rt, &root, a(1));
-            match file(rt, &path) {
+            match held(rt, &path) {
                 Some(bytes) => rt.alloc(if name == "open" { BYTES_IN } else { BUFFERED_READER }, Data::Bytes(bytes, 0)),
                 None => {
                     let id = crate::neo::location(rt, a(1));
@@ -915,6 +949,9 @@ pub fn reload(rt: &mut Rt, root: &'static str) {
         }
         (rt.hook_misses, rt.hook_first_miss) = misses;
         rt.report_thrown("resource reload listener");
+        // A reload waits for each listener's future: what the listener gave a pool of its
+        // own choosing instead of the executors it was handed runs before the next begins.
+        crate::tasks::run_pending(rt);
         // What one listener left behind goes before the next begins: a pack's listeners
         // together make far more garbage than fits (those who run this hold nothing more).
         crate::api::between(rt, &held, l);

@@ -1016,8 +1016,17 @@ pub fn holders(rt: &mut Rt, id: &str) -> Vec<V> {
     if let Some(&list) = rt.interned.get(&key) {
         return jutil::elements(rt, list);
     }
-    // A table made of every recipe says what there is: a type it lacks has none.
-    if rt.interned.contains_key(WHOLE) && rt.interned.contains_key(TABLE_TAKEN) {
+    // A table made of every recipe says what there is: a type it had recipes of when it was
+    // made and has none of now has none. (One the game had no recipes of then is read as
+    // any other: the game may hand them over later.)
+    if rt.interned.contains_key(WHOLE)
+        && rt.interned.contains_key(TABLE_TAKEN)
+        && rt
+            .interned
+            .get(KNOWN)
+            .and_then(|&known| rt.str_of(known))
+            .is_some_and(|known| known.split('\n').any(|k| k == id))
+    {
         return Vec::new();
     }
     let mut more = Vec::new();
@@ -1044,6 +1053,13 @@ pub fn holders(rt: &mut Rt, id: &str) -> Vec<V> {
     }
     if let Some(first) = refused.first() {
         eprintln!("horizon-compat: {} of {} {id} recipes not read; first: {first}", refused.len(), files.len());
+    }
+    if Rt::tracing() {
+        eprintln!(
+            "horizon-compat: {} {id} recipes read, {} more added by the mods",
+            out.len(),
+            more.len()
+        );
     }
     // What the mods added, one of a file's id in that file's place.
     if !more.is_empty() {
@@ -1073,6 +1089,8 @@ const ADDED: &str = "compat:recipes-added/";
 const HELD: &str = "compat:recipes-held/";
 /// The `byType` table the runtime's lists were last taken from.
 const TABLE_TAKEN: &str = "compat:recipes-table";
+/// The ids of the types the `byType` table was made with recipes of, a line each.
+const KNOWN: &str = "compat:recipes-known";
 /// Set once a table was made of every recipe the game has: what the mods then make of it and
 /// put in its place is the whole of the recipes too.
 const WHOLE: &str = "compat:recipes-whole";
@@ -1175,6 +1193,18 @@ fn tables_taken(rt: &mut Rt) {
     } else {
         HELD
     };
+    if Rt::tracing() {
+        eprintln!(
+            "horizon-compat: the recipe manager's tables were replaced: {} recipes of {} types, {}",
+            held.iter().map(|h| h.1.len()).sum::<usize>(),
+            held.len(),
+            if under == LIST {
+                "which are all there is"
+            } else {
+                "added to the files'"
+            }
+        );
+    }
     for (id, items) in held {
         let list = jutil::new_list(rt, items);
         rt.interned.insert(format!("{under}{id}"), list);
@@ -1217,11 +1247,15 @@ fn made_table(rt: &mut Rt, manager: V, by_name: bool) -> V {
             "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;",
             &[],
         );
+        let mut known = Vec::new();
         for id in type_ids(rt) {
             let of = holders(rt, &id);
             let Some(ty) = type_of_id(rt, &id) else {
                 continue;
             };
+            if !of.is_empty() {
+                known.push(id.clone());
+            }
             for holder in of {
                 any = true;
                 crate::api::call(
@@ -1231,6 +1265,14 @@ fn made_table(rt: &mut Rt, manager: V, by_name: bool) -> V {
                 );
             }
         }
+        if Rt::tracing() {
+            eprintln!(
+                "horizon-compat: the recipe manager's table by type was made of {} types' recipes",
+                known.len()
+            );
+        }
+        let known = rt.string(&known.join("\n"));
+        rt.interned.insert(KNOWN.into(), known);
         multimap
     };
     if any {
@@ -1251,6 +1293,7 @@ pub(crate) fn reloaded(rt: &mut Rt) {
     forget(rt, &[LIST, ADDED, HELD]);
     rt.interned.remove(TABLE_TAKEN);
     rt.interned.remove(WHOLE);
+    rt.interned.remove(KNOWN);
     for manager in managers(rt) {
         for name in BY_NAME.into_iter().chain(BY_TYPE) {
             if rt.get_field(manager, name) != V::Void {
@@ -2750,6 +2793,33 @@ mod tests {
             let again = crate::api::call(rt, BY_TYPE_KEY, &[manager]);
             assert!(again != by_type && again.r() != 0);
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// A type the game had no recipes of when the table by type was made is read from the
+    /// files once it has them, though a mod has put its own table in the first one's place.
+    #[test]
+    fn a_type_without_recipes_when_the_table_was_made_is_read_later() {
+        let mut rt = Rt::new();
+        crate::install();
+        let (mut early, mut later) = (smelting_host(), smelting_host());
+        later.recipes.insert(
+            "minecraft:blasting".into(),
+            vec![("minecraft:iron_ingot_from_blasting_raw_iron".into(), r#"{"type":"minecraft:blasting","category":"misc","cookingtime":100,"experience":0.7,"group":"iron_ingot","ingredient":"minecraft:raw_iron","result":{"id":"minecraft:iron_ingot"}}"#.into())],
+        );
+        let mut manager = V::NULL;
+        rt.with_host(&mut early, |rt| {
+            manager = the_manager(rt);
+            let by_type = crate::api::call(rt, BY_TYPE_KEY, &[manager]);
+            let copy = crate::api::call(rt, "com/google/common/collect/ImmutableMultimap.copyOf.(Lcom/google/common/collect/Multimap;)Lcom/google/common/collect/ImmutableMultimap;", &[by_type]);
+            rt.put_field(manager, "byType", copy);
+            assert_eq!(smelted(rt, manager).len(), 2);
+        });
+        rt.with_host(&mut later, |rt| {
+            let blasting = vanilla_type_entry(rt, "minecraft:blasting").unwrap();
+            let all = crate::api::call(rt, ALL_FOR, &[manager, blasting]);
+            assert_eq!(jutil::elements(rt, all).len(), 1);
+            assert_eq!(smelted(rt, manager).len(), 2);
         });
     }
 

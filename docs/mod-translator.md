@@ -10951,6 +10951,64 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     `compare` and `compareUnsigned` are answered natively: the JDK's own code, which stands
     for `toString` and a search among numbers, does not carry these. The fixture compares
     all of them with the JVM.
+- [x] 2026-11-11 Part 190: what launch 23 showed: a pool's work waits, a class file's strings.
+  - Launch 23 (Part 189: 674 s, 22 crates, 2,036,660,272 bytes) is ready after 285 s (368).
+    One constructor fails where two did (Chisels & Bits is made in time), 18 other uncaught
+    exceptions. Then the window's thread overflowed its stack as the world opened.
+  - The overflow, read under a debugger (the generated code's frames keep their names):
+    JourneyMap's `MiniMap` constructor updates its tiles, which gives vanilla's background
+    pool the grid's update (`CompletableFuture.runAsync`); the update asks `UIManager` for
+    the minimap, and with none kept yet (its constructor is still running) another is made,
+    which gives the pool its update. A pool's work ran where it was given. On a JVM a pool's
+    thread runs it beside the code that gave it, never inside that code's own call.
+  - So what a pool is given waits (`tasks.rs`: `ExecutorService.execute` and `submit`,
+    `runAsync`, `supplyAsync`), in the order given, for the first of: its future being asked
+    anything; the code that gave it waiting for something itself (a latch, a sleep, a
+    queue's `take`, a semaphore, `Object.wait`, `park`, `yield`, the pool's `shutdown` and
+    `awaitTermination`), as the pool's threads run while it waits; that code being done, a
+    listener back in the bus with none of the mods' code on the stack. A reload waits for
+    each listener's, and the mods' loading ends with none left, before the runtime is
+    copied for each thread. An executor that is no pool (the game's, a mod's own, a direct
+    one) is handed the work as Java hands it, through its `execute`.
+  - What a pool's work or a future's stage throws is its future's, as with nobody there to
+    catch it: `join` throws it in a `CompletionException` and `get` in an
+    `ExecutionException`, the stages after it don't run, `handle`, `whenComplete` and
+    `exceptionally` are handed it. It was thrown at whoever gave the work. Work cancelled
+    before it ran never runs. New with it: `thenCombine`, `thenAcceptBoth`, `runAfterBoth`,
+    `completeExceptionally`, `failedFuture`. The fixture compares seven cases with the JVM
+    (`pools`), one of which a pool running its work where it is given gets wrong, and they
+    hold with the collector run every few objects.
+  - Memory had one cause, and it was one array of the 26,107 Part 189 counted:
+    1,006,583,799 ints, 15.4 GB, in each runtime that started spark, with nothing holding
+    it. A breakpoint on a mapping of 4 GB or more found who made it: spark's own
+    protobuf, building the schema of a message from the string its generated code packs
+    the field numbers into. The string begins with NUL characters, which a class file writes
+    as `C0 80`. The translator read its strings as UTF-8 and replaced what did not fit, so
+    each NUL was two U+FFFD, and the count of fields read from them was 335,527,933.
+  - A class file's strings are now read as what they are, Java's modified UTF-8: a NUL of
+    two bytes, a character beyond the BMP as its two surrogates. 2,774 string constants in
+    2,544 classes of 22 of the pack's jars were wrong (2,632 with a NUL, 142 with a character
+    beyond the BMP): Kotlin's metadata (2,077), GuideME's tables (183), spark's schemas
+    (111), Ars Nouveau (41), YACL (27), Cloth Config (8). `String.codePointAt` and
+    `codePointBefore` give the character two surrogates make, and `codePointCount` and
+    `codePoints` are answered. The fixture reads a packed number as protobuf does
+    (`packedStrings`, six cases).
+  - Architectury's events call each listener through the `Method` of the listeners'
+    interface. For an interface of Java's own (`Consumer`, `Runnable`) the runtime asked the
+    API for that method and found none: FTB Library's, Teams', Chunks' and Quests' listeners
+    heard nothing (their setup, a team made, a player logged in). The object's own code
+    answers now, a lambda's or a mod class's.
+  - Written before the launch and in this build with it: a listing of resources reaches the
+    mods' own folders (the game's merged folder has `data/minecraft` alone, so every loader
+    that lists its `data/` files found none: "Loaded 0 curio slots"); a file a mod reads
+    through the resource manager that is neither an asset nor data comes from its jar
+    (Immersive Portals' shader list); a recipe type with no recipes when the manager's
+    table was made is read later.
+  - Small: Guava's `AtomicDouble`, `ModLoader.hasErrors`, `Object.wait`, a player's
+    `isFakePlayer`, `isRemoved`, `hasCustomName`, `getKillCredit`, `isInvisibleTo`, `getTags`
+    and `uuid` field, `hasPermissions` with nobody to ask (no operator, where it was a call
+    nothing maps), and `Minecraft.submit(Supplier)` gives the future of the supplier's
+    value.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
