@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 135] = [
+const COMPAT: [(&str, &str); 136] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
@@ -160,6 +160,7 @@ const COMPAT: [(&str, &str); 135] = [
     ("particles.rs", include_str!("../../horizon-compat/src/particles.rs")),
     ("records.rs", include_str!("../../horizon-compat/src/records.rs")),
     ("rotation.rs", include_str!("../../horizon-compat/src/rotation.rs")),
+    ("vanilla_block_states.rs", include_str!("../../horizon-compat/src/vanilla_block_states.rs")),
     ("vanilla_records.rs", include_str!("../../horizon-compat/src/vanilla_records.rs")),
     ("vanilla_shapes.rs", include_str!("../../horizon-compat/src/vanilla_shapes.rs")),
     ("functions.rs", include_str!("../../horizon-compat/src/functions.rs")),
@@ -1168,12 +1169,9 @@ fn client_host(c: &str, id: &str) -> String {
         fn held(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
             let game = self.game.get();
             let mut components: Vec<_> = game
-                .native_registered_components()
+                .native_stack_components(stack)
                 .into_iter()
-                .filter_map(|name| {{
-                    let tag = game.native_component(stack, name).ok()??;
-                    Some((name.to_owned(), to_nbt(tag)?))
-                }})
+                .filter_map(|(name, tag)| Some((name.to_owned(), to_nbt(tag)?)))
                 .collect();
             for (name, tag) in game.native_vanilla_components(stack) {{
                 components.extend(to_nbt(&tag).map(|n| (name.to_owned(), n)));
@@ -3020,11 +3018,10 @@ fn world_writes(c: &str) -> String {
                 stack
             }});
             let drops = self.game.native_block_loot(pos, state, tool.as_ref());
-            let types = self.game.native_registered_components();
             drops
                 .iter()
                 .map(|d| {{
-                    let components = types.iter().filter_map(|name| Some((name.to_string(), nbt(self.game.native_component(d, name).ok()??)?))).collect();
+                    let components = self.game.native_stack_components(d).into_iter().filter_map(|(name, tag)| Some((name.to_string(), nbt(tag)?))).collect();
                     {c}::host::HandStack {{ item: d.item.to_string(), count: d.count, damage: d.damage, max_damage: self.game.native_item_max_damage(&d.item), components }}
                 }})
                 .collect()
@@ -3930,12 +3927,9 @@ fn stack_helpers_on(c: &str, host: &str, on: &str) -> String {
         /// the vanilla components the runtime models (its enchantments).
         fn held_of(&self, stack: &horizon_client::items::ItemStack) -> {c}::host::HandStack {{
             let mut components: Vec<_> = {on}
-                .native_registered_components()
+                .native_stack_components(stack)
                 .into_iter()
-                .filter_map(|name| {{
-                    let tag = {on}.native_component(stack, name).ok()??;
-                    Some((name.to_owned(), Self::nbt_of(tag)?))
-                }})
+                .filter_map(|(name, tag)| Some((name.to_owned(), Self::nbt_of(tag)?)))
                 .collect();
             for (name, tag) in {on}.native_vanilla_components(stack) {{
                 components.extend(Self::nbt_of(&tag).map(|n| (name.to_owned(), n)));

@@ -100,9 +100,9 @@ impl Game<'_> {
     }
     fn hit_hand(&self, stack: &ItemStack) -> NativeHitHand {
         let mut components: Vec<(&'static str, Tag)> = self
-            .native_registered_components()
+            .native_stack_components(stack)
             .into_iter()
-            .filter_map(|name| Some((name, self.native_component(stack, name).ok()??.clone())))
+            .map(|(name, value)| (name, value.clone()))
             .collect();
         components.extend(self.native_vanilla_components(stack));
         NativeHitHand {

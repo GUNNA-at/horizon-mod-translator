@@ -527,51 +527,22 @@ fn ancestry_in(class: &str, declaring: &[&str]) -> Vec<&'static str> {
     names
 }
 
-/// The properties a vanilla block class adds in its own `createBlockStateDefinition`
-/// (`BlockStateProperties` fields), for a mod class that extends it.
-fn vanilla_definition(class: &str) -> &'static [&'static str] {
-    match class.rsplit('/').next().unwrap_or(class) {
-        "RotatedPillarBlock" => &["AXIS"],
-        "SlabBlock" => &["SLAB_TYPE", "WATERLOGGED"],
-        "StairBlock" | "WeatheringCopperStairBlock" => &["HORIZONTAL_FACING", "HALF", "STAIRS_SHAPE", "WATERLOGGED"],
-        "DoorBlock" => &["HORIZONTAL_FACING", "OPEN", "DOOR_HINGE", "POWERED", "DOUBLE_BLOCK_HALF"],
-        "TrapDoorBlock" => &["HORIZONTAL_FACING", "OPEN", "HALF", "POWERED", "WATERLOGGED"],
-        "LadderBlock" => &["HORIZONTAL_FACING", "WATERLOGGED"],
-        "IronBarsBlock" | "FenceBlock" => &["NORTH", "EAST", "WEST", "SOUTH", "WATERLOGGED"],
-        "WallBlock" => &["UP", "NORTH_WALL", "EAST_WALL", "WEST_WALL", "SOUTH_WALL", "WATERLOGGED"],
-        "FenceGateBlock" => &["HORIZONTAL_FACING", "OPEN", "POWERED", "IN_WALL"],
-        "ButtonBlock" => &["HORIZONTAL_FACING", "POWERED", "ATTACH_FACE"],
-        "LeverBlock" => &["ATTACH_FACE", "HORIZONTAL_FACING", "POWERED"],
-        "PressurePlateBlock" => &["POWERED"],
-        "WeightedPressurePlateBlock" => &["POWER"],
-        "ChainBlock" => &["WATERLOGGED", "AXIS"],
-        "LanternBlock" => &["HANGING", "WATERLOGGED"],
-        "WallTorchBlock" => &["HORIZONTAL_FACING"],
-        // Each class's `createBlockStateDefinition` as 1.21.1 writes it (only classes whose
-        // constructor defaults are `vanilla_default`'s: a campfire starts lit, an end rod faces up).
-        "BellBlock" => &["HORIZONTAL_FACING", "BELL_ATTACHMENT", "POWERED"],
-        "LecternBlock" => &["HORIZONTAL_FACING", "POWERED", "HAS_BOOK"],
-        "ScaffoldingBlock" => &["STABILITY_DISTANCE", "WATERLOGGED", "BOTTOM"],
-        "ChestBlock" | "TrappedChestBlock" => &["HORIZONTAL_FACING", "CHEST_TYPE", "WATERLOGGED"],
-        "BarrelBlock" => &["FACING", "OPEN"],
-        "HopperBlock" => &["FACING_HOPPER", "ENABLED"],
-        "AbstractFurnaceBlock" | "FurnaceBlock" | "SmokerBlock" | "BlastFurnaceBlock" => &["HORIZONTAL_FACING", "LIT"],
-        "AnvilBlock" | "StonecutterBlock" | "LoomBlock" | "CarvedPumpkinBlock" => &["HORIZONTAL_FACING"],
-        "GrindstoneBlock" => &["HORIZONTAL_FACING", "ATTACH_FACE"],
-        "StainedGlassPaneBlock" => &["NORTH", "EAST", "WEST", "SOUTH", "WATERLOGGED"],
-        "DispenserBlock" | "DropperBlock" => &["FACING", "TRIGGERED"],
-        "RepeaterBlock" => &["HORIZONTAL_FACING", "DELAY", "LOCKED", "POWERED"],
-        "ComparatorBlock" => &["HORIZONTAL_FACING", "MODE_COMPARATOR", "POWERED"],
-        "SnowLayerBlock" => &["LAYERS"],
-        "LeavesBlock" => &["DISTANCE", "PERSISTENT", "WATERLOGGED"],
-        "CropBlock" => &["AGE_7"],
-        "SaplingBlock" => &["STAGE"],
-        "BedBlock" => &["HORIZONTAL_FACING", "BED_PART", "OCCUPIED"],
-        "CakeBlock" => &["BITES"],
-        "CandleBlock" => &["CANDLES", "LIT", "WATERLOGGED"],
-        "FarmBlock" => &["MOISTURE"],
-        _ => &[],
-    }
+/// What Minecraft's block class `class` declares of its states, as its code does
+/// ([`crate::vanilla_block_states`], read from the game's jars): the `BlockStateProperties`
+/// fields of its definition, and the values its constructors register.
+fn vanilla_states(class: &str) -> Option<(&'static str, &'static str)> {
+    let simple = class.rsplit('/').next().unwrap_or(class);
+    let table = &crate::vanilla_block_states::BLOCK_STATES;
+    let at = table.binary_search_by(|(c, ..)| (*c).cmp(simple)).ok()?;
+    Some((table[at].1, table[at].2))
+}
+
+/// The properties vanilla block class `class`'s state definition holds (`BlockStateProperties`
+/// fields), its own and those of the classes above it: for a mod class that extends it.
+fn vanilla_definition(class: &str) -> Vec<&'static str> {
+    vanilla_states(class)
+        .map(|(fields, _)| fields.split(',').collect())
+        .unwrap_or_default()
 }
 
 /// Values of vanilla's `BlockStateProperties` fields, in Java's order (the first is the one
@@ -600,6 +571,58 @@ fn vanilla_values(field: &str) -> Option<Vec<String>> {
         "MODE_COMPARATOR" => list(&["compare", "subtract"]),
         "BELL_ATTACHMENT" => list(&["floor", "ceiling", "single_wall", "double_wall"]),
         "TILT" => list(&["none", "unstable", "partial", "full"]),
+        "BAMBOO_LEAVES" => list(&["none", "small", "large"]),
+        "DRIPSTONE_THICKNESS" => list(&["tip_merge", "tip", "frustum", "middle", "base"]),
+        "SCULK_SENSOR_PHASE" => list(&["inactive", "active", "cooldown"]),
+        "STRUCTUREBLOCK_MODE" => list(&["save", "load", "corner", "data"]),
+        "VAULT_STATE" => list(&["inactive", "active", "unlocking", "ejecting"]),
+        "TRIAL_SPAWNER_STATE" => list(&[
+            "inactive",
+            "waiting_for_players",
+            "active",
+            "waiting_for_reward_ejection",
+            "ejecting_reward",
+            "cooldown",
+        ]),
+        "ORIENTATION" => list(&[
+            "down_east",
+            "down_north",
+            "down_south",
+            "down_west",
+            "up_east",
+            "up_north",
+            "up_south",
+            "up_west",
+            "west_up",
+            "east_up",
+            "north_up",
+            "south_up",
+        ]),
+        "NOTEBLOCK_INSTRUMENT" => list(&[
+            "harp",
+            "basedrum",
+            "snare",
+            "hat",
+            "bass",
+            "flute",
+            "bell",
+            "guitar",
+            "chime",
+            "xylophone",
+            "iron_xylophone",
+            "cow_bell",
+            "didgeridoo",
+            "bit",
+            "banjo",
+            "pling",
+            "zombie",
+            "skeleton",
+            "creeper",
+            "dragon",
+            "wither_skeleton",
+            "piglin",
+            "custom_head",
+        ]),
         "RAIL_SHAPE" => list(&RAIL_SHAPES),
         "RAIL_SHAPE_STRAIGHT" => list(&RAIL_SHAPES[..6]),
         "AGE_1" => range(0, 1),
@@ -639,12 +662,21 @@ const RAIL_SHAPES: [&str; 10] = [
     "north_west", "north_east",
 ];
 
-/// The value vanilla class `class`'s constructor gives a property its definition adds (`DoorBlock`
-/// starts closed, unpowered, lower half; a wall with its post up), where `StateDefinition.any()`
-/// would take another.
+/// The value vanilla class `class`'s constructors give property `field` of its definition
+/// (`DoorBlock` starts closed, unpowered, lower half; a campfire lit; an end rod up), where
+/// `StateDefinition.any()` would take another; None for one they leave at its first value.
+/// For a class whose constructors' code the table could not read (a crop's age, asked of a
+/// method), and for a property a mod adds itself, what vanilla's constructors commonly give.
 fn vanilla_default(class: &str, field: &str) -> Option<&'static str> {
-    if class.rsplit('/').next() == Some("WallBlock") && field == "UP" {
-        return Some("true");
+    if let Some((fields, given)) = vanilla_states(class)
+        && given != "?"
+        && fields.split(',').any(|f| f == field)
+    {
+        return given
+            .split(',')
+            .filter_map(|g| g.split_once('='))
+            .find(|(f, _)| *f == field)
+            .map(|(_, v)| v);
     }
     Some(match field {
         "DOUBLE_BLOCK_HALF" => "lower",
@@ -3970,6 +4002,85 @@ mod tests {
         let reed = &declared["ruby:reed"];
         assert!(reed.contains("\"collision\": false") && !reed.contains("\"copy\""), "{reed}");
         assert!(reed.contains("\"template\": \"minecraft:glass\""), "{reed}");
+    }
+
+    /// A mod block of one of Minecraft's classes has the states that class declares and the
+    /// default its constructors register, as the game's own code has them: a redstone wall
+    /// torch faces north, lit; a coral fan starts in water; an end rod points up; a sign
+    /// stands at rotation 0, dry; a crop, whose age the table could not read, starts at 0.
+    #[test]
+    fn a_block_of_a_vanilla_class_has_that_classs_states_and_default() {
+        let mut rt = Rt::new();
+        let default_of = |rt: &mut Rt, class: &'static str, desc: &str, more: &[V]| {
+            let p = props(rt);
+            let b = rt.new_object("test/Block");
+            let mut args = vec![b];
+            args.extend_from_slice(more);
+            args.push(p);
+            let init = rt.static_key(&format!(
+                "net/minecraft/world/level/block/{class}.<init>.{desc}"
+            ));
+            api::call(rt, init, &args);
+            let d = api::call(
+                rt,
+                "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;",
+                &[b],
+            );
+            let text = rt.str_of(d).unwrap_or("").to_owned();
+            text[text.find('[').unwrap_or(text.len())..].to_owned()
+        };
+        const PLAIN: &str = "(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V";
+        assert_eq!(
+            default_of(&mut rt, "RedstoneWallTorchBlock", PLAIN, &[]),
+            "[facing=north,lit=true]"
+        );
+        assert_eq!(
+            default_of(&mut rt, "BaseCoralFanBlock", PLAIN, &[]),
+            "[waterlogged=true]"
+        );
+        assert_eq!(
+            default_of(&mut rt, "EndRodBlock", PLAIN, &[]),
+            "[facing=up]"
+        );
+        assert_eq!(
+            default_of(&mut rt, "CampfireBlock", PLAIN, &[]),
+            "[facing=north,lit=true,signal_fire=false,waterlogged=false]"
+        );
+        assert_eq!(default_of(&mut rt, "CropBlock", PLAIN, &[]), "[age=0]");
+        assert_eq!(
+            default_of(&mut rt, "HopperBlock", PLAIN, &[]),
+            "[enabled=true,facing=down]"
+        );
+        let oak = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/WoodType.OAK",
+        );
+        let sign = "(Lnet/minecraft/world/level/block/state/properties/WoodType;Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V";
+        assert_eq!(
+            default_of(&mut rt, "StandingSignBlock", sign, &[oak]),
+            "[rotation=0,waterlogged=false]"
+        );
+        // A class that declares none has none.
+        assert_eq!(default_of(&mut rt, "Block", PLAIN, &[]), "");
+        // The table is sorted, as it is searched; every row names fields the runtime knows.
+        let table = &crate::vanilla_block_states::BLOCK_STATES;
+        assert!(table.windows(2).all(|w| w[0].0 < w[1].0));
+        for (class, fields, given) in table {
+            for field in fields.split(',') {
+                assert!(
+                    vanilla_values(field).is_some(),
+                    "{class}: {field} has no values"
+                );
+            }
+            for (field, value) in given.split(',').filter_map(|g| g.split_once('=')) {
+                let values = vanilla_values(field).unwrap_or_default();
+                assert!(
+                    values.iter().any(|v| v == value),
+                    "{class}: {field} is never {value}"
+                );
+            }
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     #[test]

@@ -56,6 +56,17 @@ impl Game<'_> {
         remove_component(self.items(), stack, id)
     }
 
+    /// Every registered native component `stack` holds, by name, in the registered types'
+    /// order: its own, and its item's defaults that it neither patches nor removes, as
+    /// [`Self::native_component`] answers each. For a caller that wants them all: a pack's
+    /// mods register thousands of types, and a stack holds a few. API @API:stack_components@.
+    pub(super) fn native_stack_components<'a>(
+        &'a self,
+        stack: &'a ItemStack,
+    ) -> Vec<(&'static str, &'a Tag)> {
+        held_components(self.items(), stack)
+    }
+
     /// The vanilla components a translated mod's stacks carry beside the registered ones: the
     /// stack's enchantments and stored (book) enchantments, those it has, as vanilla's
     /// `components` map writes them, its custom data (`minecraft:custom_data`) and its potion
@@ -112,6 +123,13 @@ impl GameLevel<'_> {
     ) -> Result<(), NativeComponentError> {
         remove_component(self.items, stack, id)
     }
+    /// [`Game::native_stack_components`].
+    pub(super) fn native_stack_components<'a>(
+        &'a self,
+        stack: &'a ItemStack,
+    ) -> Vec<(&'static str, &'a Tag)> {
+        held_components(self.items, stack)
+    }
     /// [`Game::native_vanilla_components`].
     pub(super) fn native_vanilla_components(&self, stack: &ItemStack) -> Vec<(&'static str, Tag)> {
         vanilla_components(stack)
@@ -159,6 +177,33 @@ fn component<'a>(
     Ok(items
         .get(&stack.item)
         .and_then(|item| item.custom_components.get(id)))
+}
+
+/// Every registered component `stack` holds, in the registered types' order (by name): what
+/// [`component`] answers for each type, found from what the stack and its item have instead
+/// of by asking for every type.
+fn held_components<'a>(items: &'a Items, stack: &'a ItemStack) -> Vec<(&'static str, &'a Tag)> {
+    use horizon_protocol::item::custom;
+    let registered = |id: &str| custom::id(id).and_then(custom::name);
+    let own: &[(String, Tag)] = stack.data().map_or(&[], |data| data.other.as_slice());
+    let mut held: Vec<(&'static str, &Tag)> = own
+        .iter()
+        .filter(|(id, _)| !id.starts_with('!'))
+        .filter_map(|(id, value)| Some((registered(id)?, value)))
+        .collect();
+    if let Some(item) = items.get(&stack.item) {
+        for (id, value) in &item.custom_components {
+            // (A stack's own value, or its removal, stands before its item's default.)
+            let patched = own
+                .iter()
+                .any(|(o, _)| o == id || o.strip_prefix('!') == Some(id.as_str()));
+            if !patched && let Some(name) = registered(id) {
+                held.push((name, value));
+            }
+        }
+    }
+    held.sort_unstable_by_key(|(name, _)| *name);
+    held
 }
 
 /// Sets registered component `id` on `stack` within the network NBT limits; its item's default

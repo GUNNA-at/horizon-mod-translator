@@ -65,32 +65,64 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(capability(rt, class, name))
 }
 
-/// The registrations so far, four values each (kind, capability, key, provider).
-fn registrations(rt: &mut Rt) -> V {
-    rt.intern("compat:capability-providers".into(), |rt| rt.alloc("compat:list", Data::List(Vec::new())))
-}
+/// Under which a capability keeps what is registered for it, by [`Kind`]: a map from what a
+/// registration names ([`filed`]) to its providers, in the order they came. A lookup is a map
+/// read however many registrations there are (a pack registers tens of thousands, and AE2 asks
+/// of every block whether it has one).
+const BY_KIND: [&str; 4] = [
+    "$block-entity-providers",
+    "$block-providers",
+    "$item-providers",
+    "$entity-providers",
+];
 
-fn register(rt: &mut Rt, kind: Kind, cap: V, key: V, provider: V) {
-    let list = registrations(rt);
-    if let Some(Data::List(l)) = rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data) {
-        l.extend([V::I(kind as i32), cap, key, provider]);
+/// What a registration for `named` is filed under: a block's or an item's name as it is
+/// given, the registered name of a block entity type or an entity type (two objects of one
+/// name are one type), the object itself for a type that has none.
+fn filed(rt: &mut Rt, kind: Kind, named: V) -> V {
+    let name = match kind {
+        Kind::Block | Kind::Item => return named,
+        Kind::BlockEntity => rt
+            .registered_name(named, "block_entity_type")
+            .map(str::to_owned),
+        Kind::Entity => crate::mod_entities::type_id(rt, named).map(str::to_owned),
+    };
+    match name {
+        Some(name) => rt.string(&name),
+        None => named,
     }
 }
 
-fn entries(rt: &mut Rt) -> Vec<(Kind, V, V, V)> {
-    let list = registrations(rt);
-    let l = crate::jutil::elements(rt, list);
-    l.chunks(4)
-        .filter_map(|e| {
-            let kind = match e[0].i() {
-                0 => Kind::BlockEntity,
-                1 => Kind::Block,
-                2 => Kind::Item,
-                _ => Kind::Entity,
-            };
-            (e.len() == 4).then_some((kind, e[1], e[2], e[3]))
-        })
-        .collect()
+fn register(rt: &mut Rt, kind: Kind, cap: V, named: V, provider: V) {
+    if cap.r() == 0 {
+        return;
+    }
+    let at = filed(rt, kind, named);
+    let mut by = rt.get_field(cap, BY_KIND[kind as usize]);
+    if by.r() == 0 {
+        by = rt.alloc("java/util/HashMap", Data::Table(crate::Table::default()));
+        rt.put_field(cap, BY_KIND[kind as usize], by);
+    }
+    match crate::jutil::table_get(rt, by, at) {
+        Some(list) => crate::jutil::list_add(rt, list, provider),
+        None => {
+            let list = crate::jutil::new_list(rt, vec![provider]);
+            crate::jutil::table_put(rt, by, at, list);
+        }
+    }
+}
+
+/// The providers registered under capability `cap` for what is filed at `at` ([`filed`]), in
+/// the order they came.
+fn providers(rt: &mut Rt, kind: Kind, cap: V, at: V) -> Vec<V> {
+    let by = rt.get_field(cap, BY_KIND[kind as usize]);
+    if by.r() == 0 || at.r() == 0 {
+        return Vec::new();
+    }
+    match crate::jutil::table_get(rt, by, at) {
+        Some(list) => crate::jutil::elements(rt, list),
+        None => Vec::new(),
+    }
 }
 
 /// Fires `RegisterCapabilitiesEvent` once (the mod's listeners register their providers).
@@ -144,10 +176,8 @@ fn find_block(rt: &mut Rt, cap: V, level: V, pos: V, state: V, be: V, side: V) -
     {
         return h;
     }
-    for (kind, c, key, provider) in entries(rt) {
-        if kind != Kind::Block || c != cap || api::block_name(rt, key) != block {
-            continue;
-        }
+    let of = rt.string(&block);
+    for provider in providers(rt, Kind::Block, cap, of) {
         let r = rt.call_functional(BLOCK_PROVIDER, provider, &[level, pos, state, be, side]);
         rt.report_thrown("getCapability");
         if r.r() != 0 {
@@ -158,11 +188,8 @@ fn find_block(rt: &mut Rt, cap: V, level: V, pos: V, state: V, be: V, side: V) -
         return V::NULL;
     }
     let ty = rt.get_field(be, "$type");
-    for (kind, c, key, provider) in entries(rt) {
-        let same_type = key == ty || rt.registered_name(key, "block_entity_type").is_some_and(|n| rt.registered_name(ty, "block_entity_type") == Some(n));
-        if kind != Kind::BlockEntity || c != cap || !same_type {
-            continue;
-        }
+    let of = filed(rt, Kind::BlockEntity, ty);
+    for provider in providers(rt, Kind::BlockEntity, cap, of) {
         let r = rt.call_functional(PROVIDER, provider, &[be, side]);
         rt.report_thrown("getCapability");
         if r.r() != 0 {
@@ -190,10 +217,8 @@ fn find_item(rt: &mut Rt, cap: V, stack: V, context: V) -> V {
     }
     let item = rt.get_field(stack, "$item");
     let name = crate::api_common::item_like_name(rt, item);
-    for (kind, c, key, provider) in entries(rt) {
-        if kind != Kind::Item || c != cap || rt.str_of(key) != Some(name.as_str()) {
-            continue;
-        }
+    let of = rt.string(&name);
+    for provider in providers(rt, Kind::Item, cap, of) {
         let r = rt.call_functional(PROVIDER, provider, &[stack, context]);
         rt.report_thrown("getCapability");
         if r.r() != 0 {
@@ -222,10 +247,12 @@ fn find_entity(rt: &mut Rt, cap: V, entity: V, context: V) -> V {
         return crate::item_wrappers::player_handler(rt, entity);
     }
     let ty = crate::damage::entity_type_name(rt, entity);
-    for (kind, c, key, provider) in entries(rt) {
-        if kind != Kind::Entity || c != cap || ty.is_empty() || crate::mod_entities::type_id(rt, key) != Some(ty.as_str()) {
-            continue;
-        }
+    let of = if ty.is_empty() {
+        V::NULL
+    } else {
+        rt.string(&ty)
+    };
+    for provider in providers(rt, Kind::Entity, cap, of) {
         let r = rt.call_functional(PROVIDER, provider, &[entity, context]);
         rt.report_thrown("getCapability");
         if r.r() != 0 {
@@ -276,8 +303,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (EVENT, "registerBlock") => {
             for b in crate::jutil::elements(rt, a(3)) {
                 let n = api::block_name(rt, b);
-                let named = api::block(rt, &n);
-                register(rt, Kind::Block, a(1), named, a(2));
+                let of = rt.string(&n);
+                register(rt, Kind::Block, a(1), of, a(2));
             }
             V::Void
         }
@@ -305,15 +332,8 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             };
             // NeoForge registers the cauldrons' own before any mod's listener runs.
             let cauldron = kind == Kind::Block && named(rt, a(1), FLUID_HANDLER) && crate::fluid_wrappers::is_cauldron(rt, &wanted);
-            let found = cauldron || entries(rt).into_iter().any(|(k, c, key, _)| {
-                k == kind
-                    && c == a(1)
-                    && match kind {
-                        Kind::Block => api::block_name(rt, key) == wanted,
-                        Kind::Item => rt.str_of(key) == Some(wanted.as_str()),
-                        _ => key == a(2),
-                    }
-            });
+            let asked = if kind == Kind::Entity { filed(rt, kind, a(2)) } else { rt.string(&wanted) };
+            let found = cauldron || !providers(rt, kind, a(1), asked).is_empty();
             V::I(found as i32)
         }
         // `level.getCapability(cap, pos, side)` and `(cap, pos, state, blockEntity, side)`.
@@ -408,6 +428,81 @@ mod tests {
         let cache = api::call(&mut rt, create, &[cap, level, at, up]);
         let got = rt.with_host(&mut host, |rt| api::call(rt, "net/neoforged/neoforge/capabilities/BlockCapabilityCache.getCapability.()Ljava/lang/Object;", &[cache]));
         assert_eq!(got, slots);
+    }
+
+    /// A capability registered for blocks is found at one of them, its providers asked in the
+    /// order they were registered; the event says for which blocks, items and entity types
+    /// there is one, whatever else is registered.
+    #[test]
+    fn a_capability_registered_for_a_block_is_found_among_many() {
+        const REGISTER: &str = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent.registerBlock.(Lnet/neoforged/neoforge/capabilities/BlockCapability;Lnet/neoforged/neoforge/capabilities/IBlockCapabilityProvider;[Lnet/minecraft/world/level/block/Block;)V";
+        const IS_BLOCK: &str = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent.isBlockRegistered.(Lnet/neoforged/neoforge/capabilities/BlockCapability;Lnet/minecraft/world/level/block/Block;)Z";
+        const IS_ENTITY: &str = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent.isEntityRegistered.(Lnet/neoforged/neoforge/capabilities/EntityCapability;Lnet/minecraft/world/entity/EntityType;)Z";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(providers);
+        let energy = api::get_static(
+            &mut rt,
+            "net/neoforged/neoforge/capabilities/Capabilities$EnergyStorage.BLOCK",
+        );
+        let fluid = api::get_static(
+            &mut rt,
+            "net/neoforged/neoforge/capabilities/Capabilities$FluidHandler.BLOCK",
+        );
+        let ev = rt.new_object(EVENT);
+        let blocks = |rt: &mut Rt, names: &[&str]| {
+            let all = names.iter().map(|n| api::block(rt, n)).collect();
+            rt.alloc("[Lnet/minecraft/world/level/block/Block;", Data::Array(all))
+        };
+        // A provider that answers nothing, then a battery's, for two blocks; other blocks have
+        // providers of their own.
+        let nothing = rt.lambda_id("test/Provider", 1, vec![]);
+        let battery = rt.new_object("test/Battery");
+        let gives_battery = rt.lambda_id("test/Provider", 1, vec![battery]);
+        let cells = blocks(&mut rt, &["test:cell", "test:big_cell"]);
+        api::call(&mut rt, REGISTER, &[ev, energy, nothing, cells]);
+        api::call(&mut rt, REGISTER, &[ev, energy, gives_battery, cells]);
+        for i in 0..50 {
+            let other = rt.new_object("test/Other");
+            let gives_other = rt.lambda_id("test/Provider", 1, vec![other]);
+            let one = blocks(&mut rt, &[&format!("test:machine_{i}")]);
+            api::call(&mut rt, REGISTER, &[ev, energy, gives_other, one]);
+        }
+        let asked = |rt: &mut Rt, cap: V, name: &str| {
+            let block = api::block(rt, name);
+            api::call(rt, IS_BLOCK, &[ev, cap, block])
+        };
+        assert_eq!(asked(&mut rt, energy, "test:big_cell"), V::I(1));
+        assert_eq!(asked(&mut rt, energy, "test:machine_49"), V::I(1));
+        assert_eq!(asked(&mut rt, energy, "minecraft:stone"), V::I(0));
+        assert_eq!(asked(&mut rt, fluid, "test:big_cell"), V::I(0));
+        let zombie = crate::mod_entities::vanilla_type(&mut rt, "minecraft:zombie");
+        let items = api::get_static(
+            &mut rt,
+            "net/neoforged/neoforge/capabilities/Capabilities$ItemHandler.ENTITY",
+        );
+        assert_eq!(api::call(&mut rt, IS_ENTITY, &[ev, items, zombie]), V::I(0));
+        let register_entity = "net/neoforged/neoforge/capabilities/RegisterCapabilitiesEvent.registerEntity.(Lnet/neoforged/neoforge/capabilities/EntityCapability;Lnet/minecraft/world/entity/EntityType;Lnet/neoforged/neoforge/capabilities/ICapabilityProvider;)V";
+        api::call(&mut rt, register_entity, &[ev, items, zombie, nothing]);
+        assert_eq!(api::call(&mut rt, IS_ENTITY, &[ev, items, zombie]), V::I(1));
+
+        let mut host = MemoryHost::default();
+        host.blocks.insert([0, 64, 0], "test:big_cell".into());
+        host.blocks.insert([1, 64, 0], "test:machine_7".into());
+        let get = "net/minecraft/world/level/Level.getCapability.(Lnet/neoforged/neoforge/capabilities/BlockCapability;Lnet/minecraft/core/BlockPos;Ljava/lang/Object;)Ljava/lang/Object;";
+        let up = api::direction(&mut rt, 1);
+        let (at, beside) = (
+            api::block_pos(&mut rt, 0, 64, 0),
+            api::block_pos(&mut rt, 1, 64, 0),
+        );
+        let level = rt.new_object("net/minecraft/server/level/ServerLevel");
+        rt.with_host(&mut host, |rt| {
+            assert_eq!(api::call(rt, get, &[level, energy, at, up]), battery);
+            let other = api::call(rt, get, &[level, energy, beside, up]);
+            assert_eq!(rt.class_of(other), "test/Other");
+            assert_eq!(api::call(rt, get, &[level, fluid, at, up]), V::NULL);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// An entity's capability: the providers registered for its type, in order, the first that

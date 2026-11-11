@@ -10883,6 +10883,38 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     directory renames a file with it; GuideME's index stopped at "File was unexpectedly
     replaced"). A task given to the client's thread while the mods load waits until the
     client's resources are there to read (Immersive Portals reads a shader's text in one).
+- [x] 2026-11-11 Part 188: where the window's ticks went; the states of Minecraft's block classes.
+  - In launch 21 the window made 398 ticks and 257 frames in 20 s, 18.5 s of them in the
+    mods' hooks: 30 ms a tick and 20 ms of GUI layers a frame. A sample of its thread, named
+    with an unstripped link, puts two thirds of that in two places.
+  - A third in capability lookups. Every registration was kept in one list, and a lookup
+    copied the list and went through all of it, comparing block names; the pack registers
+    tens of thousands, and AE2 asks of every block whether it has one, which took 30 s of
+    the load. A capability now keeps what is registered for it by what the registration
+    names (a block's or an item's name, a type's registered name), and a lookup is a map
+    read.
+  - A third in reading stacks. For each stack the generated host asked the game for every
+    registered component type in turn, thousands of them, each a search and a formatted
+    string; one read of a player's inventory did that 36 times, and Curios, Create Jetpack
+    and Auto Pickup Filter read it every tick. The game has a native that lists what a stack
+    holds (`native_stack_components`: its own components, and its item's defaults it does not
+    patch or remove), and the hosts ask that.
+  - A mod's block that extends one of Minecraft's has that class's states. The table of what
+    each class puts in its definition was written by hand for 47 classes; a block of any
+    other class had no properties (FramedBlocks' redstone wall torch read its `facing` as
+    null). `tools/vanilla_block_states.py` reads them from the game's jars for every block
+    class, 179 with states: the fields a class's `createBlockStateDefinition` hands the
+    builder, with those of the classes above where it calls theirs, and the values its
+    constructors register (`registerDefaultState` from `any()` or from the default above).
+    All 47 hand rows agree with it. In this pack 120 block classes of 42 more vanilla
+    classes get their states: 21 liquids their level, 24 signs their rotation or facing,
+    rails, double plants, vines, skulls. The defaults are the constructors' own too: a
+    campfire is lit, a coral fan in water, an end rod up, where a rule of thumb gave false
+    and north.
+  - With `HORIZON_COMPAT_PROFILE` each thread tells its heap by class with its costs. The
+    game's footprint peaked at 28 GB in launch 21, 21 GB of it compressed, as the world
+    opened; 14 GB in the world. An object's fields are a hash map each, which is where to
+    look first.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

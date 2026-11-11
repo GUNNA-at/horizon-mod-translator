@@ -1176,7 +1176,7 @@ pub fn vanilla_property(field: &str) -> Option<(String, &'static str)> {
         "MODE_COMPARATOR" | "STRUCTUREBLOCK_MODE" | "TEST_BLOCK_MODE" => "mode".to_owned(),
         "BELL_ATTACHMENT" => "attachment".to_owned(),
         "NOTEBLOCK_INSTRUMENT" => "instrument".to_owned(),
-        "SPELEOTHEM_THICKNESS" => "thickness".to_owned(),
+        "SPELEOTHEM_THICKNESS" | "DRIPSTONE_THICKNESS" => "thickness".to_owned(),
         "SIDE_CHAIN_PART" => "side_chain".to_owned(),
         "DRIED_GHAST_HYDRATION_LEVELS" => "hydration".to_owned(),
         "LEVEL_HONEY" => "honey_level".to_owned(),

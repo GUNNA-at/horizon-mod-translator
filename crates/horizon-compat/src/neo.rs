@@ -451,6 +451,7 @@ pub fn profiled<R>(rt: &mut Rt, hook: &'static str, f: impl FnOnce(&mut Rt) -> R
         Some(told) if told.elapsed() >= PROFILE_EVERY => {
             COSTS_TOLD.with(|t| t.set(Some(std::time::Instant::now())));
             tell_costs(told.elapsed());
+            tell_heap(rt);
         }
         Some(_) => {}
     }
@@ -482,6 +483,30 @@ fn tell_costs(over: std::time::Duration) {
             took.as_secs_f64() * 1e3
         );
     }
+}
+
+/// With a thread's costs: what its runtime's heap holds, garbage and all, by the classes that
+/// take the most (objects, megabytes with what each object's data owns), and how many of its
+/// slots are free.
+fn tell_heap(rt: &Rt) {
+    let census = crate::api::census(rt);
+    let (objects, bytes) = census
+        .values()
+        .fold((0u64, 0u64), |t, v| (t.0 + v.0, t.1 + v.1));
+    let mut by: Vec<_> = census.into_iter().collect();
+    by.sort_by_key(|c| std::cmp::Reverse(c.1.1));
+    let top: Vec<String> = by
+        .iter()
+        .take(14)
+        .map(|(class, (n, b))| format!("{class} {n} {}M", b >> 20))
+        .collect();
+    eprintln!(
+        "    heap {objects} objects {} MB, {} slots ({} MB of slots)\n    most: {}",
+        bytes >> 20,
+        rt.heap.len(),
+        (rt.heap.len() * std::mem::size_of::<crate::Object>()) >> 20,
+        top.join(", ")
+    );
 }
 
 /// What the name of a place in a method the runtime runs itself starts with: a mixin's static

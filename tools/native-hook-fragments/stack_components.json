@@ -1,0 +1,8 @@
+{
+  "hooks": [],
+  "rust_summary": "the registered components a stack holds (`native_stack_components`).",
+  "doc_summary": "`native_stack_components(stack)` gives every registered component the stack holds, by name, in the registered types' order: its own, and its item's defaults that it neither patches nor removes, as `native_component` answers each. A caller that wants them all need not ask for every registered type. Bundles need \"hooks\": @API:stack_components@.",
+  "comments": [
+    "crates/horizon-client/src/game/native_components.rs"
+  ]
+}

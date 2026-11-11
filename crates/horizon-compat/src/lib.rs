@@ -138,6 +138,7 @@ pub mod tags;
 pub mod tanks;
 pub mod vanilla_classes;
 pub mod vanilla_effects;
+pub mod vanilla_block_states;
 pub mod vanilla_records;
 pub mod vanilla_shapes;
 pub mod vanilla_sounds;
