@@ -119,6 +119,35 @@ pub(crate) fn allocate(rt: &mut Rt, capacity: i32) -> V {
     )
 }
 
+/// A buffer over `bytes`, ready to be read from its start (`ByteBuffer.wrap`).
+pub(crate) fn of_bytes(rt: &mut Rt, bytes: &[i8]) -> V {
+    let capacity = bytes.len() as i32;
+    let array = rt.alloc(
+        "[B",
+        Data::Array(bytes.iter().map(|&b| V::I(i32::from(b))).collect()),
+    );
+    make(
+        rt,
+        Buf {
+            array,
+            offset: 0,
+            position: 0,
+            limit: capacity,
+            capacity,
+            mark: -1,
+            little: false,
+            read_only: false,
+        },
+    )
+}
+
+/// The bytes buffer `b` has left to read, from its position to its limit, the buffer left as
+/// it is. None for what is no buffer.
+pub(crate) fn left_to_read(rt: &Rt, b: V) -> Option<Vec<i8>> {
+    let s = state(rt, b)?;
+    Some(remaining(rt, &s).into_iter().map(|b| b as i8).collect())
+}
+
 fn throw(rt: &mut Rt, class: &'static str) -> V {
     rt.throw_new(class);
     V::Void

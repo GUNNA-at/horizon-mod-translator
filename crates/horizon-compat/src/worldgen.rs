@@ -462,7 +462,7 @@ pub(crate) fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
 /// The fluids the game's tags put in fluid tag `tag` (`c:water`): the game tells of a fluid
 /// whether it is in a tag, so each is asked, vanilla's four and then the mods', by name.
 /// (Mekanism makes a recipe's fluid ingredient of a tag's fluids, and found every tag empty.)
-fn fluid_tag_members(rt: &mut Rt, tag: &str) -> Vec<String> {
+pub(crate) fn fluid_tag_members(rt: &mut Rt, tag: &str) -> Vec<String> {
     let key = crate::fluids::tag_key(rt, "fluid", tag);
     let mut ids: Vec<String> = [
         "minecraft:water",

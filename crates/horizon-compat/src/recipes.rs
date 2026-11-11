@@ -589,20 +589,18 @@ fn sized_fluid(rt: &mut Rt, ingredient: V, amount: i32) -> V {
     o
 }
 
-/// The fluids a fluid ingredient names: its fluids, and its tags' as far as this runtime knows them.
+/// The fluids a fluid ingredient names: its fluids, and those its tags hold, the game's and the
+/// mods' ([`crate::worldgen::fluid_tag_members`]).
 fn fluid_ingredient_fluids(rt: &mut Rt, ingredient: V) -> Vec<V> {
     let mut out = Vec::new();
     for e in entries(rt, ingredient) {
-        if let Some(tag) = e.strip_prefix('#') {
-            let key = fluids::tag_key(rt, "fluid", tag);
-            for name in ["minecraft:water", "minecraft:lava"] {
-                if fluids::in_tag(rt, key, name) {
-                    out.push(fluids::fluid(rt, name));
-                }
-            }
-        } else {
-            let f = fluids::fluid(rt, &e);
-            if f.r() != 0 {
+        let names = match e.strip_prefix('#') {
+            Some(tag) => crate::worldgen::fluid_tag_members(rt, tag),
+            None => vec![e],
+        };
+        for name in names {
+            let f = fluids::fluid(rt, &name);
+            if f.r() != 0 && !out.contains(&f) {
                 out.push(f);
             }
         }

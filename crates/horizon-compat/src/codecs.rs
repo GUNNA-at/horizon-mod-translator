@@ -134,7 +134,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     Some(match (owner, field) {
         // `PrimitiveCodec.INT` is `Codec.INT`, the interface's constant reached through its own.
         ("com/mojang/serialization/Codec" | "com/mojang/serialization/codecs/PrimitiveCodec", f) => match f {
-            "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" | "LONG_STREAM" => prim(rt, &f.to_ascii_lowercase()),
+            "INT" | "LONG" | "FLOAT" | "DOUBLE" | "BOOL" | "STRING" | "BYTE" | "SHORT" | "INT_STREAM" | "LONG_STREAM" | "BYTE_BUFFER" => prim(rt, &f.to_ascii_lowercase()),
             "PASSTHROUGH" => native(rt, "passthrough"),
             // `Codec.EMPTY`: a map codec of no field, whose value is DFU's `Unit`.
             "EMPTY" => {
@@ -773,6 +773,17 @@ fn primitive(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
                 let ns: Option<Vec<V>> = items.iter().map(|x| x.as_i64().map(|i| if long { V::J(i) } else { V::I(i as i32) })).collect();
                 let ns = ns.ok_or_else(|| format!("Not a list of numbers: {j}"))?;
                 rt.alloc(if long { "java/util/stream/LongStream" } else { "java/util/stream/IntStream" }, Data::Stream(ns))
+            }
+            _ => return Err(format!("Not a list: {j}")),
+        },
+        // `Codec.BYTE_BUFFER`: a list of bytes, read as a `ByteBuffer` over them (Create Ore
+        // Excavation packs a vein's blocks into one).
+        "byte_buffer" => match j {
+            Json::Array(items) => {
+                let bytes: Option<Vec<i8>> =
+                    items.iter().map(|x| x.as_i64().map(|i| i as i8)).collect();
+                let bytes = bytes.ok_or_else(|| format!("Not a list of numbers: {j}"))?;
+                crate::nio::of_bytes(rt, &bytes)
             }
             _ => return Err(format!("Not a list: {j}")),
         },
@@ -1462,6 +1473,11 @@ fn serialized_name(rt: &mut Rt, v: V) -> Result<String, String> {
 fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
     if name == "string" {
         return rt.str_of(v).map(|s| Nbt::String(s.to_owned())).ok_or_else(|| "Not a string".to_owned());
+    }
+    if name == "byte_buffer" {
+        return crate::nio::left_to_read(rt, v)
+            .map(Nbt::ByteArray)
+            .ok_or_else(|| "Not a byte buffer".to_owned());
     }
     if name == "int_stream" || name == "long_stream" {
         return match rt.heap.get(v.r() as usize).map(|o| &o.data) {
@@ -2672,6 +2688,28 @@ mod tests {
     /// is read, or given as an angle about an axis. The bits are what a JVM with JOML 1.10.5 gives
     /// for `new Quaternionf(.1f, .2f, .3f, .4f).normalize()` and `new Quaternionf(new
     /// AxisAngle4f(angle, new Vector3f(0, .6f, .8f)))`.
+    /// `Codec.BYTE_BUFFER` reads a list of bytes as a buffer over them, ready to be read from
+    /// its start, and writes what a buffer has left to read as a byte array.
+    #[test]
+    fn a_byte_buffer_reads_from_a_list_of_bytes() {
+        crate::install();
+        let mut rt = Rt::new();
+        let codec = get_static(&mut rt, "com/mojang/serialization/Codec", "BYTE_BUFFER").unwrap();
+        let buffer = decode(&mut rt, codec, &serde_json::json!([1, -2, 127, 200])).unwrap();
+        assert_eq!(rt.class_of(buffer), "java/nio/ByteBuffer");
+        let c = |rt: &mut Rt, key: &'static str| crate::api::call(rt, key, &[buffer]);
+        assert_eq!(c(&mut rt, "java/nio/ByteBuffer.remaining.()I"), V::I(4));
+        assert_eq!(c(&mut rt, "java/nio/ByteBuffer.get.()B"), V::I(1));
+        assert_eq!(c(&mut rt, "java/nio/ByteBuffer.get.()B"), V::I(-2));
+        // What is left: 127 and 200 as a byte.
+        assert_eq!(
+            encode(&mut rt, codec, buffer),
+            Ok(Nbt::ByteArray(vec![127, -56]))
+        );
+        assert!(decode(&mut rt, codec, &serde_json::json!("bytes")).is_err());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// `ExtraCodecs.TAG_OR_ELEMENT_ID` reads an entry's id or, after `#`, a tag's, as vanilla's
     /// record of the two, and writes it back as it was (Simulated's search aliases list them:
     /// unanswered, each of its alias files failed to parse).
