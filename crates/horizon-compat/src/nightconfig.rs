@@ -268,6 +268,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "setInsertionOrderPreserved" => Some(V::Void),
         "isInsertionOrderPreserved" => Some(V::I(1)),
         "inMemory" | "inMemoryUniversal" | "inMemoryConcurrent" | "inMemoryUniversalConcurrent" => Some(new_config(rt, config_class, None)),
+        // `TomlFormat.newConfig()` and `newConfig(mapCreator)` (the concurrent ones too): an
+        // empty config of the format's kind. (Moonlight makes the default of a config entry
+        // that holds an object in one: unanswered, the default was null and the whole file
+        // could not be written, "TOML doesn't support null values".)
+        "newConfig" | "newConcurrentConfig" if owner.ends_with("Format") => {
+            let map = if desc.starts_with("(Ljava/util/function/Supplier;") {
+                Some(rt.call_functional(SUPPLIER, a(0), &[]))
+            } else {
+                None
+            };
+            let c = new_config(rt, config_class, map);
+            let f = format(rt, owner);
+            rt.put_field(c, "$format", f);
+            Some(c)
+        }
         // `Config.of(mapCreator, format)`, `Config.of(format)`, `Config.wrap(map, format)`.
         "of" | "wrap" if owner.ends_with("core/Config") || owner.ends_with("core/CommentedConfig") => {
             let map = if desc.starts_with("(Ljava/util/function/Supplier;") {
@@ -499,6 +514,53 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Moonlight's way (Amendments' configs): the default of an entry that holds an object is a
+    /// config its format makes, `TomlFormat.newConfig()`: empty, of its own, and taking values.
+    #[test]
+    fn a_format_makes_an_empty_config_of_its_own() {
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        const NEW: &str = "com/electronwill/nightconfig/toml/TomlFormat.newConfig.()Lcom/electronwill/nightconfig/core/CommentedConfig;";
+        const SIZE: &str = "com/electronwill/nightconfig/core/Config.size.()I";
+        let made = c(&mut rt, NEW, &[]);
+        assert_ne!(made, V::NULL);
+        assert_eq!(c(&mut rt, SIZE, &[made]), V::I(0));
+        let (key, value) = (rt.string("fluid.color"), rt.string("red"));
+        c(
+            &mut rt,
+            "com/electronwill/nightconfig/core/Config.set.(Ljava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[made, key, value],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/electronwill/nightconfig/core/Config.get.(Ljava/lang/String;)Ljava/lang/Object;",
+                &[made, key]
+            ),
+            value
+        );
+        assert_eq!(c(&mut rt, SIZE, &[made]), V::I(1));
+        let other = c(&mut rt, NEW, &[]);
+        assert_ne!(other, made);
+        assert_eq!(c(&mut rt, SIZE, &[other]), V::I(0));
+        // Its format is the one that made it.
+        let format = c(
+            &mut rt,
+            "com/electronwill/nightconfig/toml/TomlFormat.instance.()Lcom/electronwill/nightconfig/toml/TomlFormat;",
+            &[],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/electronwill/nightconfig/core/Config.configFormat.()Lcom/electronwill/nightconfig/core/ConfigFormat;",
+                &[made]
+            ),
+            format
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// SpectreLib's way (comforts): a config of the default map creator, values set by path lists
     /// and dotted strings into nested configs, read back with defaults for what isn't there; an enum
