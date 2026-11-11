@@ -2050,6 +2050,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     {
         return Some(v);
     }
+    // A `DeferredRegister`'s `entries`, put into by a mixin's own code: registered too.
+    if matches!(name, "put" | "putIfAbsent")
+        && owner == "java/util/Map"
+        && rt.get_field(this, crate::api::DEFERRED_ENTRIES).r() != 0
+    {
+        crate::api::deferred_entry(rt, this, a(1), a(2));
+    }
     let data_kind = rt.heap.get(this.r() as usize).map(|o| match &o.data {
         Data::List(_) => 'l',
         Data::Table(_) => 't',
@@ -3186,8 +3193,225 @@ fn arrays_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::I(h)
         }
+        // What the JDK's own code does not stand for here (`toString` and a search among
+        // numbers it does): the arrays within an array written, compared and hashed as arrays.
+        "deepToString" => {
+            let text = deep_text(rt, a(0), 0);
+            rt.string(&text)
+        }
+        "deepEquals" => V::I(deep_equals(rt, a(0), a(1), 0) as i32),
+        "deepHashCode" => V::I(deep_hash(rt, a(0), 0)),
+        // `binarySearch(objects, key)`, `(objects, from, to, key)`, each with a comparator
+        // after: where the key is in the sorted array, else `-(where it would go) - 1`.
+        "binarySearch" if matches!(elem, 'L' | '[') => {
+            let all = items(rt, a(0))?;
+            let ranged = crate::jlang::kinds(desc).get(1) == Some(&'I');
+            let (from, to, key) = if ranged {
+                (a(1).i(), a(2).i(), a(3))
+            } else {
+                (0, all.len() as i32, a(1))
+            };
+            let comparator = if ranged { a(4) } else { a(2) };
+            let Some((from, to)) = range(rt, from, to, all.len()) else {
+                return Some(V::I(0));
+            };
+            let (mut low, mut high) = (from as i64, to as i64 - 1);
+            while low <= high {
+                let mid = ((low + high) as u64 >> 1) as usize;
+                let order = compare(rt, comparator, all[mid], key).cmp(&0);
+                if rt.thrown.is_some() {
+                    return Some(V::I(0));
+                }
+                match order {
+                    std::cmp::Ordering::Less => low = mid as i64 + 1,
+                    std::cmp::Ordering::Greater => high = mid as i64 - 1,
+                    std::cmp::Ordering::Equal => return Some(V::I(mid as i32)),
+                }
+            }
+            V::I(-(low as i32 + 1))
+        }
+        // The first index at which two arrays differ (the shorter one's length when one starts
+        // with the other), -1 for none; `compare` orders them by that element, then by length.
+        "mismatch" | "compare" | "compareUnsigned"
+            if args.len() == 2 || (args.len() == 3 && matches!(elem, 'L' | '[')) =>
+        {
+            if name != "mismatch" && (a(0).r() == 0 || a(1).r() == 0) {
+                return Some(V::I(i32::from(a(0).r() != 0) - i32::from(a(1).r() != 0)));
+            }
+            let (x, y) = (items(rt, a(0))?, items(rt, a(1))?);
+            let comparator = a(2);
+            let shared = x.len().min(y.len());
+            let mut at = None;
+            for i in 0..shared {
+                let same = match elem {
+                    'L' | '[' if name == "mismatch" && comparator.r() == 0 => {
+                        (x[i].r() == 0 && y[i].r() == 0)
+                            || (x[i].r() != 0 && equals(rt, x[i], y[i]))
+                    }
+                    'L' | '[' => compare(rt, comparator, x[i], y[i]) == 0,
+                    _ => bits(x[i]) == bits(y[i]),
+                };
+                if !same {
+                    at = Some(i);
+                    break;
+                }
+            }
+            match (name, at) {
+                ("mismatch", Some(i)) => V::I(i as i32),
+                ("mismatch", None) if x.len() == y.len() => V::I(-1),
+                ("mismatch", None) => V::I(shared as i32),
+                (_, None) => V::I(x.len() as i32 - y.len() as i32),
+                (_, Some(i)) => V::I(match elem {
+                    'L' | '[' => compare(rt, comparator, x[i], y[i]),
+                    'F' => java_double_cmp(f64::from(x[i].f()), f64::from(y[i].f())) as i32,
+                    'D' => java_double_cmp(x[i].d(), y[i].d()) as i32,
+                    'J' if name == "compareUnsigned" => {
+                        (x[i].j() as u64).cmp(&(y[i].j() as u64)) as i32
+                    }
+                    'J' => x[i].j().cmp(&y[i].j()) as i32,
+                    'B' if name == "compareUnsigned" => (x[i].i() & 0xff) - (y[i].i() & 0xff),
+                    'S' if name == "compareUnsigned" => (x[i].i() & 0xffff) - (y[i].i() & 0xffff),
+                    'Z' => i32::from(x[i].i() != 0) - i32::from(y[i].i() != 0),
+                    'B' | 'S' | 'C' => x[i].i() - y[i].i(),
+                    _ if name == "compareUnsigned" => {
+                        (x[i].i() as u32).cmp(&(y[i].i() as u32)) as i32
+                    }
+                    _ => x[i].i().cmp(&y[i].i()) as i32,
+                }),
+            }
+        }
         _ => return None,
     })
+}
+
+/// An array's element as `Arrays.toString` writes it: `elem` is its kind in the array's
+/// descriptor (an `int`, a `char` and a `boolean` are all held as ints).
+fn element_text(rt: &mut Rt, elem: char, v: V) -> String {
+    let key = match elem {
+        'I' | 'B' | 'S' => return v.i().to_string(),
+        'J' => return v.j().to_string(),
+        'Z' => return (v.i() != 0).to_string(),
+        'C' => return String::from_utf16_lossy(&[v.i() as u16]),
+        'F' => "java/lang/String.valueOf.(F)Ljava/lang/String;",
+        'D' => "java/lang/String.valueOf.(D)Ljava/lang/String;",
+        _ => "java/lang/String.valueOf.(Ljava/lang/Object;)Ljava/lang/String;",
+    };
+    let text = crate::api::call(rt, key, &[v]);
+    rt.str_of(text).unwrap_or("null").to_owned()
+}
+
+/// The kind of the elements an array object holds, by its class (`[I`); a reference's where
+/// the class doesn't say.
+fn element_kind(rt: &Rt, array: V) -> char {
+    rt.class_of(array)
+        .chars()
+        .nth(1)
+        .filter(|k| "ZBCSIJFD".contains(*k))
+        .unwrap_or('L')
+}
+
+/// `Arrays.deepToString`: an array within an array written as an array, and one that holds
+/// itself as `[...]`.
+fn deep_text(rt: &mut Rt, v: V, depth: usize) -> String {
+    if v.r() == 0 {
+        return "null".to_owned();
+    }
+    let Some(Data::Array(all)) = rt.heap.get(v.r() as usize).map(|o| o.data.clone()) else {
+        return element_text(rt, 'L', v);
+    };
+    if depth > 32 {
+        return "[...]".to_owned();
+    }
+    let kind = element_kind(rt, v);
+    let parts: Vec<String> = all
+        .into_iter()
+        .map(|e| match e {
+            V::R(_) if kind == 'L' => deep_text(rt, e, depth + 1),
+            V::J(_) => element_text(rt, 'J', e),
+            V::F(_) => element_text(rt, 'F', e),
+            V::D(_) => element_text(rt, 'D', e),
+            V::Void => "null".to_owned(),
+            e => element_text(rt, if kind == 'L' { 'I' } else { kind }, e),
+        })
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
+
+/// `Arrays.deepEquals`: arrays of the same length whose elements are equal, an array among
+/// them by its own elements.
+fn deep_equals(rt: &mut Rt, x: V, y: V, depth: usize) -> bool {
+    if x == y {
+        return true;
+    }
+    if x.r() == 0 || y.r() == 0 || depth > 32 {
+        return false;
+    }
+    let both = match (
+        rt.heap.get(x.r() as usize).map(|o| &o.data),
+        rt.heap.get(y.r() as usize).map(|o| &o.data),
+    ) {
+        (Some(Data::Array(p)), Some(Data::Array(q))) => Some((p.clone(), q.clone())),
+        _ => None,
+    };
+    match both {
+        Some((p, q)) => {
+            p.len() == q.len()
+                && p.iter().zip(&q).all(|(&e, &f)| match (e, f) {
+                    (V::R(_), V::R(_)) => deep_equals(rt, e, f, depth + 1),
+                    (V::F(e), V::F(f)) => e.to_bits() == f.to_bits() || (e.is_nan() && f.is_nan()),
+                    (V::D(e), V::D(f)) => e.to_bits() == f.to_bits() || (e.is_nan() && f.is_nan()),
+                    _ => e == f,
+                })
+        }
+        None => equals(rt, x, y),
+    }
+}
+
+/// `Arrays.deepHashCode`: as `Arrays.hashCode`, an array among the elements by its own.
+fn deep_hash(rt: &mut Rt, v: V, depth: usize) -> i32 {
+    if v.r() == 0 {
+        return 0;
+    }
+    let Some(Data::Array(all)) = rt.heap.get(v.r() as usize).map(|o| o.data.clone()) else {
+        return hash(rt, v);
+    };
+    if depth > 32 {
+        return 0;
+    }
+    let kind = element_kind(rt, v);
+    let mut h = 1i32;
+    for e in all {
+        let one = match e {
+            V::R(0) | V::Void => 0,
+            V::R(_) => deep_hash(rt, e, depth + 1),
+            V::J(j) => (j ^ ((j as u64) >> 32) as i64) as i32,
+            V::D(d) => {
+                let b = if d.is_nan() {
+                    0x7ff8_0000_0000_0000
+                } else {
+                    d.to_bits() as i64
+                };
+                (b ^ ((b as u64) >> 32) as i64) as i32
+            }
+            V::F(f) => {
+                if f.is_nan() {
+                    0x7fc0_0000
+                } else {
+                    f.to_bits() as i32
+                }
+            }
+            V::I(i) if kind == 'Z' => {
+                if i != 0 {
+                    1231
+                } else {
+                    1237
+                }
+            }
+            V::I(i) => i,
+        };
+        h = h.wrapping_mul(31).wrapping_add(one);
+    }
+    h
 }
 
 fn list_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {

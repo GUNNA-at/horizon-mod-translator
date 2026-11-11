@@ -30,6 +30,7 @@ const CASES: &[(&str, &[&str])] = &[
     ("adapters", &["0", "1", "2", "3", "4", "5"]),
     ("factories", &["0"]),
     ("policy", &["0", "1", "2", "3", "4", "5"]),
+    ("renamedEnums", &["0"]),
 ];
 
 const FIXTURE: &str = r##"
@@ -298,6 +299,29 @@ public class GsonFixture {
     }
 
     enum Kind { SPUR, BEVEL }
+
+    enum Version {
+        @SerializedName("1.12.0") V_1_12_0,
+        @SerializedName(value = "1.14.0", alternate = {"1.14", "latest"}) V_1_14_0,
+        PLAIN;
+    }
+
+    static class Model {
+        Version format_version;
+        Version[] seen;
+    }
+
+    public static String renamedEnums(int n) {
+        try {
+            Gson gson = new Gson();
+            Model m = gson.fromJson("{\"format_version\": \"1.12.0\", \"seen\": [\"latest\", \"PLAIN\", \"V_1_12_0\", \"1.14\", \"nothing\"]}", Model.class);
+            String seen = "";
+            for (Version v : m.seen) seen += v + ",";
+            return m.format_version + " " + seen + " " + gson.toJson(m) + " " + gson.toJson(Version.V_1_14_0) + " " + gson.fromJson("\"1.14.0\"", Version.class);
+        } catch (Exception e) {
+            return thrown(e);
+        }
+    }
 
     static class Gear {
         String name = "unnamed";

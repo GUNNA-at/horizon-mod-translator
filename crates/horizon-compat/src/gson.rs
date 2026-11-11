@@ -2419,6 +2419,57 @@ const DEPTH: usize = 32;
 const ANY: &str = "Ljava/lang/Object;";
 const SERIALIZED_NAME: &str = "com/google/gson/annotations/SerializedName";
 
+/// The constants of enum `class` (or of the enum a constant's own class extends) that carry
+/// `@SerializedName`: (the constant, its name in JSON, the alternates it is read by). Gson's
+/// adapter reads the annotation off each constant's field; found once per class.
+fn enum_names(rt: &mut Rt, class: &str) -> std::sync::Arc<Vec<(String, String, Vec<String>)>> {
+    type Names = std::sync::Arc<Vec<(String, String, Vec<String>)>>;
+    static FOUND: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Names>>> =
+        std::sync::OnceLock::new();
+    let found = FOUND.get_or_init(Default::default);
+    if let Some(names) = found.lock().ok().and_then(|f| f.get(class).cloned()) {
+        return names;
+    }
+    let constants = crate::jlang::enum_constants(rt, class)
+        .map(|c| crate::jutil::elements(rt, c))
+        .unwrap_or_default();
+    let mut names = Vec::new();
+    for c in constants {
+        let name = crate::api::call(rt, "java/lang/Enum.name.()Ljava/lang/String;", &[c]);
+        let name = rt.str_of(name).unwrap_or("").to_owned();
+        let Some(named) = crate::annotations::on_field(rt, class, &name)
+            .into_iter()
+            .find(|&a| rt.class_of(a) == SERIALIZED_NAME)
+        else {
+            continue;
+        };
+        let value = crate::annotations::element(
+            rt,
+            "com/google/gson/annotations/SerializedName.value.()Ljava/lang/String;",
+            &[named],
+        )
+        .and_then(|v| rt.str_of(v).map(str::to_owned));
+        let alternates = crate::annotations::element(
+            rt,
+            "com/google/gson/annotations/SerializedName.alternate.()[Ljava/lang/String;",
+            &[named],
+        )
+        .map(|all| {
+            crate::jutil::elements(rt, all)
+                .into_iter()
+                .filter_map(|a| rt.str_of(a).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+        names.push((name.clone(), value.unwrap_or(name), alternates));
+    }
+    let names: Names = std::sync::Arc::new(names);
+    if let Ok(mut f) = found.lock() {
+        f.insert(class.to_owned(), names.clone());
+    }
+    names
+}
+
 /// A type as a field's descriptor or generic signature has it, apart: the class's own descriptor
 /// (`Ljava/util/List;`) and its type arguments (`Lcom/example/Entry;`), a wildcard or a type
 /// variable as `Object`.
@@ -2719,7 +2770,12 @@ fn to_tree_in(rt: &mut Rt, gson: V, v: V, ty: &str, nulls: bool, depth: usize, f
     if rt.is_a(class, "java/lang/Enum") {
         let name = crate::api::call(rt, "java/lang/Enum.name.()Ljava/lang/String;", &[v]);
         let name = rt.str_of(name).unwrap_or("").to_owned();
-        return string(rt, &name);
+        let names = enum_names(rt, class);
+        let written = names
+            .iter()
+            .find(|n| n.0 == name)
+            .map_or(name.as_str(), |n| n.1.as_str());
+        return string(rt, written);
     }
     let (_, args) = generic(ty);
     let arg = |i: usize| args.get(i).cloned().unwrap_or_else(|| ANY.to_owned());
@@ -2889,9 +2945,23 @@ fn from_tree_in(rt: &mut Rt, gson: V, json: V, ty: &str, depth: usize, from: usi
         let constants = crate::jlang::enum_constants(rt, &class)
             .map(|c| crate::jutil::elements(rt, c))
             .unwrap_or_default();
-        for c in constants {
+        // By the name Gson gives the constant (`@SerializedName`'s, or one of its alternates;
+        // its own without one), else by what its `toString` says.
+        let names = enum_names(rt, &class);
+        let wanted = names
+            .iter()
+            .find(|n| n.1 == name || n.2.contains(&name))
+            .map_or(name.as_str(), |n| n.0.as_str());
+        for &c in &constants {
             let n = crate::api::call(rt, "java/lang/Enum.name.()Ljava/lang/String;", &[c]);
-            if rt.str_of(n) == Some(name.as_str()) {
+            if rt.str_of(n) == Some(wanted) {
+                return c;
+            }
+        }
+        for c in constants {
+            let shown =
+                rt.call_functional("java/lang/Object.toString.()Ljava/lang/String;", c, &[]);
+            if rt.thrown.take().is_none() && rt.str_of(shown) == Some(name.as_str()) {
                 return c;
             }
         }

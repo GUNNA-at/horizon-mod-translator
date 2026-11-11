@@ -507,6 +507,7 @@ fn tell_heap(rt: &Rt) {
         (rt.heap.len() * std::mem::size_of::<crate::Object>()) >> 20,
         top.join(", ")
     );
+    crate::api::tell_largest(rt, 8, 256 << 10);
 }
 
 /// What the name of a place in a method the runtime runs itself starts with: a mixin's static

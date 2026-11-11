@@ -70,6 +70,11 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ),
     ("reflectionMore", "(I)I", &["0", "3"]),
     ("blockingQueues", "(I)I", &["0", "9"]),
+    (
+        "arraysMore",
+        "(I)I",
+        &["0", "1", "2", "3", "4", "5", "6", "7", "8"],
+    ),
 ];
 
 fn has(tool: &str) -> bool {

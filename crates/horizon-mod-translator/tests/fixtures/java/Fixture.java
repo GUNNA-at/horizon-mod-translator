@@ -653,4 +653,51 @@ public class Fixture {
         }
         return r;
     }
+
+    // What `Arrays` says of arrays: their text, where a key is, where two differ, which comes first.
+    public static int arraysMore(int k) {
+        int[] ints = {1, 3, 5, 7, 9};
+        long[] longs = {-2L, 4L, 1L << 40};
+        double[] doubles = {-0.5, 0.0, 2.25, 1e10};
+        float[] floats = {1.5f, -3f};
+        char[] chars = {'a', 'z'};
+        boolean[] flags = {true, false};
+        byte[] bytes = {-1, 2};
+        String[] words = {"apple", "kiwi", null, "pear"};
+        String[] sorted = {"apple", "kiwi", "pear"};
+        switch (k) {
+            case 0:
+                return (java.util.Arrays.toString(ints) + java.util.Arrays.toString(longs) + java.util.Arrays.toString(bytes)
+                    + java.util.Arrays.toString(words) + java.util.Arrays.toString((int[]) null)).hashCode();
+            case 1:
+                return (java.util.Arrays.toString(doubles) + java.util.Arrays.toString(floats)).hashCode();
+            case 2:
+                return (java.util.Arrays.toString(chars) + java.util.Arrays.toString(flags)).hashCode();
+            case 3: {
+                Object[] nested = {ints, words, new Object[] {1, "two", new int[] {3}}, null};
+                return java.util.Arrays.deepToString(nested).hashCode();
+            }
+            case 4:
+                return java.util.Arrays.binarySearch(ints, 5) * 7 + java.util.Arrays.binarySearch(ints, 6) * 11
+                    + java.util.Arrays.binarySearch(ints, 1, 3, 9) * 100 + java.util.Arrays.binarySearch(doubles, 2.25) * 13
+                    + java.util.Arrays.binarySearch(longs, 5L) * 1000;
+            case 5:
+                return java.util.Arrays.binarySearch(sorted, "kiwi") + java.util.Arrays.binarySearch(sorted, "banana") * 3
+                    + java.util.Arrays.binarySearch(sorted, "PEAR", String.CASE_INSENSITIVE_ORDER) * 50;
+            case 6:
+                return java.util.Arrays.mismatch(ints, new int[] {1, 3, 6}) + java.util.Arrays.mismatch(bytes, bytes) * 3
+                    + java.util.Arrays.mismatch(ints, new int[] {1, 3}) * 70;
+            case 7:
+                return java.util.Arrays.compare(ints, new int[] {1, 3, 6}) + java.util.Arrays.compare(new int[] {1}, new int[] {1, 0}) * 3
+                    + java.util.Arrays.compare(sorted, new String[] {"apple", "lime"}) * 50
+                    + java.util.Arrays.compareUnsigned(bytes, new byte[] {1, 2}) * 9000;
+            default: {
+                Object[] same = {new int[] {1, 2}, new String[] {"x"}, 4};
+                Object[] other = {new int[] {1, 2}, new String[] {"x"}, 4};
+                return (java.util.Arrays.deepEquals(same, other) ? 1 : 0) + (java.util.Arrays.equals(same, other) ? 2 : 0)
+                    + (java.util.Arrays.deepHashCode(same) == java.util.Arrays.deepHashCode(other) ? 4 : 0)
+                    + java.util.Arrays.deepHashCode(new Object[] {1, "a", new long[] {5L}}) * 8;
+            }
+        }
+    }
 }

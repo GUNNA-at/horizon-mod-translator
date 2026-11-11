@@ -13,6 +13,38 @@ pub(crate) const AXIS_NAMES: [&str; 3] = ["x", "y", "z"];
 /// aren't translated, so a mod block extending `RotatedPillarBlock` is a `Block` by this table.
 /// The core's `Rt::is_a` asks it (directly when inlined, through `Fns` otherwise).
 pub fn api_is_a(c: &str, class: &str) -> bool {
+    use std::hash::{Hash, Hasher};
+    thread_local! {
+        /// What was answered before, by the two names hashed together (the names kept, to
+        /// tell two pairs of one hash apart). The answer is the names' alone, and it is asked
+        /// at every virtual call a mixin's added method might take: walking the classes'
+        /// table each time was most of a mod's loop over block positions.
+        static ANSWERED: std::cell::RefCell<crate::HashMap<u64, (Box<str>, Box<str>, bool)>> = std::cell::RefCell::new(crate::HashMap::default());
+    }
+    let mut hasher = crate::FxHasher::default();
+    c.hash(&mut hasher);
+    class.hash(&mut hasher);
+    let hash = hasher.finish();
+    let known = ANSWERED.with(|a| {
+        a.borrow()
+            .get(&hash)
+            .filter(|e| &*e.0 == c && &*e.1 == class)
+            .map(|e| e.2)
+    });
+    if let Some(known) = known {
+        return known;
+    }
+    let is = api_is_a_by_tables(c, class);
+    ANSWERED.with(|a| {
+        a.borrow_mut()
+            .entry(hash)
+            .or_insert_with(|| (c.into(), class.into(), is));
+    });
+    is
+}
+
+/// [`api_is_a`], worked out from the tables.
+fn api_is_a_by_tables(c: &str, class: &str) -> bool {
     // 1.21.1's block and item classes by their own supertypes (`CropBlock` a `BonemealableBlock`,
     // `ChestBlock` an `EntityBlock`, `SwordItem` a `TieredItem`); the families below past them.
     if vanilla_is_a(c, class) || crate::crafting::recipe_is_a(c, class) {

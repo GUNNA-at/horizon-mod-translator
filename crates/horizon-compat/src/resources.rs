@@ -72,6 +72,7 @@ const ELEMENT_FACE: &str = "net/minecraft/client/renderer/block/model/BlockEleme
 const FACE_UV: &str = "net/minecraft/client/renderer/block/model/BlockFaceUV";
 const ELEMENT_ROTATION: &str = "net/minecraft/client/renderer/block/model/BlockElementRotation";
 const NATIVE_IMAGE: &str = "com/mojang/blaze3d/platform/NativeImage";
+const IMAGE_FORMAT: &str = "com/mojang/blaze3d/platform/NativeImage$Format";
 const IOUTILS: &str = "org/apache/commons/io/IOUtils";
 const INPUT_STREAM: &str = "java/io/InputStream";
 const BYTES_IN: &str = "java/io/ByteArrayInputStream";
@@ -126,6 +127,7 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | BLOCK_MODEL
             | FACE_UV
             | NATIVE_IMAGE
+            | IMAGE_FORMAT
             | IOUTILS
     ) || stream_class(owner)
         || reader_class(owner)
@@ -582,6 +584,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (PROFILER | INACTIVE_PROFILER, _) => profiler_call(rt, name, desc),
         (BLOCK_MODEL, _) => return block_model_call(rt, name, args),
         (NATIVE_IMAGE, _) => return image_call(rt, name, desc, args),
+        // An image's format: how many of a pixel's channels it holds, and which
+        // (`RGBA`, `RGB`, `LUMINANCE_ALPHA`, `LUMINANCE`, in that order).
+        (IMAGE_FORMAT, _) => {
+            let format = rt.get_field(a(0), "$ordinal").i().clamp(0, 3);
+            match name {
+                "components" => V::I(4 - format),
+                "hasAlpha" | "hasLuminanceOrAlpha" => V::I(i32::from(format != 1)),
+                "hasLuminanceOrRed" | "hasLuminanceOrGreen" | "hasLuminanceOrBlue" => V::I(1),
+                "hasRed" | "hasGreen" | "hasBlue" => V::I(i32::from(format < 2)),
+                "hasLuminance" => V::I(i32::from(format >= 2)),
+                "glFormat" => V::I([6408, 6407, 33319, 6403][format as usize]),
+                "supportedByStb" => V::I(1),
+                "setPackPixelStoreState" | "setUnpackPixelStoreState" => V::Void,
+                _ => return None,
+            }
+        }
         (IOUTILS, _) => return ioutils_call(rt, name, desc, args),
         _ => return None,
     })
@@ -1409,9 +1427,287 @@ fn image_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             };
             rt.alloc("[I", Data::Array(pixels))
         }
-        "close" | "upload" | "untrack" => V::Void,
+        // The address of its pixels in vanilla, read as the field it is to see whether the image
+        // is still open (JourneyMap keeps a region's image while `pixels != 0`, and made a new
+        // one of 512 by 512 pixels at every tick while this read as 0): not 0 until closed.
+        "$pixels" => V::J(if rt.get_field(a(0), "$closed").i() != 0 {
+            0
+        } else {
+            (1 << 32) | i64::from(a(0).r())
+        }),
+        "close" => {
+            rt.put_field(a(0), "$closed", V::I(1));
+            V::Void
+        }
+        "upload" | "untrack" | "downloadTexture" => V::Void,
+        "format" => {
+            crate::api::get_static(rt, "com/mojang/blaze3d/platform/NativeImage$Format.RGBA")
+        }
+        // A pixel's channels (alpha is the top byte of the pixel as an int).
+        "getLuminanceOrAlpha"
+        | "getRedOrLuminance"
+        | "getGreenOrLuminance"
+        | "getBlueOrLuminance" => {
+            let (w, h) = image_size(rt, a(0));
+            let (x, y) = (a(1).i(), a(2).i());
+            let channel = match name {
+                "getRedOrLuminance" => 0,
+                "getGreenOrLuminance" => 1,
+                "getBlueOrLuminance" => 2,
+                _ => 3,
+            };
+            match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _))
+                    if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h =>
+                {
+                    V::I(i32::from(
+                        b[(y as usize * w + x as usize) * 4 + channel] as i8,
+                    ))
+                }
+                _ => V::I(0),
+            }
+        }
+        // `fillRect(x, y, width, height, colour)`.
+        "fillRect" => {
+            let (w, h) = image_size(rt, a(0));
+            let (x, y, wide, high, colour) = (
+                a(1).i(),
+                a(2).i(),
+                a(3).i(),
+                a(4).i(),
+                a(5).i().to_le_bytes(),
+            );
+            if x < 0
+                || y < 0
+                || wide < 0
+                || high < 0
+                || (x + wide) as usize > w
+                || (y + high) as usize > h
+            {
+                let msg = format!(
+                    "({}, {}) outside of image bounds ({w}, {h})",
+                    x + wide - 1,
+                    y + high - 1
+                );
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    &msg,
+                ));
+            }
+            if let Some(Data::Bytes(b, _)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data)
+            {
+                for row in y as usize..(y + high) as usize {
+                    for pixel in b[(row * w + x as usize) * 4..(row * w + (x + wide) as usize) * 4]
+                        .chunks_exact_mut(4)
+                    {
+                        pixel.copy_from_slice(&colour);
+                    }
+                }
+            }
+            V::Void
+        }
+        // `blendPixel(x, y, colour)`: the colour over the pixel by the colour's alpha, as
+        // vanilla's floats work it out.
+        "blendPixel" => {
+            let (w, h) = image_size(rt, a(0));
+            let (x, y, over) = (a(1).i(), a(2).i(), a(3).i().to_le_bytes());
+            if x < 0 || y < 0 || x as usize >= w || y as usize >= h {
+                let msg = format!("({x}, {y}) outside of image bounds ({w}, {h})");
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    &msg,
+                ));
+            }
+            let at = (y as usize * w + x as usize) * 4;
+            if let Some(Data::Bytes(b, _)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data)
+            {
+                let part = |c: u8| f32::from(c) / 255.0;
+                let (alpha, under) = (part(over[3]), 1.0 - part(over[3]));
+                let mixed = |own: f32, held: u8| {
+                    ((own * alpha + part(held) * under).min(1.0) * 255.0) as u8
+                };
+                let out = [
+                    mixed(part(over[0]), b[at]),
+                    mixed(part(over[1]), b[at + 1]),
+                    mixed(part(over[2]), b[at + 2]),
+                    mixed(alpha, b[at + 3]),
+                ];
+                b[at..at + 4].copy_from_slice(&out);
+            }
+            V::Void
+        }
+        // `copyFrom(other)`: the other's pixels, as many of each row and as many rows as both have.
+        "copyFrom" => {
+            let ((w, h), (ow, oh)) = (image_size(rt, a(0)), image_size(rt, a(1)));
+            let from = match rt.heap.get(a(1).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _)) => b.clone(),
+                _ => return Some(V::Void),
+            };
+            if let Some(Data::Bytes(b, _)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data)
+            {
+                let wide = w.min(ow) * 4;
+                for row in 0..h.min(oh) {
+                    b[row * w * 4..row * w * 4 + wide]
+                        .copy_from_slice(&from[row * ow * 4..row * ow * 4 + wide]);
+                }
+            }
+            V::Void
+        }
+        // `copyRect(xFrom, yFrom, xBy, yBy, width, height, mirrorX, mirrorY)` within the image, and
+        // `copyRect(target, xFrom, yFrom, xTo, yTo, width, height, mirrorX, mirrorY)` into another.
+        "copyRect" => {
+            let other = desc.starts_with("(Lcom/mojang/blaze3d/platform/NativeImage;");
+            let n = |i: usize| a(i + usize::from(other)).i();
+            let (target, x_from, y_from) = (if other { a(1) } else { a(0) }, n(1), n(2));
+            let (x_to, y_to) = if other {
+                (n(3), n(4))
+            } else {
+                (x_from + n(3), y_from + n(4))
+            };
+            let (wide, high, mirror_x, mirror_y) = (n(5), n(6), n(7) != 0, n(8) != 0);
+            let ((w, h), (tw, th)) = (image_size(rt, a(0)), image_size(rt, target));
+            let inside = |x: i32, y: i32, w: usize, h: usize| {
+                x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h
+            };
+            if wide > 0
+                && high > 0
+                && !(inside(x_from, y_from, w, h)
+                    && inside(x_from + wide - 1, y_from + high - 1, w, h)
+                    && inside(x_to, y_to, tw, th)
+                    && inside(x_to + wide - 1, y_to + high - 1, tw, th))
+            {
+                let msg = format!("({x_to}, {y_to}) outside of image bounds ({tw}, {th})");
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    &msg,
+                ));
+            }
+            let from = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _)) => b.clone(),
+                _ => return Some(V::Void),
+            };
+            if let Some(Data::Bytes(b, _)) =
+                rt.heap.get_mut(target.r() as usize).map(|o| &mut o.data)
+            {
+                for i in 0..high.max(0) {
+                    for j in 0..wide.max(0) {
+                        let (k, l) = (
+                            if mirror_x { wide - 1 - j } else { j },
+                            if mirror_y { high - 1 - i } else { i },
+                        );
+                        let (src, dst) = (
+                            ((y_from + i) as usize * w + (x_from + j) as usize) * 4,
+                            ((y_to + l) as usize * tw + (x_to + k) as usize) * 4,
+                        );
+                        b[dst..dst + 4].copy_from_slice(&from[src..src + 4]);
+                    }
+                }
+            }
+            V::Void
+        }
+        // `mappedCopy(function)`: a new image of what the function makes of each pixel;
+        // `applyToAllPixels(function)`: the same in place.
+        "mappedCopy" | "applyToAllPixels" => {
+            let (w, _) = image_size(rt, a(0));
+            let mut pixels = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _)) => b.clone(),
+                _ => Vec::new(),
+            };
+            for pixel in pixels.chunks_exact_mut(4) {
+                let made = rt.call_functional(
+                    "java/util/function/IntUnaryOperator.applyAsInt.(I)I",
+                    a(1),
+                    &[V::I(i32::from_le_bytes([
+                        pixel[0], pixel[1], pixel[2], pixel[3],
+                    ]))],
+                );
+                if rt.thrown.is_some() {
+                    return Some(V::NULL);
+                }
+                pixel.copy_from_slice(&made.i().to_le_bytes());
+            }
+            if name == "mappedCopy" {
+                image(rt, w, pixels)
+            } else {
+                if let Some(Data::Bytes(b, _)) =
+                    rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data)
+                {
+                    *b = pixels;
+                }
+                V::Void
+            }
+        }
+        // `makePixelArray()`: each pixel as ARGB, where the image holds it as ABGR.
+        "makePixelArray" => {
+            let pixels: Vec<V> = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _)) => b
+                    .chunks_exact(4)
+                    .map(|p| V::I(i32::from_be_bytes([p[3], p[0], p[1], p[2]])))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            rt.alloc("[I", Data::Array(pixels))
+        }
+        "flipY" => {
+            let (w, _) = image_size(rt, a(0));
+            if let Some(Data::Bytes(b, _)) = rt.heap.get_mut(a(0).r() as usize).map(|o| &mut o.data)
+                && w > 0
+            {
+                let rows: Vec<u8> = b.chunks_exact(w * 4).rev().flatten().copied().collect();
+                *b = rows;
+            }
+            V::Void
+        }
+        // The image as a PNG: its bytes, or written to a file (JourneyMap saves its regions so).
+        "asByteArray" | "writeToFile" => {
+            let (w, _) = image_size(rt, a(0));
+            let png = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _)) => encode_png(w, b),
+                _ => None,
+            };
+            let Some(png) = png else {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/io/IOException",
+                    "Could not write image",
+                ));
+            };
+            if name == "asByteArray" {
+                crate::files::byte_array(rt, &png)
+            } else {
+                let text = rt.str_of(a(1)).unwrap_or("").to_owned();
+                match std::fs::write(crate::files::on_disk(rt, &text), png) {
+                    Ok(()) => V::Void,
+                    Err(e) => crate::files::throw_io(rt, &e, &text),
+                }
+            }
+        }
         _ => return None,
     })
+}
+
+/// RGBA bytes of `width` pixels a row as a PNG.
+pub(crate) fn encode_png(width: usize, rgba: &[u8]) -> Option<Vec<u8>> {
+    if width == 0 || rgba.is_empty() {
+        return None;
+    }
+    let height = rgba.len() / 4 / width;
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(
+            &mut out,
+            u32::try_from(width).ok()?,
+            u32::try_from(height).ok()?,
+        );
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&rgba[..width * height * 4]).ok()?;
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -1528,6 +1824,128 @@ mod tests {
             assert_eq!(rt.thrown.take().map(|e| rt.class_of(e).to_owned()).as_deref(), Some("java/lang/IllegalArgumentException"));
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
+    }
+
+    /// An image a mod makes and draws into: open until closed (the `pixels` field vanilla keeps
+    /// its address in), filled, blended, copied and flipped as vanilla's does, its pixels as
+    /// ARGB for whoever asks so, and written as a PNG that reads back the same.
+    #[test]
+    fn an_image_is_drawn_into_and_written_as_a_png() {
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, name: &str, args: &[V]| {
+            let key = rt.static_key(&format!("com/mojang/blaze3d/platform/NativeImage.{name}"));
+            crate::api::call(rt, key, args)
+        };
+        let image = rt.new_object(NATIVE_IMAGE);
+        c(
+            &mut rt,
+            "<init>.(IIZ)V",
+            &[image, V::I(4), V::I(2), V::I(0)],
+        );
+        assert!(c(&mut rt, "$pixels.()J", &[image]).j() != 0);
+        let format = c(
+            &mut rt,
+            "format.()Lcom/mojang/blaze3d/platform/NativeImage$Format;",
+            &[image],
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "com/mojang/blaze3d/platform/NativeImage$Format.components.()I",
+                &[format]
+            ),
+            V::I(4)
+        );
+        // Opaque red (ABGR) over the left half, then half-transparent blue over one pixel of it.
+        c(
+            &mut rt,
+            "fillRect.(IIIII)V",
+            &[
+                image,
+                V::I(0),
+                V::I(0),
+                V::I(2),
+                V::I(2),
+                V::I(0xff0000ffu32 as i32),
+            ],
+        );
+        c(
+            &mut rt,
+            "blendPixel.(III)V",
+            &[image, V::I(1), V::I(0), V::I(0x80ff0000u32 as i32)],
+        );
+        let pixel = |rt: &mut Rt, of: V, x: i32, y: i32| {
+            c(rt, "getPixelRGBA.(II)I", &[of, V::I(x), V::I(y)]).i() as u32
+        };
+        assert_eq!(pixel(&mut rt, image, 0, 1), 0xff0000ff);
+        assert_eq!(pixel(&mut rt, image, 2, 0), 0);
+        // (Vanilla's own arithmetic: alpha 128/255 over an opaque pixel.)
+        assert_eq!(pixel(&mut rt, image, 1, 0), 0xbf80007e);
+        assert_eq!(
+            c(
+                &mut rt,
+                "getLuminanceOrAlpha.(II)B",
+                &[image, V::I(0), V::I(0)]
+            ),
+            V::I(-1)
+        );
+        // The left half copied to the right, mirrored; then the rows turned over.
+        c(
+            &mut rt,
+            "copyRect.(IIIIIIZZ)V",
+            &[
+                image,
+                V::I(0),
+                V::I(0),
+                V::I(2),
+                V::I(0),
+                V::I(2),
+                V::I(2),
+                V::I(1),
+                V::I(0),
+            ],
+        );
+        assert_eq!(
+            [pixel(&mut rt, image, 2, 0), pixel(&mut rt, image, 3, 0)],
+            [0xbf80007e, 0xff0000ff]
+        );
+        c(&mut rt, "flipY.()V", &[image]);
+        assert_eq!(
+            [pixel(&mut rt, image, 1, 1), pixel(&mut rt, image, 1, 0)],
+            [0xbf80007e, 0xff0000ff]
+        );
+        let argb = c(&mut rt, "makePixelArray.()[I", &[image]);
+        assert_eq!(
+            crate::jutil::elements(&rt, argb)[0],
+            V::I(0xffff0000u32 as i32)
+        );
+        // As a PNG and back.
+        let bytes = c(&mut rt, "asByteArray.()[B", &[image]);
+        let png: Vec<u8> = crate::jutil::elements(&rt, bytes)
+            .into_iter()
+            .map(|b| b.i() as u8)
+            .collect();
+        let (width, rgba) = decode_png(&png).expect("a PNG");
+        assert_eq!((width, rgba.len()), (4, 32));
+        assert_eq!(&rgba[..4], &[0xff, 0, 0, 0xff]);
+        // Another image takes its pixels; closed, the first says so.
+        let other = rt.new_object(NATIVE_IMAGE);
+        c(
+            &mut rt,
+            "<init>.(IIZ)V",
+            &[other, V::I(4), V::I(2), V::I(0)],
+        );
+        c(
+            &mut rt,
+            "copyFrom.(Lcom/mojang/blaze3d/platform/NativeImage;)V",
+            &[other, image],
+        );
+        assert_eq!(pixel(&mut rt, other, 1, 1), 0xbf80007e);
+        c(&mut rt, "close.()V", &[image]);
+        assert_eq!(c(&mut rt, "$pixels.()J", &[image]), V::J(0));
+        assert!(c(&mut rt, "$pixels.()J", &[other]).j() != 0);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A reader's lines and chars; `listResources` finds the files under a folder that its filter

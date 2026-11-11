@@ -10915,6 +10915,42 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     game's footprint peaked at 28 GB in launch 21, 21 GB of it compressed, as the world
     opened; 14 GB in the world. An object's fields are a hash map each, which is where to
     look first.
+- [x] 2026-11-11 Part 189: what launch 22 showed: an image's pixels, class families, enum names.
+  - Launch 22 (Parts 187 and 188: 656 s, 18 crates, 2,036,592,816 bytes) is ready after
+    368 s. The server spends 1.4 s of 20 in the mods' hooks, where it spent 5.3 (Create
+    Jetpack's flight listener 0.4 ms a tick, 4 before). 23 uncaught exceptions (24): Slice
+    and Dice's recipes, FramedBlocks' wall torch models and GuideME's index no longer fail.
+    A press set over a depot with a motor beside it is powered and the depot takes the ingot
+    dropped on it; the press does not run yet. The creative inventory opens.
+  - The window made 31 ticks in 31 s: JourneyMap's tick took 983 ms. With what stopped its
+    mapping gone it maps, and it keeps a region's image while `image.pixels != 0`, the
+    address vanilla holds the pixels at. The field read as 0, so every tick made a new
+    image of 512 by 512 pixels and filled it one pixel at a time. `pixels` is not 0 until
+    the image is closed. With it the rest of what the pack asks of a `NativeImage`: its
+    format, `fillRect`, `blendPixel`, `copyFrom`, `copyRect`, `mappedCopy`, `makePixelArray`,
+    `flipY`, a pixel's channels, and the image as a PNG (`asByteArray`, `writeToFile`).
+  - Chisels & Bits still ran into the 90 s limit. A sample of it: 92% in `Rt::is_a`. Since
+    Part 184 a virtual call on one of the game's objects asks, for each method of that name
+    a mixin adds, whether the receiver is of the mixin's target, and the answer was worked
+    out from the class tables at every call (a `getX()` of a block position among them).
+    The mapping's half of that answer depends on the two names alone and is remembered.
+  - Memory has one cause. A thread's heap by class: the server's holds 5.0 million objects in
+    16.5 GB, and 15.4 GB of it is 26,107 arrays. (The allocator's regions carry the tag
+    `vmmap` prints as IOAccelerator: 36 GB of them at the peak, 28 GB of footprint.) Whose
+    arrays is not known yet: with its heap a thread now tells its largest objects and what
+    holds each, two holders up. Under that pressure the first tick took 82 s (46 in launch
+    21), half of the time beneath Resourceful Lib's highlight listener in `madvise`.
+  - Gson reads and writes an enum constant by its `@SerializedName` and reads it by its
+    alternates and its `toString` (GeckoLib names its format versions `1.12.0`: every one
+    of 562 models was told to have an unsupported version).
+  - Veil adds a `register(ResourceLocation, Function)` to `DeferredRegister` that makes its
+    holder with `createHolder` and puts it in the register's `entries`. The runtime kept its
+    own list under that field's name, so the map put landed on a list. The field is a map
+    now, and what is put in it is registered.
+  - `Arrays.deepToString`, `deepEquals`, `deepHashCode`, a search among objects, `mismatch`,
+    `compare` and `compareUnsigned` are answered natively: the JDK's own code, which stands
+    for `toString` and a search among numbers, does not carry these. The fixture compares
+    all of them with the JVM.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

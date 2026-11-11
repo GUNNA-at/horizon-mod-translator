@@ -160,32 +160,181 @@ pub(crate) fn census(rt: &Rt) -> Census {
     use std::mem::size_of;
     let mut by = Census::new();
     for o in rt.heap.iter().skip(1).filter(|o| o.class != "compat:free") {
-        let owned = match &o.data {
-            Data::Fields(f) => f.capacity() * (size_of::<(&str, V)>() + 1),
-            Data::Str(s) => s.capacity(),
-            Data::Array(a) | Data::List(a) | Data::Stream(a) | Data::Iter(a, _) => {
-                a.capacity() * size_of::<V>()
-            }
-            Data::Map(m) => {
-                m.capacity() * (size_of::<(String, V)>() + 1)
-                    + m.keys().map(String::capacity).sum::<usize>()
-            }
-            Data::Table(t) => {
-                t.entries.capacity() * size_of::<(V, V)>()
-                    + t.index.capacity() * (size_of::<(i32, Vec<usize>)>() + 1)
-                    + t.index
-                        .values()
-                        .map(|at| at.capacity() * size_of::<usize>())
-                        .sum::<usize>()
-            }
-            Data::Native(..) => 0,
-            Data::Bytes(b, _) => b.capacity(),
-        };
         let class = by.entry(o.class).or_default();
         class.0 += 1;
-        class.1 += (size_of::<crate::Object>() + owned) as u64;
+        class.1 += (size_of::<crate::Object>() + owned(o)) as u64;
     }
     by
+}
+
+/// About the bytes an object's data owns beside the object itself.
+pub(crate) fn owned(o: &crate::Object) -> usize {
+    use std::mem::size_of;
+    match &o.data {
+        Data::Fields(f) => f.capacity() * (size_of::<(&str, V)>() + 1),
+        Data::Str(s) => s.capacity(),
+        Data::Array(a) | Data::List(a) | Data::Stream(a) | Data::Iter(a, _) => {
+            a.capacity() * size_of::<V>()
+        }
+        Data::Map(m) => {
+            m.capacity() * (size_of::<(String, V)>() + 1)
+                + m.keys().map(String::capacity).sum::<usize>()
+        }
+        Data::Table(t) => {
+            t.entries.capacity() * size_of::<(V, V)>()
+                + t.index.capacity() * (size_of::<(i32, Vec<usize>)>() + 1)
+                + t.index
+                    .values()
+                    .map(|at| at.capacity() * size_of::<usize>())
+                    .sum::<usize>()
+        }
+        Data::Native(..) => 0,
+        Data::Bytes(b, _) => b.capacity(),
+    }
+}
+
+/// The largest objects of the heap, told with what holds each (a field of an object, an
+/// element of an array or a collection, a static), two holders up: a pack's memory is often
+/// a few of them, and the class alone (an array) does not say whose.
+pub(crate) fn tell_largest(rt: &Rt, how_many: usize, at_least: usize) {
+    let mut big: Vec<(usize, usize)> = rt
+        .heap
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, o)| o.class != "compat:free")
+        .map(|(r, o)| (owned(o), r))
+        .filter(|(bytes, _)| *bytes >= at_least)
+        .collect();
+    if big.is_empty() {
+        return;
+    }
+    // How the bytes spread over sizes: whether it is a few giants or many of a kind.
+    let mut spread = [(0usize, 0usize); 5];
+    for (bytes, _) in &big {
+        let at = match bytes >> 20 {
+            64.. => 0,
+            16..64 => 1,
+            4..16 => 2,
+            1..4 => 3,
+            _ => 4,
+        };
+        spread[at].0 += 1;
+        spread[at].1 += bytes;
+    }
+    eprintln!(
+        "    large: {} of 64 MB or more ({} MB), {} of 16 ({} MB), {} of 4 ({} MB), {} of 1 ({} MB), {} smaller ({} MB)",
+        spread[0].0,
+        spread[0].1 >> 20,
+        spread[1].0,
+        spread[1].1 >> 20,
+        spread[2].0,
+        spread[2].1 >> 20,
+        spread[3].0,
+        spread[3].1 >> 20,
+        spread[4].0,
+        spread[4].1 >> 20
+    );
+    big.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
+    big.truncate(how_many);
+    // What holds object `r`: the first few holders found in one pass over the heap.
+    let holders = |wanted: &[usize]| -> Vec<Vec<String>> {
+        let mut found: Vec<Vec<String>> = vec![Vec::new(); wanted.len()];
+        let is = |v: &V| wanted.iter().position(|w| v.r() as usize == *w && *w != 0);
+        for (name, v) in &rt.statics {
+            if let Some(i) = is(v) {
+                found[i].push(format!("static {name}"));
+            }
+        }
+        for (name, v) in &rt.interned {
+            if let Some(i) = is(v) {
+                found[i].push(format!("kept as {name}"));
+            }
+        }
+        for (r, o) in rt.heap.iter().enumerate().skip(1) {
+            let mut hit = |i: usize, how: String| {
+                if found[i].len() < 3 {
+                    found[i].push(format!("{how} of {} #{r}", o.class));
+                }
+            };
+            match &o.data {
+                Data::Fields(f) => f.iter().for_each(|(name, v)| {
+                    if let Some(i) = is(v) {
+                        hit(i, format!("field {name}"));
+                    }
+                }),
+                Data::Array(a) | Data::List(a) | Data::Stream(a) | Data::Iter(a, _) => {
+                    if let Some(i) = a.iter().find_map(&is) {
+                        hit(i, "an element".to_owned());
+                    }
+                }
+                Data::Map(m) => {
+                    if let Some(i) = m.values().find_map(&is) {
+                        hit(i, "a value".to_owned());
+                    }
+                }
+                Data::Table(t) => {
+                    if let Some(i) = t.entries.iter().find_map(|(k, v)| is(k).or_else(|| is(v))) {
+                        hit(i, "an entry".to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        found
+    };
+    let first: Vec<usize> = big.iter().map(|b| b.1).collect();
+    let held = holders(&first);
+    // One holder up again, for the first holder of each.
+    let above: Vec<usize> = held
+        .iter()
+        .map(|h| {
+            h.first()
+                .and_then(|h| h.rsplit_once('#'))
+                .and_then(|(_, r)| r.parse().ok())
+                .unwrap_or(0)
+        })
+        .collect();
+    let held_above = holders(&above);
+    for (i, (bytes, r)) in big.iter().enumerate() {
+        let o = &rt.heap[*r];
+        let shape = match &o.data {
+            Data::Array(a) | Data::List(a) => {
+                let kinds: Vec<&str> = a
+                    .iter()
+                    .take(3)
+                    .map(|v| match v {
+                        V::I(_) => "int",
+                        V::J(_) => "long",
+                        V::F(_) => "float",
+                        V::D(_) => "double",
+                        V::R(0) | V::Void => "null",
+                        V::R(_) => rt.class_of(*v),
+                    })
+                    .collect();
+                format!("{} elements ({})", a.len(), kinds.join(", "))
+            }
+            Data::Table(t) => format!("{} entries", t.entries.len()),
+            Data::Bytes(b, _) => format!("{} bytes", b.len()),
+            Data::Str(s) => format!("{} chars", s.len()),
+            _ => String::new(),
+        };
+        eprintln!(
+            "    largest: {} MB {} #{r} {shape}; held by {}; that by {}",
+            bytes >> 20,
+            o.class,
+            if held[i].is_empty() {
+                "nothing found".to_owned()
+            } else {
+                held[i].join(", ")
+            },
+            if held_above[i].is_empty() {
+                "nothing found".to_owned()
+            } else {
+                held_above[i].join(", ")
+            }
+        );
+    }
 }
 
 /// One line for a collection: what stayed and what went, with the classes that take the most.
@@ -2708,9 +2857,45 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         (o, "register") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => V::Void, // (IEventBus)
         (o, "getNamespace") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => rt.get_field(a(0), "$ns"),
+        // The register's own fields, as a mixin shadows them (Veil adds a
+        // `register(ResourceLocation, Function)` that takes any namespace: it makes the holder
+        // with `createHolder` and puts it with its supplier in `entries`): nothing is
+        // registered yet while the mods load, and what is put in the map is registered.
+        (o, "$seenRegisterEvent")
+            if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister")
+                && desc.starts_with("()") =>
+        {
+            V::I(0)
+        }
+        (o, "$entries")
+            if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister")
+                && desc.starts_with("()") =>
+        {
+            let held = rt.get_field(a(0), "$entries-map");
+            if held.r() != 0 {
+                return Some(held);
+            }
+            let map = rt.alloc(
+                "java/util/LinkedHashMap",
+                Data::Table(crate::Table::default()),
+            );
+            rt.put_field(map, DEFERRED_ENTRIES, a(0));
+            rt.put_field(a(0), "$entries-map", map);
+            map
+        }
+        (o, "createHolder")
+            if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister")
+                && args.len() == 3 =>
+        {
+            let (registry, id) = (
+                rt.str_of(a(1)).unwrap_or("unknown").to_owned(),
+                rt.str_of(a(2)).unwrap_or("").to_owned(),
+            );
+            holder(rt, &registry, &id)
+        }
         // Every holder made through it, in order (NeoForge's is an unmodifiable view).
         (o, "getEntries") if o.starts_with("net/neoforged/neoforge/registries/DeferredRegister") => {
-            let entries = rt.get_field(a(0), "$entries");
+            let entries = rt.get_field(a(0), "$holders");
             let items = if entries.r() == 0 { Vec::new() } else { crate::jutil::elements(rt, entries) };
             crate::jutil::new_list(rt, items)
         }
@@ -3791,13 +3976,40 @@ fn register_holder(rt: &mut Rt, register: V, registry: &str, id: &str) -> V {
     if h.r() == 0 {
         h = holder(rt, registry, id);
     }
-    let mut entries = rt.get_field(register, "$entries");
+    held(rt, register, h);
+    h
+}
+
+/// Adds holder `h` to those made through `register` (`getEntries`).
+fn held(rt: &mut Rt, register: V, h: V) {
+    let mut entries = rt.get_field(register, "$holders");
     if entries.r() == 0 {
         entries = crate::jutil::new_list(rt, Vec::new());
-        rt.put_field(register, "$entries", entries);
+        rt.put_field(register, "$holders", entries);
     }
     crate::jutil::list_add(rt, entries, h);
-    h
+}
+
+/// Where a `DeferredRegister`'s `entries` map, as a mixin reads the field (holder to
+/// supplier), keeps its register: what is put in such a map registers ([`deferred_entry`]).
+pub(crate) const DEFERRED_ENTRIES: &str = "$deferred-register";
+
+/// A holder and its supplier put in a register's `entries` map (`map`) by a mixin's own code:
+/// registered as `DeferredRegister.register` registers one, unless the map holds the holder
+/// already (the mod's code then throws, as NeoForge's does for a name registered twice).
+pub(crate) fn deferred_entry(rt: &mut Rt, map: V, h: V, supplier: V) {
+    if h.r() == 0 || crate::jutil::table_get(rt, map, h).is_some() {
+        return;
+    }
+    let (registry, id) = (
+        rt.str_of(rt.get_field(h, "$registry"))
+            .unwrap_or("unknown")
+            .to_owned(),
+        rt.str_of(rt.get_field(h, "$id")).unwrap_or("").to_owned(),
+    );
+    let register = rt.get_field(map, DEFERRED_ENTRIES);
+    held(rt, register, h);
+    rt.suppliers.push((registry, id, supplier));
 }
 
 /// A DeferredRegister's holder: its registry and name, resolved when asked (`create:pressing` is
@@ -5153,6 +5365,70 @@ mod tests {
         assert_eq!(register(&mut rt, "create", "shaft"), "create:shaft");
         assert_eq!(register(&mut rt, "create_new_age", "generator_coil"), "create_new_age:generator_coil");
         assert_eq!(register(&mut rt, "create_new_age", "create:named"), "create:named");
+    }
+
+    /// A mixin's own `register` (Veil's, by full name) makes its holder with `createHolder` and
+    /// puts it with its supplier in the register's `entries`: registered as any other entry,
+    /// listed among the register's holders, and a second put of the same holder answers what
+    /// is there (the mod's code throws on that).
+    #[test]
+    fn a_mixin_registers_by_putting_into_a_deferred_registers_entries() {
+        // What generated code does for an object no mod class is: the API call by the method's key.
+        fn vcall(rt: &mut Rt, key: &'static str, _short: &'static str, args: &[V]) -> V {
+            call(rt, key, args)
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.vcall = Some(vcall);
+        const CREATE: &str = "net/neoforged/neoforge/registries/DeferredRegister.create.(Lnet/minecraft/resources/ResourceKey;Ljava/lang/String;)Lnet/neoforged/neoforge/registries/DeferredRegister;";
+        const PUT: &str =
+            "java/util/Map.putIfAbsent.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        let (blocks, ns) = (
+            get_static(&mut rt, "net/minecraft/core/registries/Registries.BLOCK"),
+            rt.string("veil"),
+        );
+        let register = call(&mut rt, CREATE, &[blocks, ns]);
+        assert_eq!(
+            call(
+                &mut rt,
+                "net/neoforged/neoforge/registries/DeferredRegister.$seenRegisterEvent.()Z",
+                &[register]
+            ),
+            V::I(0)
+        );
+        let entries = call(
+            &mut rt,
+            "net/neoforged/neoforge/registries/DeferredRegister.$entries.()Ljava/util/Map;",
+            &[register],
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "net/neoforged/neoforge/registries/DeferredRegister.$entries.()Ljava/util/Map;",
+                &[register]
+            ),
+            entries
+        );
+        let id = rt.string("other:lamp");
+        let holder = call(
+            &mut rt,
+            "net/neoforged/neoforge/registries/DeferredRegister.createHolder.(Lnet/minecraft/resources/ResourceKey;Lnet/minecraft/resources/ResourceLocation;)Lnet/neoforged/neoforge/registries/DeferredHolder;",
+            &[register, blocks, id],
+        );
+        let lamp = rt.new_object("test/Lamp");
+        let supplier = crate::functions::constant(&mut rt, lamp);
+        assert!(call(&mut rt, PUT, &[entries, holder, supplier]).is_null());
+        assert_eq!(call(&mut rt, PUT, &[entries, holder, supplier]), supplier);
+        assert_eq!(rt.suppliers.len(), 1);
+        let held = call(
+            &mut rt,
+            "net/neoforged/neoforge/registries/DeferredRegister.getEntries.()Ljava/util/Collection;",
+            &[register],
+        );
+        assert_eq!(crate::jutil::elements(&rt, held), [holder]);
+        rt.resolve_registrations();
+        assert_eq!(rt.registry_entry("block", "other:lamp"), Some(lamp));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// Create tesselates the blocks of a contraption whose `getRenderShape()` is `MODEL`, compared
