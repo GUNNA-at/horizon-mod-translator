@@ -151,6 +151,7 @@ pub mod entity_hits;
 pub mod entity_saves;
 pub mod structures;
 pub mod sounds;
+pub mod tag_files;
 pub mod tags;
 pub mod tanks;
 pub mod tasks;

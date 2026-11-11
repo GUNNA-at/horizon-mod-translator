@@ -253,7 +253,61 @@ pub(crate) fn max_damage(rt: &Rt, stack: V) -> i32 {
         return rt.get_field(props, "$durability").i();
     }
     let name = crate::api_common::item_like_name(rt, item);
-    rt.host().and_then(|h| h.item_max_damage(&name)).map_or(0, |n| i32::try_from(n).unwrap_or(i32::MAX))
+    // (With no game to say, while the mods load: vanilla's own, as 1.21.1 makes its items.)
+    match rt.host().and_then(|h| h.item_max_damage(&name)) {
+        Some(n) => i32::try_from(n).unwrap_or(i32::MAX),
+        None => vanilla_max_damage(&name).unwrap_or(0),
+    }
+}
+
+/// The durability of one of vanilla's own items as 1.21.1's `Items` gives it, read from its
+/// class file: the twelve with a number of their own, a tool's or a weapon's tier's uses, and an
+/// armour piece's (its type's 11, 16, 15, 13 or 16 times its material's). A mod asks before
+/// any game answers: MineColonies divides every bow's durability by vanilla's bow's as it loads.
+pub(crate) fn vanilla_max_damage(id: &str) -> Option<i32> {
+    let name = id.strip_prefix("minecraft:")?;
+    let own = match name {
+        "carrot_on_a_stick" => 25,
+        "warped_fungus_on_a_stick" => 100,
+        "elytra" => 432,
+        "flint_and_steel" | "fishing_rod" | "brush" => 64,
+        "bow" => 384,
+        "shears" => 238,
+        "mace" => 500,
+        "shield" => 336,
+        "trident" => 250,
+        "crossbow" => 465,
+        "turtle_helmet" => 11 * 25,
+        "wolf_armor" => 16 * 4,
+        _ => 0,
+    };
+    if own != 0 {
+        return Some(own);
+    }
+    let (material, kind) = name.rsplit_once('_')?;
+    let tool = matches!(kind, "sword" | "pickaxe" | "axe" | "shovel" | "hoe");
+    let piece = match kind {
+        "helmet" => 11,
+        "chestplate" => 16,
+        "leggings" => 15,
+        "boots" => 13,
+        _ => 0,
+    };
+    Some(match material {
+        "wooden" if tool => 59,
+        "stone" if tool => 131,
+        "iron" if tool => 250,
+        "diamond" if tool => 1561,
+        "golden" if tool => 32,
+        "netherite" if tool => 2031,
+        "leather" => piece * 5,
+        "chainmail" | "iron" => piece * 15,
+        "diamond" => piece * 33,
+        "golden" => piece * 7,
+        "netherite" => piece * 37,
+        _ => return None,
+    })
+    .filter(|&n| n != 0)
 }
 
 /// The small bar under an item: `Item.isBarVisible`, `getBarWidth` and `getBarColor`, each taking
@@ -1264,6 +1318,41 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
 
 #[cfg(test)]
 mod tests {
+
+    /// Vanilla's items break where 1.21.1's do when no game is there to ask (the mods load):
+    /// the numbers of its `Items` class, a tier's uses, an armour piece's by type and material.
+    #[test]
+    fn vanillas_items_have_their_durability_while_the_mods_load() {
+        for (id, uses) in [
+            ("minecraft:bow", 384),
+            ("minecraft:fishing_rod", 64),
+            ("minecraft:shears", 238),
+            ("minecraft:shield", 336),
+            ("minecraft:flint_and_steel", 64),
+            ("minecraft:diamond_pickaxe", 1561),
+            ("minecraft:golden_hoe", 32),
+            ("minecraft:iron_chestplate", 240),
+            ("minecraft:netherite_boots", 481),
+            ("minecraft:leather_helmet", 55),
+            ("minecraft:turtle_helmet", 275),
+            ("minecraft:wolf_armor", 64),
+        ] {
+            assert_eq!(vanilla_max_damage(id), Some(uses), "{id}");
+        }
+        for id in [
+            "minecraft:stick",
+            "minecraft:iron_ingot",
+            "minecraft:diamond_horse_armor",
+            "create:wrench",
+        ] {
+            assert_eq!(vanilla_max_damage(id), None, "{id}");
+        }
+        // Asked of a stack, as a mod asks: with no game, vanilla's.
+        let mut rt = Rt::new();
+        let bow = crate::api_common::stack(&mut rt, "minecraft:bow", 1);
+        assert_eq!(max_damage(&rt, bow), 384);
+    }
+
     use super::*;
     use crate::{api, api_common};
 

@@ -1050,11 +1050,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 .str_of(rt.get_field(a(0), "$registry"))
                 .unwrap_or("")
                 .to_owned();
-            let registry = if registry.contains(':') {
-                registry
-            } else {
-                format!("minecraft:{registry}")
-            };
+            let registry = crate::datapack::location(rt, &registry);
             let location = rt
                 .str_of(rt.get_field(a(0), "$location"))
                 .unwrap_or("")

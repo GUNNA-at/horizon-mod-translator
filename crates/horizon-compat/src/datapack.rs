@@ -50,6 +50,22 @@ pub(crate) fn is_datapack(rt: &Rt, registry: &str) -> bool {
     rt.interned.contains_key(ANY) && rt.interned.contains_key(&format!("{CODEC}{registry}"))
 }
 
+/// `registry`'s own name in full (`mekanism:chemical`, `minecraft:block`): its namespace, kept
+/// when its key was made ([`key_made`]), before its name here.
+pub(crate) fn location(rt: &Rt, registry: &str) -> String {
+    if registry.contains(':') {
+        return registry.to_owned();
+    }
+    match rt
+        .interned
+        .get(&format!("{NAMESPACE}{registry}"))
+        .and_then(|ns| rt.str_of(*ns))
+    {
+        Some(ns) => format!("{ns}:{registry}"),
+        None => format!("minecraft:{registry}"),
+    }
+}
+
 /// The folder of `registry`'s files below a data namespace (`create/potato_projectile/type`).
 pub(crate) fn folder(rt: &Rt, registry: &str) -> String {
     match rt.interned.get(&format!("{NAMESPACE}{registry}")).and_then(|ns| rt.str_of(*ns)) {

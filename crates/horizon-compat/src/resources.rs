@@ -258,6 +258,28 @@ pub fn file(rt: &Rt, path: &str) -> Option<Vec<u8>> {
         .find_map(|d| std::fs::read(d.join(path)).ok())
 }
 
+/// Every pack's copy of resource file `path`, the lowest first: the game's own where none of the
+/// mods' folders holds that very file, then the copy of each of the mods' content folders that
+/// has one, in the game's order. For what is put together of all of them (a tag's entries).
+pub(crate) fn copies(rt: &Rt, path: &str) -> Vec<Vec<u8>> {
+    if !safe(path) {
+        return Vec::new();
+    }
+    let mods: Vec<Vec<u8>> = fallback_dirs()
+        .iter()
+        .chain(content_dirs_of(path))
+        .filter_map(|d| std::fs::read(d.join(path)).ok())
+        .collect();
+    let mut out = Vec::new();
+    if let Some(own) = rt.host().and_then(|h| h.resource(path))
+        && !mods.contains(&own)
+    {
+        out.push(own);
+    }
+    out.extend(mods);
+    out
+}
+
 /// A file of a mod's own jar by its path there (`config/defaults.json`), as
 /// `Class.getResourceAsStream` finds it: one the bundle carries ([`crate::FILES`]: what a mod may
 /// read for itself, at any time), else a resource file of the game's ([`file`]: under `assets/`
@@ -1075,6 +1097,7 @@ pub fn server_reload(rt: &mut Rt) {
     // `updateRegistryTags` around the tags' binding.
     rt.interned.remove("compat:server-resources");
     crate::recipes::reloaded(rt);
+    crate::tag_files::forget(rt);
     let tagged = &crate::places::UPDATE_REGISTRY_TAGS;
     let resources = if crate::places::constructors_heard(rt, SERVER_RESOURCES) || tagged.heard(rt) {
         server_resources(rt)

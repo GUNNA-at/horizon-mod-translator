@@ -435,6 +435,13 @@ pub(crate) fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
             Ok(Json::String(tag)) if registry == "fluid" && tag.starts_with('#') => {
                 fluid_tag_members(rt, &tag[1..])
             }
+            // A registry of a mod's own (Mekanism's chemicals), whose tags the game knows
+            // nothing of: its files' entries.
+            Ok(Json::String(tag))
+                if tag.starts_with('#') && !crate::neo::games_registry(&registry) =>
+            {
+                crate::tag_files::members(rt, &registry, &tag[1..]).unwrap_or_default()
+            }
             Ok(Json::Array(items)) => items
                 .iter()
                 .filter_map(Json::as_str)

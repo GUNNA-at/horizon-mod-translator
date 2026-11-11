@@ -787,8 +787,20 @@ pub(crate) fn in_tag(rt: &mut Rt, registry: &str, id: &str, tag: V) -> Option<bo
         "entity_type" => rt
             .host()
             .is_some_and(|h| h.entity_type_in_tag(id, &location)),
-        _ => return None,
+        // A registry of a mod's own: as its tags' files say.
+        other => {
+            return crate::tag_files::members(rt, other, &location)
+                .map(|ids| ids.iter().any(|i| i == id));
+        }
     })
+}
+
+/// Whether `registry` is one whose tags the game tells of ([`in_tag`]), not a mod's own.
+pub(crate) fn games_registry(registry: &str) -> bool {
+    matches!(
+        registry.trim_start_matches("minecraft:"),
+        "block" | "fluid" | "item" | "biome" | "damage_type" | "entity_type"
+    )
 }
 
 /// Vanilla's defaulted registries (`BuiltInRegistries.registerDefaulted`) and the keys of their
