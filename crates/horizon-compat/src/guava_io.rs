@@ -38,6 +38,28 @@ fn read(rt: &mut Rt, path: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// The parameter types of a descriptor, each as it is written (`Ljava/io/File;`, `[B`, `I`).
+fn params(desc: &str) -> Vec<&str> {
+    let mut rest = desc
+        .strip_prefix('(')
+        .and_then(|d| d.split(')').next())
+        .unwrap_or("");
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        let dims = rest.bytes().take_while(|b| *b == b'[').count();
+        let len = match rest.as_bytes().get(dims) {
+            Some(b'L') => rest[dims..]
+                .find(';')
+                .map_or(rest.len(), |end| dims + end + 1),
+            Some(_) => dims + 1,
+            None => rest.len(),
+        };
+        out.push(&rest[..len]);
+        rest = &rest[len..];
+    }
+    out
+}
+
 /// `bytes` written to a file, over what it held or after it.
 fn write(rt: &mut Rt, path: &str, bytes: &[u8], append: bool) {
     use std::io::Write;
@@ -95,6 +117,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return None;
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // Guava checks what it is handed (`checkNotNull`): a null file, or a null text to write, is
+    // the caller's error and touches no file. (Read as the text "null", a null file was a file
+    // of that name: the translator, asking each answer with nothing in hand, left one behind.)
+    let files = owner == FILES
+        && params(desc)
+            .iter()
+            .enumerate()
+            .any(|(i, kind)| *kind == "Ljava/io/File;" && a(i).is_null());
+    let written = matches!(name, "write" | "append") && owner == FILES && a(0).is_null();
+    if files || written {
+        rt.throw_new("java/lang/NullPointerException");
+        return Some(V::NULL);
+    }
     let text = |rt: &Rt, i: usize| crate::jlang::text(rt, a(i));
     let string = |rt: &mut Rt, bytes: &[u8]| rt.string(&String::from_utf8_lossy(bytes));
     Some(match (owner, name) {
@@ -309,6 +344,46 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         crate::api::call(rt, key, args)
+    }
+
+    /// A null file or a null text is the caller's error, and no file comes of it: asked with
+    /// nothing in hand (as the translator asks every answer once), `Files.write` left a file
+    /// named `null` holding "null" where it ran.
+    #[test]
+    fn a_null_file_writes_nothing() {
+        crate::install();
+        let dir = std::env::temp_dir().join(format!("hz-guava-null-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rt = Rt::new();
+        let (text, file) = (
+            rt.string("kept"),
+            rt.string(&dir.join("kept.txt").to_string_lossy()),
+        );
+        for (key, args) in [
+            (
+                "com/google/common/io/Files.write.(Ljava/lang/CharSequence;Ljava/io/File;Ljava/nio/charset/Charset;)V",
+                [V::NULL, V::NULL, V::NULL],
+            ),
+            (
+                "com/google/common/io/Files.write.(Ljava/lang/CharSequence;Ljava/io/File;Ljava/nio/charset/Charset;)V",
+                [text, V::NULL, V::NULL],
+            ),
+            (
+                "com/google/common/io/Files.write.(Ljava/lang/CharSequence;Ljava/io/File;Ljava/nio/charset/Charset;)V",
+                [V::NULL, file, V::NULL],
+            ),
+            (
+                "com/google/common/io/Files.touch.(Ljava/io/File;)V",
+                [V::NULL, V::NULL, V::NULL],
+            ),
+        ] {
+            let n = if key.contains("touch") { 1 } else { 3 };
+            crate::api::call(&mut rt, key, &args[..n]);
+            let thrown = rt.thrown.take().expect(key);
+            assert_eq!(rt.class_of(thrown), "java/lang/NullPointerException");
+        }
+        assert!(!std::path::Path::new("null").exists() && !dir.join("kept.txt").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Guava's file helpers as JourneyMap uses them to copy a file out of its jar: the parent

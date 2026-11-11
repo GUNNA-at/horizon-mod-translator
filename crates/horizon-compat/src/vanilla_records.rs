@@ -1021,7 +1021,7 @@ pub(crate) const RECORDS: [(&str, &str); 1013] = [
 /// (class, members): `i<desc>=<fields>` a constructor storing its arguments, `g<name><desc>=<field>` a
 /// getter, `s<name><desc>=<field>` a setter, then `o` (`Object`'s `equals` and `hashCode`) or
 /// `e=<fields>` (both field by field), or neither (overridden otherwise); `|` between members.
-pub(crate) const DATA_CLASSES: [(&str, &str); 623] = [
+pub(crate) const DATA_CLASSES: [(&str, &str); 621] = [
     ("com/mojang/blaze3d/audio/SoundBuffer", "i(Ljava/nio/ByteBuffer;Ljavax/sound/sampled/AudioFormat;)V=data,format|o"),
     ("com/mojang/blaze3d/pipeline/MainTarget$Dimension", "i(II)V=width,height|e=width,height"),
     ("com/mojang/blaze3d/platform/DisplayData", "i(IILjava/util/OptionalInt;Ljava/util/OptionalInt;Z)V=width,height,fullscreenWidth,fullscreenHeight,isFullscreen|o"),
@@ -1423,8 +1423,6 @@ pub(crate) const DATA_CLASSES: [(&str, &str); 623] = [
     ("net/minecraft/util/profiling/metrics/MetricSampler$SamplerResult", "i(IILit/unimi/dsi/fastutil/ints/Int2DoubleMap;)V=firstTick,lastTick,recording|ggetFirstTick()I=firstTick|ggetLastTick()I=lastTick|o"),
     ("net/minecraft/util/profiling/metrics/storage/MetricsPersister", "i(Ljava/lang/String;)V=rootFolderName|o"),
     ("net/minecraft/util/profiling/metrics/storage/RecordedDeviation", "i(Ljava/time/Instant;ILnet/minecraft/util/profiling/ProfileResults;)V=timestamp,tick,profilerResultAtTick|o"),
-    ("net/minecraft/util/random/Weight", "i(I)V=value|gasInt()I=value|e=value"),
-    ("net/minecraft/util/random/WeightedEntry$IntrusiveBase", "i(Lnet/minecraft/util/random/Weight;)V=weight|ggetWeight()Lnet/minecraft/util/random/Weight;=weight|o"),
     ("net/minecraft/util/thread/StrictQueue$IntRunnable", "i(ILjava/lang/Runnable;)V=priority,task|ggetPriority()I=priority|o"),
     ("net/minecraft/util/thread/StrictQueue$QueueStrictQueue", "i(Ljava/util/Queue;)V=queue|o"),
     ("net/minecraft/util/valueproviders/MultipliedFloats", "i([Lnet/minecraft/util/valueproviders/SampledFloat;)V=values|o"),

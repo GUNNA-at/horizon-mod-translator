@@ -432,6 +432,9 @@ pub(crate) fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
         None => match serde_json::from_str::<Json>(&text) {
             Ok(Json::String(id)) if !id.starts_with('#') => vec![id],
             Ok(Json::String(tag)) if registry == "item" => crate::recipes::tag_items(rt, &tag),
+            Ok(Json::String(tag)) if registry == "fluid" && tag.starts_with('#') => {
+                fluid_tag_members(rt, &tag[1..])
+            }
             Ok(Json::Array(items)) => items
                 .iter()
                 .filter_map(Json::as_str)
@@ -447,6 +450,31 @@ pub(crate) fn set_holders(rt: &mut Rt, set: V) -> Vec<V> {
             crate::neo::registry_holder(rt, &registry, &id, value)
         })
         .collect()
+}
+
+/// The fluids the game's tags put in fluid tag `tag` (`c:water`): the game tells of a fluid
+/// whether it is in a tag, so each is asked, vanilla's four and then the mods', by name.
+/// (Mekanism makes a recipe's fluid ingredient of a tag's fluids, and found every tag empty.)
+fn fluid_tag_members(rt: &mut Rt, tag: &str) -> Vec<String> {
+    let key = crate::fluids::tag_key(rt, "fluid", tag);
+    let mut ids: Vec<String> = [
+        "minecraft:water",
+        "minecraft:flowing_water",
+        "minecraft:lava",
+        "minecraft:flowing_lava",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let mut mods: Vec<String> = rt
+        .registered
+        .keys()
+        .filter(|(registry, id)| registry == "fluid" && !ids.contains(id))
+        .map(|(_, id)| id.clone())
+        .collect();
+    mods.sort();
+    ids.extend(mods);
+    ids.retain(|id| crate::fluids::in_tag(rt, key, id));
+    ids
 }
 
 /// Whether holder `holder` is one of `set`'s: the same holder, or a registry holder of the same

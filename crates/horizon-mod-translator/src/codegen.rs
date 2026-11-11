@@ -370,6 +370,27 @@ fn inherited(class: &str) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+/// The instance fields the game's classes hold above the classes being translated
+/// (`derive::fields_above`): by game class, the names it and the classes above it declare. Set
+/// before a bundle is written with the game's own code; empty without it, when only a field of
+/// a translated class counts as hidden ([`Program::hiding_class`]).
+static GAME_FIELDS: std::sync::RwLock<BTreeMap<String, BTreeSet<String>>> =
+    std::sync::RwLock::new(BTreeMap::new());
+
+/// Sets the game's classes' instance fields ([`GAME_FIELDS`]).
+pub fn set_game_fields(fields: BTreeMap<String, BTreeSet<String>>) {
+    if let Ok(mut f) = GAME_FIELDS.write() {
+        *f = fields;
+    }
+}
+
+/// Whether game class `class`, or one above it, declares instance field `name`.
+fn game_declares(class: &str, name: &str) -> bool {
+    GAME_FIELDS
+        .read()
+        .is_ok_and(|f| f.get(class).is_some_and(|names| names.contains(name)))
+}
+
 /// The function that stands in `class` for a method it takes from the game's class above it.
 fn inherited_fn(class: &str, name: &str, desc: &str) -> String {
     format!("{}__above", fn_name(class, name, desc))
@@ -1584,7 +1605,21 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
         // holds, for whoever fills one by the field's type); and before them the class's own
         // (`0 <class> signature`: its supertypes' type arguments).
         let class_signature = c.signature.iter().map(|s| format!("0 <class> {s}"));
+        // And the instance fields among them that hide one above (`0 <hides> name...`): where
+        // reflection finds each, as the code does ([`Self::instance_key`]).
+        let hides: Vec<&str> = c
+            .fields
+            .iter()
+            .filter(|f| {
+                f.access & 0x0008 == 0
+                    && self.hiding_class(&c.name, &f.name) == Some(c.name.as_str())
+            })
+            .map(|f| f.name.as_str())
+            .collect();
+        let hides =
+            (!hides.is_empty()).then(|| format!("0 {} {}", horizon_compat::HIDES, hides.join(" ")));
         let fields = class_signature
+            .chain(hides)
             .chain(c.fields.iter().map(|f| match &f.signature {
                 Some(s) => format!("{} {} {} {s}", f.access, f.name, f.desc),
                 None => format!("{} {} {}", f.access, f.name, f.desc),
@@ -2801,6 +2836,64 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
         }
     }
 
+    /// The class declaring instance field `name` as a reference through `owner` finds it, when
+    /// that field hides another: a class above the one declaring it (translated, or the game's:
+    /// [`GAME_FIELDS`]) declares an instance field of the same name. Java keeps both, told apart
+    /// by the declaring class: GeckoLib's `GeoArmorRenderer` has `head`, `body` and the limbs as
+    /// bones, and `HumanoidModel` above it has them as model parts, which another mod reads
+    /// through the model (`baseModel.head`); an anonymous class made of an inner class has its
+    /// own `this$0` over the inner class's. None for a field that hides nothing, and for a
+    /// mixin's, which is its target's (a `@Shadow`) or added to it.
+    fn hiding_class(&self, owner: &str, name: &str) -> Option<&'a str> {
+        let declares = |k: &ClassFile| {
+            k.fields
+                .iter()
+                .any(|f| f.name == name && f.access & 0x0008 == 0)
+        };
+        // (The classes that carry the game's own methods have marks for fields, not fields.)
+        if owner.starts_with(horizon_compat::linked::DERIVED) {
+            return None;
+        }
+        let mut c = owner;
+        let declaring: &'a ClassFile = loop {
+            let k: &'a ClassFile = self.classes.get(c).copied()?;
+            if let Some(target) = self.mixin_of.get(c) {
+                if k.fields
+                    .iter()
+                    .any(|f| f.name == name && !is_shadow_field(f))
+                {
+                    return None;
+                }
+                c = target;
+                continue;
+            }
+            if declares(k) {
+                break k;
+            }
+            c = k.superclass.as_deref()?;
+        };
+        let mut above = declaring.superclass.as_deref();
+        while let Some(class) = above {
+            match self.classes.get(class) {
+                Some(k) if declares(k) => return Some(declaring.name.as_str()),
+                Some(k) => above = k.superclass.as_deref(),
+                None => return game_declares(class, name).then_some(declaring.name.as_str()),
+            }
+        }
+        None
+    }
+
+    /// The name an object keeps instance field `name` under, read or written through class
+    /// `owner`: the field's name; for one that hides a field above it ([`Self::hiding_class`]),
+    /// the name with the class declaring it (`head@software/bernie/.../GeoArmorRenderer`), so
+    /// that the one above keeps the plain name the runtime and the game's own code know it by.
+    fn instance_key(&self, owner: &str, name: &str) -> String {
+        match self.hiding_class(owner, name) {
+            Some(class) => horizon_compat::hidden_key(name, class),
+            None => name.to_owned(),
+        }
+    }
+
     /// The first interface outside the mod's classes that `k` implements, itself or through one of
     /// the mod's interfaces, in the order the JVM searches them.
     fn api_interface(&self, k: &ClassFile) -> Option<String> {
@@ -2869,9 +2962,16 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             // A field a game class declares (an access transformer opens it): the runtime keeps
             // its state, or answers for it.
             0xb4 if game_read.is_some() => format!("let o = {pop}; s.push({}); {go}", game_read.unwrap_or_default()),
+            // (A field that hides one above it is kept under a name of its own.)
             0xb4 => match zero {
-                Some(z) => format!("let o = {pop}; s.push(match rt.get_field(o, {:?}) {{ V::Void => {z}, v => v }}); {go}", m.name),
-                None => format!("let o = {pop}; s.push(rt.get_field(o, {:?})); {go}", m.name),
+                Some(z) => format!(
+                    "let o = {pop}; s.push(match rt.get_field(o, {:?}) {{ V::Void => {z}, v => v }}); {go}",
+                    self.instance_key(&m.owner, &m.name)
+                ),
+                None => format!(
+                    "let o = {pop}; s.push(rt.get_field(o, {:?})); {go}",
+                    self.instance_key(&m.owner, &m.name)
+                ),
             },
             // A game field a mapped method only sets: the write is that method's call (kept in
             // the object, it would hide what the game makes of the field afterwards).
@@ -2885,7 +2985,7 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             }
             // A game field whose writes the runtime hears of: kept as any other, then told.
             _ if heard.is_some() => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); api::call(rt, {:?}, &[o, v]); {go}", m.name, heard.unwrap_or_default()),
-            _ => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); {go}", m.name),
+            _ => format!("let v = {pop}; let o = {pop}; rt.put_field(o, {:?}, v); {go}", self.instance_key(&m.owner, &m.name)),
         }
     }
 
@@ -3036,8 +3136,14 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             0xb2 if self.own(&owner) => format!("match rt.statics.get({skey:?}).copied() {{ None | Some(V::Void) => {zero}, Some(v) => v }}"),
             0xb2 => format!("api::get_static(rt, {skey:?})"),
             0xb3 => format!("{{ rt.statics.insert({skey:?}, args[0]); V::Void }}"),
-            0xb4 => format!("match rt.get_field(args[0], {:?}) {{ V::Void => {zero}, v => v }}", m.name),
-            _ => format!("{{ rt.put_field(args[0], {:?}, args[1]); V::Void }}", m.name),
+            0xb4 => format!(
+                "match rt.get_field(args[0], {:?}) {{ V::Void => {zero}, v => v }}",
+                self.instance_key(&m.owner, &m.name)
+            ),
+            _ => format!(
+                "{{ rt.put_field(args[0], {:?}, args[1]); V::Void }}",
+                self.instance_key(&m.owner, &m.name)
+            ),
         };
         let as_call = Member { owner: m.owner.clone(), name: m.name.clone(), desc: if read { format!("(){}", m.desc) } else { format!("({})V", m.desc) } };
         let woven = self.call_weaves(&as_call, if is_static { 0xb8 } else { 0xb6 }, at, call);
@@ -3075,13 +3181,15 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
                 // Neither (the runtime models the object otherwise: a `VoxelShape`'s boxes): the
                 // runtime answers it as an API call named after the field, `VoxelShape.$shape`.
                 (false, false) => format!(
-                    "match rt.get_field(args[0], {own:?}) {{ V::Void => match rt.get_field(args[0], {field:?}) {{ V::Void => api::call(rt, {key:?}, &[args[0]]), v => v }}, v => v }}",
+                    "match rt.get_field(args[0], {own:?}) {{ V::Void => match rt.get_field(args[0], {kept:?}) {{ V::Void => api::call(rt, {key:?}, &[args[0]]), v => v }}, v => v }}",
                     own = format!("${field}"),
+                    kept = self.instance_key(&target, &field),
                     key = format!("{target}.${field}.{}", m.desc)
                 ),
                 (false, true) => format!(
-                    "{{ let own = !matches!(rt.get_field(args[0], {own:?}), V::Void) || matches!(rt.get_field(args[0], {field:?}), V::Void); rt.put_field(args[0], if own {{ {own:?} }} else {{ {field:?} }}, args[1]); V::Void }}",
-                    own = format!("${field}")
+                    "{{ let own = !matches!(rt.get_field(args[0], {own:?}), V::Void) || matches!(rt.get_field(args[0], {kept:?}), V::Void); rt.put_field(args[0], if own {{ {own:?} }} else {{ {kept:?} }}, args[1]); V::Void }}",
+                    own = format!("${field}"),
+                    kept = self.instance_key(&target, &field)
                 ),
                 // A static of a translated class is the runtime's own, under its declaring class.
                 (true, false) if self.own(&target) => {
@@ -3812,6 +3920,99 @@ mod field_tests {
         let p = super::Program::new(&classes);
         assert_eq!(p.field_owner("m/Child", "SHAPED"), "api/Serializer");
         assert_eq!(p.field_owner("m/MyItem", "ID"), "api/Item");
+    }
+
+    /// A field that hides one of the same name above it is another field, kept under a name of
+    /// its own: over a translated class's, and over the game's (told by the game's own jars).
+    /// The one above keeps the plain name; a static of the same name hides nothing; a class
+    /// below the one declaring it finds it through that class. Reflection is told which
+    /// (`0 <hides> ...` among the class's fields).
+    #[test]
+    fn a_field_that_hides_one_above_is_kept_apart() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("mod-translator-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gapi")).unwrap();
+        std::fs::create_dir_all(root.join("m")).unwrap();
+        let files = [
+            (
+                "gapi/Model.java",
+                "package gapi; public class Model { public Object head; public int size; public int plain; }",
+            ),
+            (
+                "m/Armor.java",
+                "package m; public class Armor extends gapi.Model { String head = \"bone\"; int count; static int size; \
+                 String own() { return head; } Object above() { return ((gapi.Model) this).head; } int inherited() { return plain; } }",
+            ),
+            (
+                "m/Plate.java",
+                "package m; public class Plate extends Armor { int count; int both() { return count + ((Armor) this).count; } String through() { return head; } }",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::write(root.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| root.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        // The game's class isn't the mod's: its fields are known from the game's jars alone.
+        let classes: Vec<ClassFile> = ["m/Armor.class", "m/Plate.class"]
+            .iter()
+            .map(|c| ClassFile::parse(&std::fs::read(root.join(c)).unwrap()).unwrap())
+            .collect();
+        let game = crate::derive::Game::of(vec![
+            ClassFile::parse(&std::fs::read(root.join("gapi/Model.class")).unwrap()).unwrap(),
+        ]);
+        let _ = std::fs::remove_dir_all(&root);
+        let above = crate::derive::fields_above(&classes, &game);
+        assert_eq!(above.keys().collect::<Vec<_>>(), ["gapi/Model"]);
+        assert_eq!(
+            above["gapi/Model"]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["head", "plain", "size"]
+        );
+        super::set_game_fields(above);
+        let mut p = super::Program::new(&classes);
+        assert_eq!(p.hiding_class("m/Armor", "head"), Some("m/Armor"));
+        assert_eq!(p.hiding_class("m/Plate", "head"), Some("m/Armor"));
+        assert_eq!(p.hiding_class("m/Plate", "count"), Some("m/Plate"));
+        assert_eq!(p.hiding_class("m/Armor", "count"), None);
+        // `Armor.size` is a static: the game's instance field of that name is found past it.
+        assert_eq!(p.hiding_class("m/Armor", "size"), None);
+        assert_eq!(p.hiding_class("m/Armor", "plain"), None);
+        assert_eq!(p.instance_key("m/Plate", "head"), "head@m/Armor");
+        assert_eq!(p.instance_key("m/Plate", "count"), "count@m/Plate");
+        assert_eq!(p.instance_key("m/Armor", "count"), "count");
+        let code = p.emit();
+        // The mod's own `head`, through either class; the game's stays the plain one.
+        assert!(
+            code.contains(r#"rt.get_field(o, "head@m/Armor")"#),
+            "{code}"
+        );
+        assert!(code.contains(r#"rt.put_field(o, "head@m/Armor", v)"#));
+        assert!(code.contains(r#"api::game_field(rt, o, "head", "$head""#));
+        assert!(
+            !code.contains(r#"rt.get_field(o, "head")"#)
+                && !code.contains(r#"rt.put_field(o, "head", v)"#)
+        );
+        assert!(
+            code.contains(r#"rt.get_field(o, "count@m/Plate")"#)
+                && code.contains(r#"rt.get_field(o, "count")"#)
+        );
+        assert!(code.contains("0 <hides> head\\n"), "{code}");
+        assert!(code.contains("0 <hides> count\\n"));
     }
 
     /// A class added between two others takes an id past theirs when the earlier translation's

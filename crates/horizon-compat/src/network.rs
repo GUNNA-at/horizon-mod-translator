@@ -1101,23 +1101,243 @@ fn send(rt: &mut Rt, to: PayloadTarget, payload: V) -> bool {
     send_raw(rt, to, &channel, &data)
 }
 
+/// A message the game took no more of for now, waiting its turn ([`send_whole`]).
+struct Waiting {
+    to: PayloadTarget,
+    channel: String,
+    data: Vec<u8>,
+    ticks: u32,
+}
+
+thread_local! {
+    /// The messages waiting on this thread's runtime (a server's for its players, a client's
+    /// for its server), in the order they were sent.
+    static WAITING: std::cell::RefCell<std::collections::VecDeque<Waiting>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
+    /// The number of the last message this thread sent in parts.
+    static SPLIT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The parts that have come of each message sent in parts, by its sender and number.
+    static PARTS: std::cell::RefCell<std::collections::HashMap<(Option<u128>, u32), Vec<Option<Vec<u8>>>>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Ticks a message waits at most before it is given up: half a minute (a player who left, a
+/// server that carries no mod messages).
+const PATIENCE: u32 = 600;
+/// Messages waiting at most.
+const MOST_WAITING: usize = 8192;
+/// The bytes of a message's data a part carries at most: the game takes 30,000 a message.
+const PART: usize = 29_000;
+/// The channel a large message's parts go on: no mod's id.
+const PARTS_CHANNEL: &str = "hzcompat:part";
+
 /// Sends a payload already encoded (`data` on channel `channel`) to `to`. One a screen's input
 /// sends (its host only reads) goes with the client's next tick ([`crate::screens::flush`]).
+/// One larger than the game takes in a message goes in parts, put together again where they
+/// arrive ([`part_received`]), as NeoForge splits a payload past a packet's size (a quest
+/// book's sync, a recipe viewer's).
 pub fn send_raw(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
     if crate::screens::defer_payload(rt, to, channel, data) {
         return true;
     }
-    let sent = rt.host_mut().is_some_and(|h| h.send_payload(to, channel, data));
-    crate::glue::trace_some(rt, "payload-sent", channel, 40, |_| {
-        format!("payload {channel} ({} bytes) to {to:?}: {}", data.len(), if sent { "sent" } else { "not sent" })
+    if data.len() <= PART {
+        return send_whole(rt, to, channel, data);
+    }
+    let number = SPLIT.with(|n| {
+        n.set(n.get().wrapping_add(1));
+        n.get()
     });
+    let chunks: Vec<&[u8]> = data.chunks(PART - channel.len() - 10).collect();
+    let Ok(count) = u16::try_from(chunks.len()) else {
+        return false;
+    };
+    let mut sent = true;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut part = Vec::with_capacity(chunk.len() + channel.len() + 10);
+        part.extend(number.to_be_bytes());
+        part.extend((i as u16).to_be_bytes());
+        part.extend(count.to_be_bytes());
+        part.extend((channel.len() as u16).to_be_bytes());
+        part.extend(channel.as_bytes());
+        part.extend(*chunk);
+        sent &= send_whole(rt, to, PARTS_CHANNEL, &part);
+    }
     sent
+}
+
+/// Sends one message through the game, or keeps it to go with a later tick: the game takes 32
+/// a tick to one player (and from the window to its server), and at a login the pack's mods
+/// send a player more than that at once (their configs, their registries, the quests, the
+/// claimed chunks, the waystones: past the first 32 each was dropped). A message to one player
+/// or to the server waits behind what already waits for them, so they arrive in the order
+/// sent; one to several players that none of them could take waits for each of those the
+/// level has.
+fn send_whole(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
+    let one = matches!(to, PayloadTarget::Server | PayloadTarget::Player(_));
+    let behind = one && WAITING.with(|w| w.borrow().iter().any(|m| m.to == to));
+    let sent = !behind
+        && rt
+            .host_mut()
+            .is_some_and(|h| h.send_payload(to, channel, data));
+    if sent {
+        crate::glue::trace_some(rt, "payload-sent", channel, 40, |_| {
+            format!("payload {channel} ({} bytes) to {to:?}: sent", data.len())
+        });
+        return true;
+    }
+    // Who it waits for. A host that only reads sends nothing, now or later.
+    let Some(host) = rt.host().filter(|h| !h.read_only()) else {
+        return false;
+    };
+    let for_whom: Vec<PayloadTarget> = match to {
+        PayloadTarget::Server | PayloadTarget::Player(_) => vec![to],
+        PayloadTarget::All => host
+            .players()
+            .into_iter()
+            .map(|(uuid, _)| PayloadTarget::Player(uuid))
+            .collect(),
+        PayloadTarget::Others(but) => host
+            .players()
+            .into_iter()
+            .filter(|&(uuid, _)| uuid != but)
+            .map(|(uuid, _)| PayloadTarget::Player(uuid))
+            .collect(),
+        PayloadTarget::Near { x, y, z, radius } => host
+            .players()
+            .into_iter()
+            .filter(|&(_, at)| {
+                let d = [at[0] - x, at[1] - y, at[2] - z];
+                d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
+            })
+            .map(|(uuid, _)| PayloadTarget::Player(uuid))
+            .collect(),
+    };
+    let waits = !for_whom.is_empty()
+        && WAITING.with(|w| {
+            let mut w = w.borrow_mut();
+            if w.len() + for_whom.len() > MOST_WAITING {
+                return false;
+            }
+            for to in for_whom {
+                w.push_back(Waiting {
+                    to,
+                    channel: channel.to_owned(),
+                    data: data.to_vec(),
+                    ticks: 0,
+                });
+            }
+            true
+        });
+    crate::glue::trace_some(rt, "payload-sent", channel, 40, |_| {
+        format!(
+            "payload {channel} ({} bytes) to {to:?}: {}",
+            data.len(),
+            if waits { "waits its turn" } else { "not sent" }
+        )
+    });
+    waits
+}
+
+/// A tick's start on a server or a client: the messages that waited go, each receiver's in
+/// the order they were sent, until the game takes no more for that one this tick. One that
+/// waited past [`PATIENCE`] is given up.
+pub fn send_waiting(rt: &mut Rt) {
+    if WAITING.with(|w| w.borrow().is_empty()) {
+        return;
+    }
+    let waiting: Vec<Waiting> = WAITING.with(|w| w.borrow_mut().drain(..).collect());
+    let mut full: Vec<PayloadTarget> = Vec::new();
+    let mut left = std::collections::VecDeque::new();
+    for mut m in waiting {
+        if !full.contains(&m.to) {
+            if rt
+                .host_mut()
+                .is_some_and(|h| h.send_payload(m.to, &m.channel, &m.data))
+            {
+                continue;
+            }
+            full.push(m.to);
+        }
+        m.ticks += 1;
+        if m.ticks > PATIENCE {
+            let (channel, to) = (m.channel.clone(), m.to);
+            crate::glue::trace_some(rt, "payload-given-up", &channel, 8, |_| {
+                format!("payload {channel} to {to:?} waited {PATIENCE} ticks: given up")
+            });
+            continue;
+        }
+        left.push_back(m);
+    }
+    WAITING.with(|w| {
+        let mut w = w.borrow_mut();
+        // What a hook sent meanwhile stays behind what already waited.
+        left.extend(w.drain(..));
+        *w = left;
+    });
+}
+
+/// The world is gone: what waited to be sent in it, and the parts of what was still arriving,
+/// are dropped (a world opened next has the same player, by the same UUID).
+pub fn forget_waiting() {
+    WAITING.with(|w| w.borrow_mut().clear());
+    PARTS.with(|p| p.borrow_mut().clear());
+}
+
+/// A part of a large message ([`send_raw`]): kept until the others have come, then the whole
+/// is received as the message it is. True when the part reads.
+fn part_received(rt: &mut Rt, data: &[u8], player: Option<u128>) -> bool {
+    let Some((head, rest)) = data.split_at_checked(10) else {
+        return false;
+    };
+    let number = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    let (index, count) = (
+        usize::from(u16::from_be_bytes([head[4], head[5]])),
+        usize::from(u16::from_be_bytes([head[6], head[7]])),
+    );
+    let Some((channel, chunk)) =
+        rest.split_at_checked(usize::from(u16::from_be_bytes([head[8], head[9]])))
+    else {
+        return false;
+    };
+    let Ok(channel) = std::str::from_utf8(channel) else {
+        return false;
+    };
+    if index >= count {
+        return false;
+    }
+    let whole = PARTS.with(|parts| {
+        let mut parts = parts.borrow_mut();
+        // A sender with too much begun and never ended starts over.
+        if !parts.contains_key(&(player, number))
+            && parts.keys().filter(|k| k.0 == player).count() >= 16
+        {
+            parts.retain(|k, _| k.0 != player);
+        }
+        let got = parts
+            .entry((player, number))
+            .or_insert_with(|| vec![None; count]);
+        if got.len() != count {
+            return None;
+        }
+        got[index] = Some(chunk.to_vec());
+        if got.iter().any(Option::is_none) {
+            return None;
+        }
+        parts
+            .remove(&(player, number))
+            .map(|all| all.into_iter().flatten().flatten().collect::<Vec<u8>>())
+    });
+    match whole {
+        Some(whole) => receive(rt, channel, &whole, player),
+        None => true,
+    }
 }
 
 /// A payload that came over the mod channel: read with its type's codec and handed to its handler.
 /// `player` is who sent it, on a server's runtime; None on a client's. False when no payload type
 /// has that id here.
 pub fn receive(rt: &mut Rt, channel: &str, data: &[u8], player: Option<u128>) -> bool {
+    if channel == PARTS_CHANNEL {
+        return part_received(rt, data, player);
+    }
     let Some(entry) = rt.interned.get(&format!("payload/{channel}")).copied() else { return false };
     let parts = rt.captured(entry);
     let (codec, handler) = (parts.first().copied().unwrap_or_default(), parts.get(1).copied().unwrap_or_default());
@@ -3261,6 +3481,145 @@ mod tests {
         assert_eq!(client.class_of(client.interned["test/player"]), "net/minecraft/client/player/LocalPlayer");
         // Nothing of this mod's has another id.
         assert!(!client.with_host(&mut client_host, |rt| receive(rt, "test:other", &data, None)));
+    }
+
+    /// The game takes so many messages a tick for one player, and so many bytes a message. What
+    /// it takes no more of waits and goes with the next ticks, each player's in the order sent
+    /// (a pack's mods send a player dozens at a login: past the game's 32 they were dropped);
+    /// what is larger than a message goes in parts and is one message again where it arrives.
+    #[test]
+    fn what_the_game_takes_no_more_of_waits_and_a_large_payload_goes_in_parts() {
+        /// A game that takes `left` more messages this tick, of 30,000 bytes at most.
+        struct Capped {
+            took: Vec<(PayloadTarget, String, Vec<u8>)>,
+            left: u32,
+        }
+        impl crate::host::Host for Capped {
+            fn block_state(&self, _: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _: [i32; 3], _: &str) -> bool {
+                false
+            }
+            fn is_server(&self) -> bool {
+                true
+            }
+            fn players(&self) -> Vec<(u128, [f64; 3])> {
+                vec![(7, [0.0; 3]), (9, [0.0; 3])]
+            }
+            fn send_payload(&mut self, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
+                if self.left == 0 || data.len() > 30_000 {
+                    return false;
+                }
+                self.left -= 1;
+                self.took.push((to, channel.to_owned(), data.to_vec()));
+                true
+            }
+        }
+        let (seven, nine) = (PayloadTarget::Player(7), PayloadTarget::Player(9));
+        let mut rt = Rt::new();
+        let mut host = Capped {
+            took: Vec::new(),
+            left: 2,
+        };
+        rt.with_host(&mut host, |rt| {
+            for i in 0..5u8 {
+                assert!(send_raw(rt, seven, "t:sync", &[i]));
+            }
+            // To everyone, when none can take it now: for each player the level has.
+            assert!(send_raw(rt, PayloadTarget::All, "t:all", &[9]));
+        });
+        let went = |host: &Capped| {
+            host.took
+                .iter()
+                .map(|(to, channel, data)| (*to, channel.clone(), data[0]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            went(&host),
+            [
+                (seven, "t:sync".to_owned(), 0),
+                (seven, "t:sync".to_owned(), 1)
+            ]
+        );
+        // The next tick takes three more, the one after the rest: in the order sent.
+        host.left = 3;
+        rt.with_host(&mut host, send_waiting);
+        assert_eq!(
+            went(&host)[2..],
+            [
+                (seven, "t:sync".to_owned(), 2),
+                (seven, "t:sync".to_owned(), 3),
+                (seven, "t:sync".to_owned(), 4)
+            ]
+        );
+        host.left = 9;
+        rt.with_host(&mut host, |rt| {
+            // One sent while others wait for the same player goes behind them.
+            assert!(send_raw(rt, seven, "t:sync", &[5]));
+            send_waiting(rt);
+            send_waiting(rt);
+        });
+        assert_eq!(
+            went(&host)[5..],
+            [
+                (seven, "t:all".to_owned(), 9),
+                (nine, "t:all".to_owned(), 9),
+                (seven, "t:sync".to_owned(), 5)
+            ]
+        );
+        assert_eq!(host.left, 6, "nothing goes twice");
+
+        // A payload of 70,000 bytes: three messages the game takes, one payload where they come.
+        let mut server = Rt::new();
+        register(&mut server);
+        let packet = server.new_object("test/Packet");
+        let pos = crate::api::block_pos(&mut server, 3, 70, -9);
+        server.put_field(packet, "pos", pos);
+        server.put_field(packet, "speed", V::F(0.5));
+        let (channel, mut data) = encode_payload(&mut server, packet).unwrap();
+        data.resize(70_000, 0xab);
+        let mut host = Capped {
+            took: Vec::new(),
+            left: 9,
+        };
+        assert!(server.with_host(&mut host, |rt| send_raw(rt, seven, &channel, &data)));
+        assert_eq!(host.took.len(), 3);
+        assert!(host.took.iter().all(|(to, channel, part)| *to == seven
+            && channel == PARTS_CHANNEL
+            && part.len() <= 30_000));
+        let mut client = Rt::new();
+        register(&mut client);
+        let mut client_host = MemoryHost::default();
+        // In any order: nothing is handled until the last has come, then the handler runs once.
+        for i in [2, 0] {
+            assert!(client.with_host(&mut client_host, |rt| receive(
+                rt,
+                PARTS_CHANNEL,
+                &host.took[i].2,
+                None
+            )));
+            assert!(!client.interned.contains_key("test/got"));
+        }
+        assert!(client.with_host(&mut client_host, |rt| receive(
+            rt,
+            PARTS_CHANNEL,
+            &host.took[1].2,
+            None
+        )));
+        let got = client.interned["test/got"];
+        assert_eq!(
+            native(&client, client.get_field(got, "pos"))[..3],
+            [3, 70, -9]
+        );
+        assert_eq!(client.get_field(got, "speed"), V::F(0.5));
+        // A part that says nothing of the sort is refused.
+        assert!(!client.with_host(&mut client_host, |rt| receive(
+            rt,
+            PARTS_CHANNEL,
+            &[0, 1, 2],
+            None
+        )));
     }
 
     /// A payload to those tracking a player goes to every player but that one (a player's own client

@@ -1873,6 +1873,8 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
     rt.safe_point();
     rt.with_host(host, |rt| {
         if !post {
+            // What the game took no more of last tick goes first.
+            crate::network::send_waiting(rt);
             crate::damage::server_tick(rt);
             forget_broken(rt);
             server_place(rt, &crate::places::TICK_SERVER, true);
@@ -1926,7 +1928,11 @@ pub fn world_lifecycle(rt: &mut Rt, host: &mut dyn Host, phase: &str) {
     rt.safe_point();
     rt.with_host(host, |rt| match phase {
         "open_ready" => crate::neo::server_started(rt),
-        "open_failed" | "close_final" | "close_failed" => crate::neo::server_stopped(rt),
+        "open_failed" | "close_final" | "close_failed" => {
+            crate::neo::server_stopped(rt);
+            // What still waited for a player of that world is nobody's now.
+            crate::network::forget_waiting();
+        }
         _ => {}
     });
 }
@@ -2487,6 +2493,7 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     rt.safe_point();
     client_setup(rt, host);
     rt.with_host(host, |rt| {
+        crate::network::send_waiting(rt);
         crate::screens::run_client_tasks(rt);
         crate::gui::frame(rt);
         // What mixins inject into `Minecraft.tick` and, in a world, into the client level's

@@ -398,12 +398,76 @@ fn layer_name(rt: &Rt, location: V) -> String {
     format!("{model}#{layer}")
 }
 
+/// Vanilla's own layer `name` (`minecraft:player#inner_armor`), of those 1.21.1 makes of the
+/// humanoid's shape (`LayerDefinitions.createRoots`): the armour layers of the player, the zombies,
+/// the skeletons and the piglins (`HumanoidArmorModel.createBodyLayer`, grown by half a pixel inside
+/// and a whole one outside; a drowned's both by half, a piglin's outer by 1.02), 64 by 32, and the
+/// zombie, husk and giant themselves, 64 by 64. A mod bakes one for its own armour (GeckoLib's
+/// armour layer takes a humanoid model's parts to place its bones by). None for the rest.
+fn vanilla_layer(rt: &mut Rt, name: &str) -> Option<V> {
+    let (mob, layer) = name.strip_prefix("minecraft:")?.split_once('#')?;
+    let inner = matches!(
+        mob,
+        "bogged"
+            | "drowned"
+            | "giant"
+            | "husk"
+            | "piglin"
+            | "piglin_brute"
+            | "player"
+            | "player_slim"
+            | "skeleton"
+            | "stray"
+            | "wither_skeleton"
+            | "zombie"
+            | "zombified_piglin"
+    );
+    let armour = match (layer, mob) {
+        ("inner_armor", _) if inner => 0.5,
+        ("outer_armor", "drowned") => 0.5,
+        ("outer_armor", "piglin" | "piglin_brute" | "zombified_piglin") => 1.02,
+        ("outer_armor", _) if inner => 1.0,
+        ("main", "giant" | "husk" | "zombie") => {
+            let none = deformation(rt, [0.0; 3]);
+            let mesh = create_mesh(rt, none, 0.0);
+            return Some(layer_definition(rt, mesh, V::I(64), V::I(64)));
+        }
+        _ => return None,
+    };
+    // `HumanoidArmorModel.createBodyLayer(deformation)`: the humanoid's mesh, its legs a tenth
+    // of a pixel thinner than the rest.
+    let grown = deformation(rt, [armour; 3]);
+    let mesh = create_mesh(rt, grown, 0.0);
+    let root = rt.get_field(mesh, "$root");
+    for (leg, mirror, x) in [("right_leg", false, -1.9f32), ("left_leg", true, 1.9)] {
+        let builder = rt.new_object(CUBE_LIST);
+        init_cube_list(rt, builder);
+        rt.put_field(builder, "$u", V::I(0));
+        rt.put_field(builder, "$v", V::I(16));
+        rt.put_field(builder, "$mirror", V::I(i32::from(mirror)));
+        push_cube(
+            rt,
+            builder,
+            [-2.0, 0.0, -2.0],
+            [4.0, 12.0, 4.0],
+            [armour + -0.1; 3],
+        );
+        let pose = part_pose(rt, [x, 12.0, 0.0, 0.0, 0.0, 0.0]);
+        let n = rt.string(leg);
+        add_or_replace_child(rt, root, n, builder, pose);
+    }
+    Some(layer_definition(rt, mesh, V::I(64), V::I(32)))
+}
+
 /// `EntityModelSet.bakeLayer(location)`: the layer definition its mod registered for it, baked
-/// afresh (each renderer gets parts of its own). A layer nobody registered (vanilla's own) bakes as
-/// an empty part.
+/// afresh (each renderer gets parts of its own). One of vanilla's own that nobody registered is
+/// vanilla's where the runtime has its shape ([`vanilla_layer`]), else an empty part.
 pub fn bake_layer(rt: &mut Rt, location: V) -> V {
     let name = layer_name(rt, location);
     let Some(supplier) = rt.interned.get(&format!("layer/{name}")).copied() else {
+        if let Some(layer) = vanilla_layer(rt, &name) {
+            return bake_root(rt, layer);
+        }
         crate::glue::trace_once(rt, &format!("no-layer/{name}"), |_| format!("client: no layer definition for {name}: drawn empty"));
         return empty_part(rt);
     };
@@ -1931,8 +1995,9 @@ mod tests {
         let name = rt.string("head");
         let head = crate::api::call(&mut rt, GET_CHILD, &[second, name]);
         assert_eq!(rt.get_field(head, "y"), V::F(6.0));
-        let zombie = location(&mut rt, "minecraft:zombie");
-        let empty = crate::api::call(&mut rt, CONTEXT_BAKE, &[context, zombie]);
+        // (One of vanilla's the runtime has no shape for.)
+        let cow = location(&mut rt, "minecraft:cow");
+        let empty = crate::api::call(&mut rt, CONTEXT_BAKE, &[context, cow]);
         let name = rt.string("left_arm");
         let arm = crate::api::call(&mut rt, GET_CHILD, &[empty, name]);
         assert_ne!(arm, V::NULL);
@@ -2028,6 +2093,56 @@ mod tests {
         assert_eq!([arm_pose[12], arm_pose[13]], [-5.0 / 16.0, 2.0 / 16.0]);
         assert_eq!([leg_pose[12], leg_pose[13]], [1.9 / 16.0, 12.0 / 16.0]);
         assert!(host.drawn.iter().all(|d| quads(&d.0).iter().all(|q| q.sprite == "entity/zombie/zombie")));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Vanilla's armour layers are vanilla's (`ModelLayers.PLAYER_INNER_ARMOR`...): a mod bakes
+    /// one and makes a `HumanoidModel` of it for its own armour, whose parts it then reads
+    /// (GeckoLib's armour layer set a null part's position at every frame of every mob it drew).
+    /// The seven parts of the humanoid, on a 64 by 32 texture; a layer the runtime has no shape
+    /// for is still an empty part.
+    #[test]
+    fn vanillas_armour_layers_have_the_humanoids_parts() {
+        let mut rt = Rt::new();
+        crate::install();
+        let set = rt.new_object(MODEL_SET);
+        let bake = |rt: &mut Rt, mob: &str, layer: &str| {
+            let location = rt.new_object("net/minecraft/client/model/geom/ModelLayerLocation");
+            let (id, name) = (rt.string(&format!("minecraft:{mob}")), rt.string(layer));
+            crate::api::call(rt, LAYER_INIT, &[location, id, name]);
+            crate::api::call(
+                rt,
+                "net/minecraft/client/model/geom/EntityModelSet.bakeLayer.(Lnet/minecraft/client/model/geom/ModelLayerLocation;)Lnet/minecraft/client/model/geom/ModelPart;",
+                &[set, location],
+            )
+        };
+        for (mob, layer) in [
+            ("player", "inner_armor"),
+            ("player", "outer_armor"),
+            ("zombie", "outer_armor"),
+            ("piglin", "outer_armor"),
+            ("husk", "main"),
+        ] {
+            let root = bake(&mut rt, mob, layer);
+            let model = rt.new_object(HUMANOID);
+            crate::api::call(&mut rt, HUMANOID_INIT, &[model, root]);
+            for part in [
+                "head", "hat", "body", "rightArm", "leftArm", "rightLeg", "leftLeg",
+            ] {
+                assert_ne!(rt.get_field(model, part).r(), 0, "{mob}#{layer}: {part}");
+            }
+        }
+        // A cow's is not known here: no parts.
+        let root = bake(&mut rt, "cow", "main");
+        let head = rt.string("head");
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "net/minecraft/client/model/geom/ModelPart.hasChild.(Ljava/lang/String;)Z",
+                &[root, head]
+            ),
+            V::I(0)
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

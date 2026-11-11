@@ -1564,6 +1564,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         || (matches!(owner, "net/minecraft/world/item/SwordItem" | "net/minecraft/world/item/DiggerItem" | "net/minecraft/world/item/AxeItem" | "net/minecraft/world/item/HoeItem" | "net/minecraft/world/item/PickaxeItem" | "net/minecraft/world/item/ShovelItem") && name == "createAttributes")
         || matches!(owner, TIERS | SIMPLE_TIER)
         || (owner == "net/minecraft/world/item/Tier" && name.starts_with("get"))
+        || (owner.starts_with("net/minecraft/world/item/") && name == "getTier")
 }
 
 const TIERS: &str = "net/minecraft/world/item/Tiers";
@@ -1620,6 +1621,61 @@ fn tier_method(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> 
         "getIncorrectBlocksForDrops" => crate::fluids::tag_key(rt, "block", incorrect),
         _ => return None,
     })
+}
+
+/// The tier of one of vanilla's own tools or weapons, by its name (`minecraft:golden_hoe`: `GOLD`),
+/// as `Items` makes them.
+fn vanilla_tier(id: &str) -> Option<&'static str> {
+    let name = id.strip_prefix("minecraft:")?;
+    let (material, kind) = name.rsplit_once('_')?;
+    if !matches!(kind, "sword" | "pickaxe" | "axe" | "shovel" | "hoe") {
+        return None;
+    }
+    Some(match material {
+        "wooden" => "WOOD",
+        "stone" => "STONE",
+        "iron" => "IRON",
+        "golden" => "GOLD",
+        "diamond" => "DIAMOND",
+        "netherite" => "NETHERITE",
+        _ => return None,
+    })
+}
+
+/// The type and the material of one of vanilla's own armour items, by its name
+/// (`minecraft:chainmail_boots`: `BOOTS` of `CHAIN`), as `Items` makes them: a turtle's shell
+/// is a helmet, and what a horse or a wolf wears is of the `BODY` type.
+fn vanilla_armor(id: &str) -> Option<(&'static str, &'static str)> {
+    let name = id.strip_prefix("minecraft:")?;
+    match name {
+        "turtle_helmet" => return Some(("HELMET", "TURTLE")),
+        "wolf_armor" => return Some(("BODY", "ARMADILLO")),
+        _ => {}
+    }
+    let (material, ty) = match name.strip_suffix("_horse_armor") {
+        Some(material) => (material, "BODY"),
+        None => {
+            let (material, piece) = name.rsplit_once('_')?;
+            let ty = match piece {
+                "helmet" => "HELMET",
+                "chestplate" => "CHESTPLATE",
+                "leggings" => "LEGGINGS",
+                "boots" => "BOOTS",
+                _ => return None,
+            };
+            (material, ty)
+        }
+    };
+    let material = match material {
+        "leather" => "LEATHER",
+        "chainmail" => "CHAIN",
+        "iron" => "IRON",
+        "golden" => "GOLD",
+        "diamond" => "DIAMOND",
+        "netherite" => "NETHERITE",
+        _ => return None,
+    };
+    Some((ty, material))
 }
 
 const DISPENSER: &str = "net/minecraft/world/level/block/DispenserBlock";
@@ -2316,8 +2372,51 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let ty = rt.get_field(a(0), "type");
             armor_slot(rt, ty)
         }
-        (ARMOR_ITEM, "getType") => Some(rt.get_field(a(0), "type")),
-        (ARMOR_ITEM, "getMaterial") => Some(rt.get_field(a(0), "material")),
+        // What its constructor was given; one of vanilla's own, which no constructor here
+        // made, has its name's (`minecraft:iron_helmet`).
+        (ARMOR_ITEM, "getType") => Some(match rt.get_field(a(0), "type") {
+            V::Void | V::NULL => match rt.str_of(a(0)).and_then(vanilla_armor).map(|(ty, _)| ty) {
+                Some(ty) => {
+                    let key = rt.static_key(&format!("{ARMOR_TYPE}.{ty}"));
+                    api::get_static(rt, key)
+                }
+                None => V::NULL,
+            },
+            ty => ty,
+        }),
+        (ARMOR_ITEM, "getMaterial") => Some(match rt.get_field(a(0), "material") {
+            V::Void | V::NULL => match rt
+                .str_of(a(0))
+                .and_then(vanilla_armor)
+                .map(|(_, material)| material)
+            {
+                Some(material) => {
+                    let key = rt.static_key(&format!(
+                        "net/minecraft/world/item/ArmorMaterials.{material}"
+                    ));
+                    api::get_static(rt, key)
+                }
+                None => V::NULL,
+            },
+            material => material,
+        }),
+        // A tool's or weapon's tier (`TieredItem.getTier()`): what its constructor was given;
+        // for one of vanilla's own, the tier its name says (`minecraft:iron_pickaxe`).
+        (o, "getTier")
+            if o.starts_with("net/minecraft/world/item/")
+                && desc == "()Lnet/minecraft/world/item/Tier;" =>
+        {
+            Some(match rt.get_field(a(0), "tier") {
+                V::Void | V::NULL => match rt.str_of(a(0)).and_then(vanilla_tier) {
+                    Some(tier) => {
+                        let key = rt.static_key(&format!("{TIERS}.{tier}"));
+                        api::get_static(rt, key)
+                    }
+                    None => V::NULL,
+                },
+                tier => tier,
+            })
+        }
         ("net/minecraft/world/item/ArmorItem$Type", "getDurability") => {
             const HEALTH: [i32; 5] = [11, 16, 15, 13, 16];
             let i = rt.get_field(a(0), "$ordinal").i().clamp(0, 4) as usize;
@@ -2581,6 +2680,15 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if o == ARMOR_ITEM && desc.starts_with("(Lnet/minecraft/core/Holder;Lnet/minecraft/world/item/ArmorItem$Type;") {
                 rt.put_field(a(0), "material", a(1));
                 rt.put_field(a(0), "type", a(2));
+            }
+            // A tool's or weapon's tier (`TieredItem(tier, properties)` and the kinds built on
+            // it: `SwordItem(tier, properties)`, `DiggerItem(tier, blocks, properties)`), the
+            // field vanilla names `tier`, which `getTier()` answers.
+            if let Some(i) = crate::neo::desc_params(desc)
+                .iter()
+                .position(|p| p == "Lnet/minecraft/world/item/Tier;")
+            {
+                rt.put_field(a(0), "tier", a(i + 1));
             }
             // `BucketItem(Fluid, Properties)`: the fluid it holds, vanilla's field `content`.
             if o == "net/minecraft/world/item/BucketItem" {
@@ -4930,6 +5038,87 @@ mod tests {
             assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorItem.getType.()Lnet/minecraft/world/item/ArmorItem$Type;", &[item]), ty);
             assert_eq!(api::call(&mut rt, "net/minecraft/world/item/ArmorItem.getMaterial.()Lnet/minecraft/core/Holder;", &[item]), material);
         }
+        // Vanilla's own armour, which no constructor here made, has its name's type and material
+        // (a mod that walks every item asks them: MineColonies, for what its guards may wear).
+        for (id, ty, of) in [
+            ("minecraft:chainmail_boots", "BOOTS", "CHAIN"),
+            ("minecraft:turtle_helmet", "HELMET", "TURTLE"),
+            ("minecraft:diamond_horse_armor", "BODY", "DIAMOND"),
+        ] {
+            let item = api_common::item(&mut rt, id);
+            let key = Box::leak(format!("{ARMOR_TYPE}.{ty}").into_boxed_str());
+            let ty = api::get_static(&mut rt, key);
+            assert_eq!(
+                api::call(
+                    &mut rt,
+                    "net/minecraft/world/item/ArmorItem.getType.()Lnet/minecraft/world/item/ArmorItem$Type;",
+                    &[item]
+                ),
+                ty,
+                "{id}"
+            );
+            let key =
+                Box::leak(format!("net/minecraft/world/item/ArmorMaterials.{of}").into_boxed_str());
+            let of = api::get_static(&mut rt, key);
+            assert_eq!(
+                api::call(
+                    &mut rt,
+                    "net/minecraft/world/item/ArmorItem.getMaterial.()Lnet/minecraft/core/Holder;",
+                    &[item]
+                ),
+                of,
+                "{id}"
+            );
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A tool keeps the tier it was made with (`TieredItem.getTier()`, whatever the kind of tool
+    /// and wherever the tier stands among its constructor's arguments), and one of vanilla's
+    /// own has the tier its name says. AE2's quartz axe answered nothing, and MineColonies,
+    /// which asks every item for its tier's damage, gave up on it.
+    #[test]
+    fn a_tool_answers_the_tier_it_was_made_with() {
+        const GET_TIER: &str =
+            "net/minecraft/world/item/TieredItem.getTier.()Lnet/minecraft/world/item/Tier;";
+        let mut rt = Rt::new();
+        crate::install();
+        rt.supers
+            .insert("test/QuartzAxe", "net/minecraft/world/item/AxeItem");
+        let diamond = api::get_static(&mut rt, "net/minecraft/world/item/Tiers.DIAMOND");
+        let props = rt.new_object(ITEM_PROPERTIES);
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/Item$Properties.<init>.()V",
+            &[props],
+        );
+        let axe = rt.new_object("test/QuartzAxe");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/AxeItem.<init>.(Lnet/minecraft/world/item/Tier;Lnet/minecraft/world/item/Item$Properties;)V",
+            &[axe, diamond, props],
+        );
+        assert_eq!(api::call(&mut rt, GET_TIER, &[axe]), diamond);
+        let digger = rt.new_object("test/QuartzAxe");
+        let tag = crate::fluids::tag_key(&mut rt, "block", "minecraft:mineable/axe");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/item/DiggerItem.<init>.(Lnet/minecraft/world/item/Tier;Lnet/minecraft/tags/TagKey;Lnet/minecraft/world/item/Item$Properties;)V",
+            &[digger, diamond, tag, props],
+        );
+        assert_eq!(api::call(&mut rt, GET_TIER, &[digger]), diamond);
+        for (id, tier) in [
+            ("minecraft:golden_hoe", "GOLD"),
+            ("minecraft:wooden_sword", "WOOD"),
+            ("minecraft:netherite_pickaxe", "NETHERITE"),
+        ] {
+            let item = api_common::item(&mut rt, id);
+            let key = Box::leak(format!("{TIERS}.{tier}").into_boxed_str());
+            let tier = api::get_static(&mut rt, key);
+            assert_eq!(api::call(&mut rt, GET_TIER, &[item]), tier, "{id}");
+        }
+        let stick = api_common::item(&mut rt, "minecraft:stick");
+        assert_eq!(api::call(&mut rt, GET_TIER, &[stick]), V::NULL);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

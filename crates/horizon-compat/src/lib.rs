@@ -13,6 +13,21 @@ pub const FILES: &str = "hz/files";
 /// `reflect` answers a class's name with a line each, `access name descriptor`.
 pub const MEMBERS: &str = "hz/members";
 
+/// Among a mod class's fields as reflection lists them (`linked::ClassDef::fields`), the line
+/// naming those of its instance fields that hide a field of the same name in a class above it
+/// (`0 <hides> head body`): the translator writes it, and reflection finds such a field where
+/// the translated code keeps it ([`hidden_key`]).
+pub const HIDES: &str = "<hides>";
+
+/// The name an object keeps instance field `name` under when `class` declares it over a field
+/// of the same name in a class above: Java tells the two apart by the declaring class, and here
+/// the one above keeps the plain name (GeckoLib's `GeoArmorRenderer.head`, a bone, is
+/// `head@software/bernie/geckolib/renderer/GeoArmorRenderer`; `HumanoidModel.head`, the model
+/// part, is `head`).
+pub fn hidden_key(name: &str, class: &str) -> String {
+    format!("{name}@{class}")
+}
+
 pub mod annotations;
 pub mod atomics;
 pub mod api;
@@ -85,6 +100,7 @@ pub mod jutil;
 pub mod keys;
 pub mod menus;
 pub mod widgets;
+pub mod weighted;
 pub mod writers;
 pub mod edit_box;
 pub mod level_env;

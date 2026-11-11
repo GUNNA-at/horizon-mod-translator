@@ -1867,6 +1867,23 @@ pub fn decode_native(rt: &mut Rt, name: &str, j: &Json) -> Result<V, String> {
             }
             Ok(rt.string(&qualified(s)))
         }
+        // `ExtraCodecs.TAG_OR_ELEMENT_ID`: an entry's id, or a tag's after `#`, as vanilla's
+        // record of the two (`id`, `tag`).
+        "tag_or_element" => {
+            let s = j.as_str().ok_or_else(|| format!("Not a string: {j}"))?;
+            let (tag, id) = match s.strip_prefix('#') {
+                Some(id) => (true, id),
+                None => (false, s),
+            };
+            if !valid_location(id) {
+                return Err(format!("Not a valid resource location: {id}"));
+            }
+            let read = rt.new_object("net/minecraft/util/ExtraCodecs$TagOrElementLocation");
+            let id = rt.string(&qualified(id));
+            rt.put_field(read, "id", id);
+            rt.put_field(read, "tag", V::I(i32::from(tag)));
+            Ok(read)
+        }
         "block_pos" => {
             let xyz: Vec<i64> = j.as_array().map(|a| a.iter().filter_map(Json::as_i64).collect()).unwrap_or_default();
             match xyz[..] {

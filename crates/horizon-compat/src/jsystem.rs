@@ -461,7 +461,7 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         "getDefaultUncaughtExceptionHandler" | "getUncaughtExceptionHandler" => V::NULL,
         "ofVirtual" | "ofPlatform" => rt.new_object(THREAD_BUILDER),
         "getStackTrace" => crate::jlang::thread_frames(rt),
-        "getThreadGroup" => rt.intern("compat:thread-group".into(), |rt| rt.new_object("java/lang/ThreadGroup")),
+        "getThreadGroup" => crate::neo::thread_group(rt),
         "getContextClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
         // Giving the other threads a turn: the pools' work has it ([`crate::tasks`]).
         "yield" | "onSpinWait" => {

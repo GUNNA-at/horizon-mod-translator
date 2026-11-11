@@ -1370,7 +1370,12 @@ fn guava_optional(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> 
 }
 
 fn is_map(class: &str) -> bool {
-    class.ends_with("Map") || class.ends_with("Map$Values")
+    class.ends_with("Map")
+        || class.ends_with("Map$Values")
+        // `Hashtable` and its `Properties`: maps by all but their names. Taken for sets, a
+        // `Properties.forEach((key, value) -> ...)` was handed its keys alone, and
+        // `containsKey` and `clone` were not there.
+        || matches!(class, "java/util/Hashtable" | "java/util/Properties" | "java/util/Dictionary")
 }
 
 /// Whether `v`, an object that holds a table, is a map (its entries are keys with their
@@ -1379,7 +1384,15 @@ fn is_map(class: &str) -> bool {
 /// an anonymous class of the mod's, which is that `HashMap` (taken for a set, by its name, it
 /// had no `put`).
 pub(crate) fn is_map_object(rt: &Rt, v: V) -> bool {
-    is_map(rt.class_of(v)) || (rt.cid(v) != 0 && rt.instance_of_static(v, "java/util/Map"))
+    is_map(rt.class_of(v))
+        || (rt.cid(v) != 0
+            && [
+                "java/util/Map",
+                "java/util/Hashtable",
+                "java/util/Properties",
+            ]
+            .into_iter()
+            .any(|map| rt.instance_of_static(v, map)))
 }
 
 /// Appends `v` to the list at `l` (`List.add`); nothing for what isn't a list.
@@ -1867,6 +1880,27 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         {
             return properties(rt, name, desc, args);
         }
+        // What a `Hashtable` has under its older names: its keys and its values as
+        // enumerations, and `contains(value)`.
+        "java/util/Hashtable" | "java/util/Properties" | "java/util/Dictionary"
+            if matches!(
+                (name, desc),
+                ("keys" | "elements", "()Ljava/util/Enumeration;")
+                    | ("contains", "(Ljava/lang/Object;)Z")
+            ) =>
+        {
+            return Some(match name {
+                "keys" => {
+                    let keys = table_keys(rt, a(0));
+                    new_iter(rt, keys)
+                }
+                "elements" => {
+                    let values = table_pairs(rt, a(0)).into_iter().map(|(_, v)| v).collect();
+                    new_iter(rt, values)
+                }
+                _ => return map_call(rt, "containsValue", desc, args),
+            });
+        }
         _ => {}
     }
     // Statics first.
@@ -2072,6 +2106,26 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         Data::Stream(_) => 's',
         _ => '?',
     });
+    let class = rt.class_of(this);
+    // `clone()` of one of Java's own collections or maps (`ArrayList`, `HashMap`, `Properties`):
+    // another of its class holding the same elements. (An `EnumSet`'s is its own, below.)
+    if name == "clone"
+        && desc == "()Ljava/lang/Object;"
+        && matches!(data_kind, Some('l' | 't'))
+        && class.starts_with("java/util/")
+        && class != ENUM_SET
+    {
+        let (cid, data) = rt
+            .heap
+            .get(this.r() as usize)
+            .map(|o| (o.cid, o.data.clone()))?;
+        let side = rt.side_fields.get(&this.r()).cloned();
+        let copy = rt.alloc_cid(class, cid, data);
+        if let Some(fields) = side {
+            rt.side_fields.insert(copy.r(), fields);
+        }
+        return Some(copy);
+    }
     let class = rt.class_of(this);
     if data_kind == Some('t') && class.starts_with("com/google/common/collect/") {
         if class.ends_with("Multimap") {
@@ -4194,6 +4248,32 @@ fn entry_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// An ordered set's method for one of its ends, under fastutil's names by element kind
+/// (`firstLong`, `lastInt`, `removeFirstLong`) or Java 21's (`removeFirst`, `removeLast`):
+/// whether it is the last one, and whether it takes the element out. None for another name
+/// (`first` and `last` themselves are answered apart, null for an empty set).
+fn ends_name(name: &str) -> Option<(bool, bool)> {
+    let (rest, removes) = match name.strip_prefix("remove") {
+        Some(rest) => (rest, true),
+        None => (name, false),
+    };
+    let (kind, from_back) = match (
+        rest.strip_prefix("First")
+            .or_else(|| rest.strip_prefix("first")),
+        rest.strip_prefix("Last")
+            .or_else(|| rest.strip_prefix("last")),
+    ) {
+        (Some(kind), _) => (kind, false),
+        (_, Some(kind)) => (kind, true),
+        _ => return None,
+    };
+    let primitive = matches!(
+        kind,
+        "Long" | "Int" | "Short" | "Byte" | "Char" | "Float" | "Double" | "Boolean"
+    );
+    (primitive || (removes && kind.is_empty())).then_some((from_back, removes))
+}
+
 fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -4270,6 +4350,43 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         }
         "first" | "getFirst" => elements(rt, this).first().copied().unwrap_or(V::NULL),
         "last" | "getLast" => elements(rt, this).last().copied().unwrap_or(V::NULL),
+        // An ordered set's ends under fastutil's names for a linked set of primitives
+        // (`LongLinkedOpenHashSet.firstLong`, `removeFirstLong`) and Java 21's for any
+        // sequenced set (`removeFirst`): the element there, taken out by the `remove` ones; an
+        // empty set has none (`NoSuchElementException`). Immersive Portals empties its queue of
+        // chunks with `removeFirstLong` until it is empty: unanswered, it never was.
+        n if ends_name(n).is_some() => {
+            let (from_back, removes) = ends_name(n)?;
+            let items = elements(rt, this);
+            let Some(&e) = (if from_back {
+                items.last()
+            } else {
+                items.first()
+            }) else {
+                rt.throw_new("java/util/NoSuchElementException");
+                return Some(V::NULL);
+            };
+            if removes {
+                table_remove(rt, this, e);
+            }
+            e
+        }
+        // fastutil's `addAndMoveToFirst(k)` and `addAndMoveToLast(k)`: the element is at that
+        // end afterwards; whether it was new.
+        "addAndMoveToFirst" | "addAndMoveToLast" => {
+            let fresh = table_remove(rt, this, a(1)).is_none();
+            if name == "addAndMoveToLast" {
+                table_put(rt, this, a(1), V::I(1));
+            } else {
+                let rest = elements(rt, this);
+                let empty = emptied(rt, this);
+                put_table(rt, this, empty);
+                for e in std::iter::once(a(1)).chain(rest) {
+                    table_put(rt, this, e, V::I(1));
+                }
+            }
+            boolean(rt, fresh)
+        }
         // A Guava set view's copies.
         "immutableCopy" => {
             let items = elements(rt, this);
@@ -5400,6 +5517,49 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// A linked set's ends, as fastutil names them for a set of longs: the first is taken until
+    /// the set is empty (Immersive Portals' queue of chunks to load, emptied in a `while`), an
+    /// element moves to an end, and an empty set has no end to give.
+    #[test]
+    fn a_linked_set_gives_and_takes_its_ends() {
+        const SET: &str = "it/unimi/dsi/fastutil/longs/LongLinkedOpenHashSet";
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, name: &str, args: &[V]| {
+            let key = rt.static_key(&format!("{SET}.{name}"));
+            crate::api::call(rt, key, args)
+        };
+        let set = rt.new_object(SET);
+        c(&mut rt, "<init>.()V", &[set]);
+        for k in [30i64, 10, 20] {
+            c(&mut rt, "add.(J)Z", &[set, V::J(k)]);
+        }
+        assert_eq!(
+            (
+                c(&mut rt, "firstLong.()J", &[set]),
+                c(&mut rt, "lastLong.()J", &[set])
+            ),
+            (V::J(30), V::J(20))
+        );
+        // 20 to the front, a new one to the back.
+        assert_eq!(
+            c(&mut rt, "addAndMoveToFirst.(J)Z", &[set, V::J(20)]),
+            V::I(0)
+        );
+        assert_eq!(
+            c(&mut rt, "addAndMoveToLast.(J)Z", &[set, V::J(40)]),
+            V::I(1)
+        );
+        let mut taken = Vec::new();
+        while c(&mut rt, "isEmpty.()Z", &[set]) == V::I(0) && taken.len() < 10 {
+            taken.push(c(&mut rt, "removeFirstLong.()J", &[set]).j());
+        }
+        assert_eq!(taken, [20, 30, 10, 40]);
+        c(&mut rt, "removeLastLong.()J", &[set]);
+        let thrown = rt.thrown.take().expect("an empty set has no last element");
+        assert_eq!(rt.class_of(thrown), "java/util/NoSuchElementException");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn properties_load_and_store_their_file() {
         let mut rt = Rt::new();
@@ -5443,6 +5603,98 @@ mod tests {
         );
         // A map's own methods are there too, and `store` writes what `load` reads back.
         assert_eq!(c(&mut rt, "java/util/Properties.size.()I", &[p]), V::I(6));
+        // It is a map (a `Hashtable`), not a set of its keys: a key is asked for, each entry
+        // is handed with its value (a mod's config walks its entries so), a copy is its own.
+        let (speed, seven, absent) = (rt.string("speed"), rt.string("7"), rt.string("absent"));
+        const HAS: &str = "java/util/Properties.containsKey.(Ljava/lang/Object;)Z";
+        assert_eq!(
+            (c(&mut rt, HAS, &[p, speed]), c(&mut rt, HAS, &[p, absent])),
+            (V::I(1), V::I(0))
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Properties.contains.(Ljava/lang/Object;)Z",
+                &[p, seven]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Properties.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[p, speed]
+            ),
+            seven
+        );
+        let entries = c(
+            &mut rt,
+            "java/util/Properties.entrySet.()Ljava/util/Set;",
+            &[p],
+        );
+        let pairs: Vec<(String, String)> = elements(&rt, entries)
+            .into_iter()
+            .map(|e| {
+                let k = c(
+                    &mut rt,
+                    "java/util/Map$Entry.getKey.()Ljava/lang/Object;",
+                    &[e],
+                );
+                let v = c(
+                    &mut rt,
+                    "java/util/Map$Entry.getValue.()Ljava/lang/Object;",
+                    &[e],
+                );
+                (
+                    rt.str_of(k).unwrap_or("?").to_owned(),
+                    rt.str_of(v).unwrap_or("?").to_owned(),
+                )
+            })
+            .collect();
+        assert!(
+            pairs.contains(&("speed".into(), "7".into())) && pairs.len() == 6,
+            "{pairs:?}"
+        );
+        let keys = c(
+            &mut rt,
+            "java/util/Properties.keys.()Ljava/util/Enumeration;",
+            &[p],
+        );
+        let mut seen = 0;
+        while c(
+            &mut rt,
+            "java/util/Enumeration.hasMoreElements.()Z",
+            &[keys],
+        )
+        .i() != 0
+        {
+            c(
+                &mut rt,
+                "java/util/Enumeration.nextElement.()Ljava/lang/Object;",
+                &[keys],
+            );
+            seen += 1;
+        }
+        assert_eq!(seen, 6);
+        let copy = c(
+            &mut rt,
+            "java/util/Properties.clone.()Ljava/lang/Object;",
+            &[p],
+        );
+        assert_eq!(rt.class_of(copy), "java/util/Properties");
+        c(
+            &mut rt,
+            "java/util/Properties.remove.(Ljava/lang/Object;)Ljava/lang/Object;",
+            &[copy, speed],
+        );
+        assert_eq!(
+            (
+                c(&mut rt, HAS, &[p, speed]),
+                c(&mut rt, HAS, &[copy, speed])
+            ),
+            (V::I(1), V::I(0))
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         let (k, v) = (rt.string("a b"), rt.string(" x=y"));
         c(
             &mut rt,

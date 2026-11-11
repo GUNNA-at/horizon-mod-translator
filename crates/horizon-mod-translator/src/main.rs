@@ -1043,6 +1043,11 @@ fn derived_classes(
     horizon_mod_translator::codegen::set_inherited(
         horizon_mod_translator::derive::inherited_over_defaults(program, &game),
     );
+    // The instance fields the game's classes hold above the program's: one of the same name
+    // declared below hides it, and is kept under a name of its own.
+    horizon_mod_translator::codegen::set_game_fields(horizon_mod_translator::derive::fields_above(
+        program, &game,
+    ));
     Ok(deriver.classes())
 }
 

@@ -696,10 +696,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (STB_RESIZE, "nstbir_resize_uint8") if args.len() == 9 => {
             let done = stb_resize(
                 rt,
-                a(0).j(),
+                (a(0).j(), a(3).i()),
                 (a(1).i(), a(2).i()),
-                a(4).j(),
+                (a(4).j(), a(7).i()),
                 (a(5).i(), a(6).i()),
+                a(8).i(),
             );
             let done = V::I(i32::from(done));
             if desc.ends_with(")I") {
@@ -1509,29 +1510,97 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Option<(usize, Vec<u8>)> {
     Some((info.width as usize, rgba))
 }
 
-/// The image whose pixels `address` is (`NativeImage.pixels`, read as the field: [`image_call`]'s
-/// `$pixels`), while it is open.
-fn image_at(rt: &Rt, address: i64) -> Option<V> {
-    let image = V::R(u32::try_from(address ^ (1 << 32)).ok()?);
-    let open = rt.class_of(image) == NATIVE_IMAGE && rt.get_field(image, "$closed").i() == 0;
-    open.then_some(image)
+/// The address of image `image`'s pixels (`NativeImage.pixels`, read as the field): the image
+/// in its upper half, and room below for a place among its bytes, as a mod counts one
+/// (JourneyMap scales a part of a region's image from `pixels + (x + y * width) * 4`).
+fn image_address(image: V) -> i64 {
+    i64::from(image.r()) << 32
 }
 
-/// The image at `from`, taken as `size` pixels, scaled into the image at `to` as `to_size`
-/// pixels; whether it was. An image's pixels are four bytes each here whatever its format, so
-/// all four are scaled.
-fn stb_resize(rt: &mut Rt, from: i64, size: (i32, i32), to: i64, to_size: (i32, i32)) -> bool {
-    let (Some(source), Some(target)) = (image_at(rt, from), image_at(rt, to)) else {
+/// The image `address` points into ([`image_address`]) while it is open, and how many bytes in.
+fn image_at(rt: &Rt, address: i64) -> Option<(V, usize)> {
+    let image = V::R(u32::try_from(address >> 32).ok().filter(|&r| r != 0)?);
+    let open = rt.class_of(image) == NATIVE_IMAGE && rt.get_field(image, "$closed").i() == 0;
+    open.then_some((image, (address & 0xffff_ffff) as usize))
+}
+
+/// `nstbir_resize_uint8(from, size, stride, to, to_size, to_stride, channels)` on images'
+/// pixels: `size` pixels at `from`, rows `stride` bytes apart, scaled into `to_size` pixels at
+/// `to`; whether it was. Either address may point into its image, and a stride of 0 is a row of
+/// the size given, as the library has it. The caller counts bytes by its `channels` a pixel
+/// (which `format().components()` says are four); a pixel is four bytes here whatever the
+/// image's format, so all four are scaled.
+fn stb_resize(
+    rt: &mut Rt,
+    from: (i64, i32),
+    size: (i32, i32),
+    to: (i64, i32),
+    to_size: (i32, i32),
+    channels: i32,
+) -> bool {
+    let (Some((source, at)), Some((target, to_at))) = (image_at(rt, from.0), image_at(rt, to.0))
+    else {
         return false;
     };
-    let (width, input) = match rt.heap.get(source.r() as usize).map(|o| &o.data) {
-        Some(Data::Bytes(b, w)) => (*w, b.clone()),
-        _ => return false,
+    if channels <= 0 || from.1 < 0 || to.1 < 0 {
+        return false;
+    }
+    // Bytes as the caller counts them, in ours.
+    let ours = |bytes: usize| {
+        bytes
+            .is_multiple_of(channels as usize)
+            .then(|| bytes / channels as usize * 4)
     };
-    match rt.heap.get_mut(target.r() as usize).map(|o| &mut o.data) {
-        Some(Data::Bytes(output, to_width)) => {
-            let to_stride = *to_width * 4;
-            crate::stb_resize::resize(&input, size, width * 4, output, to_size, to_stride, 4)
+    let (Some(at), Some(to_at), Some(stride), Some(to_stride)) = (
+        ours(at),
+        ours(to_at),
+        ours(from.1 as usize),
+        ours(to.1 as usize),
+    ) else {
+        return false;
+    };
+    let (s, t) = (source.r() as usize, target.r() as usize);
+    if s == t {
+        // Scaled within one image: from a copy of it.
+        let input = match rt.heap.get(s).map(|o| &o.data) {
+            Some(Data::Bytes(b, _)) if at <= b.len() => b[at..].to_vec(),
+            _ => return false,
+        };
+        return match rt.heap.get_mut(t).map(|o| &mut o.data) {
+            Some(Data::Bytes(output, _)) if to_at <= output.len() => crate::stb_resize::resize(
+                &input,
+                size,
+                stride,
+                &mut output[to_at..],
+                to_size,
+                to_stride,
+                4,
+            ),
+            _ => false,
+        };
+    }
+    if s.max(t) >= rt.heap.len() {
+        return false;
+    }
+    let (low, high) = rt.heap.split_at_mut(s.max(t));
+    let (input, output) = if s < t {
+        (&low[s].data, &mut high[0].data)
+    } else {
+        (&high[0].data, &mut low[t].data)
+    };
+    match (input, output) {
+        (Data::Bytes(input, _), Data::Bytes(output, _))
+            if at <= input.len() && to_at <= output.len() =>
+        {
+            crate::stb_resize::resize(
+                &input[at..],
+                size,
+                stride,
+                &mut output[to_at..],
+                to_size,
+                to_stride,
+                4,
+            )
         }
         _ => false,
     }
@@ -1601,7 +1670,7 @@ fn image_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "$pixels" => V::J(if rt.get_field(a(0), "$closed").i() != 0 {
             0
         } else {
-            (1 << 32) | i64::from(a(0).r())
+            image_address(a(0))
         }),
         "close" => {
             rt.put_field(a(0), "$closed", V::I(1));
@@ -2255,6 +2324,72 @@ mod tests {
             crate::api::call(&mut rt, "java/lang/Number.intValue.()I", &[answer]),
             V::I(1)
         );
+        // A part of an image, named as a mod names it: the address of its first pixel and the
+        // whole image's stride (JourneyMap cuts a chunk's tile out of its region's image so).
+        // It is scaled as an image of those pixels alone would be, here the four at the
+        // image's far corner, which end where the image ends.
+        let (wide, tile) = (make(&mut rt, 4, 4), make(&mut rt, 3, 3));
+        for i in 0..16 {
+            let colour = 0xff00_0000u32 | (i * 13) << 8 | (255 - i * 9);
+            c(
+                &mut rt,
+                "setPixelRGBA.(III)V",
+                &[
+                    wide,
+                    V::I(i as i32 % 4),
+                    V::I(i as i32 / 4),
+                    V::I(colour as i32),
+                ],
+            );
+        }
+        let inside = V::J(address(&mut rt, wide).j() + (2 + 2 * 4) * 4);
+        let to_tile = address(&mut rt, tile);
+        let cut = [
+            inside,
+            V::I(2),
+            V::I(2),
+            V::I(16),
+            to_tile,
+            V::I(3),
+            V::I(3),
+            V::I(0),
+            V::I(4),
+        ];
+        let done = crate::api::call(
+            &mut rt,
+            "org/lwjgl/stb/STBImageResize.nstbir_resize_uint8.(JIIIJIIII)I",
+            &cut,
+        );
+        assert_eq!(done, V::I(1));
+        let whole = bytes(&rt, wide);
+        let alone: Vec<u8> = [(2, 2), (3, 2), (2, 3), (3, 3)]
+            .iter()
+            .flat_map(|&(x, y)| whole[(y * 4 + x) * 4..][..4].to_vec())
+            .collect();
+        let mut expected = vec![0u8; 3 * 3 * 4];
+        assert!(crate::stb_resize::resize(
+            &alone,
+            (2, 2),
+            0,
+            &mut expected,
+            (3, 3),
+            0,
+            4
+        ));
+        assert_eq!(bytes(&rt, tile), expected);
+        // A part that would reach past the image's end is refused, as is a place between two
+        // pixels.
+        for (at, size) in [((3 + 3 * 4) * 4, 2), ((2 + 2 * 4) * 4 + 1, 2)] {
+            let mut bad = cut;
+            bad[0] = V::J(address(&mut rt, wide).j() + at);
+            bad[1] = V::I(size);
+            let done = crate::api::call(
+                &mut rt,
+                "org/lwjgl/stb/STBImageResize.nstbir_resize_uint8.(JIIIJIIII)I",
+                &bad,
+            );
+            assert_eq!(done, V::I(0), "{at}");
+        }
         // A closed image has no pixels to scale into.
         let closed = make(&mut rt, 4, 4);
         let gone = address(&mut rt, closed);

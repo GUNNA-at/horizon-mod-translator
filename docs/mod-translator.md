@@ -11149,6 +11149,134 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     the mods' code: drawing the level's mod entities takes 42 ms a frame (11 frames a second,
     offscreen), the client's tick 11 ms. The game's footprint had peaked at 19.3 GB by 300 s,
     while it loads.
+- [x] 2026-11-11 Part 192: what launches 28 to 32 showed: a field that hides another, the mods' own errors, a login's payloads.
+  - GeckoLib's armour layer failed at every frame of every mob it drew (340 times in launch 28,
+    715 in 29): `ModelPart.setPos()` on null. Vanilla's armour layers were not the cause, though
+    they were missing and are there now (below). `GeoArmorRenderer extends HumanoidModel`
+    declares `head`, `body` and the four limbs again, as bones, over `HumanoidModel`'s model
+    parts of the same names, and Iron's Spellbooks reads the parts through the model
+    (`baseModel.head`). Java has both fields in the object, told apart by the class that
+    declares each. The runtime kept an object's fields by name alone: the renderer's own
+    `head = null` took the place of the model's part.
+  - A field that hides one of the same name above it is another field. The translator finds
+    the class declaring each field a reference names, as the JVM resolves it, and where a
+    class above that one (translated, or the game's, read from the install's jars) declares an
+    instance field of the same name, the field is kept under the name with its class
+    (`head@software/bernie/geckolib/renderer/GeoArmorRenderer`); the one above keeps the plain
+    name the runtime and the game's own code know it by. Reflection finds each by the class
+    asked (`Field.get` and `set`, a `VarHandle`, a field updater, Gson's reflective adapter):
+    the translator marks the hiding fields among a class's (`0 <hides> head body`). A mixin's
+    field is its target's.
+    The pack has 966 such fields in its mods (`hidden_fields.py`, over the 367 jars): 344 over
+    a field of the game's, 622 over another mod class's; 342 of another type than the one they
+    hide. (1,297 fields of 1,059 classes in the whole translated program, with what hides a
+    field of Java's own: 315 enums keep a `name` of their own over `Enum`'s.) Among them:
+    Mekanism's container slot keeps its inventory slot in `slot`, over `Slot.slot`, an int;
+    its machines a list in `components` over `BlockEntity.components` and a factory its kind
+    in `type` over `BlockEntity.type`; Create's potato projectile its kind in `type` over
+    `Entity.type`; 21 mod slots a `slot`, 10 screens a `title`; and every anonymous class made
+    of an inner class its own outer object (`this$0`) over the inner class's.
+    The fixture has the cases, against the JVM: a field of another type and of the same type
+    through each class and through `super`, reflection by each class, a class on
+    `AbstractList` with its own `modCount` (the JDK's iterator threw
+    `ConcurrentModificationException` over it), and an inner class made of another's inner
+    class (`open()` answered 4 for 304). All nine answers differed before.
+  - Vanilla's humanoid layers a mod bakes for its own armour (`ModelLayers.PLAYER_INNER_ARMOR`,
+    the zombies', skeletons' and piglins'; 34 of vanilla's layers are named by the pack's
+    mods): the humanoid's seven parts, grown by vanilla's amounts, 64 by 32.
+  - Weighted choices (`weighted.rs`): `Weight`, `WeightedEntry.wrap` and `IntrusiveBase`,
+    `WeightedRandom`, `WeightedRandomList`, `SimpleWeightedRandomList` and its builder (42
+    calls in ten of the pack's jars). A Living Things owl drew its variant from an empty list
+    24 times in launch 28, none in 29.
+  - What the mods log as errors themselves went unseen: `packlog.py` counted uncaught
+    exceptions and unmapped calls, and a failure a mod catches and logs is neither. It lists
+    them now. Launch 29 had 27,768 such lines:
+    - 17,472 "STB resize failed", since launch 27: JourneyMap cuts a chunk's tile out of its
+      region's image by scaling from `pixels + (x + y * width) * 4`, with the image's stride.
+      An image's address named the image alone. It has room for a place among the image's
+      bytes now, and the resize takes the strides it is given; the install's own LWJGL scales
+      a part so exactly as it scales an image of those pixels alone (five parts compared).
+      Not enough yet: see launch 32.
+    - 9,330 from Immersive Portals, at every packet and chunk ticket: `Level.thread`, read
+      through a mixin, was nothing. It is the thread asking, as the server's running thread.
+    - `SidedThreadGroups.SERVER` was not answered, and a thread's group was one object for
+      every thread. Nineteen of the pack's jars tell their side by it: AE2's
+      `Platform.isServer()`, the Sophisticated mods, and every MCreator mod's
+      `queueServerWork`, which queues nothing off the server's group. A server thread's group
+      is NeoForge's; `EffectiveSide.get()` says "client" while the mods load, as NeoForge's
+      does on any thread outside that group.
+    - 136 from Easy Mob Farm, whose config walks a `Properties` with
+      `forEach((key, value) -> ...)`: `Hashtable` and `Properties` were taken for sets, by
+      their names, and the value handed was nothing. They are maps (`containsKey`, `clone`,
+      `keys()`, `elements()`).
+    - 168 from MineColonies, which asks every item for its tier and what it can do:
+      `TieredItem.getTier()` (the tier a tool was made with; vanilla's by its name),
+      `ItemAbilities.DEFAULT_*_ACTIONS`, a vanilla armour's type and material.
+    - A fluid tag listed no fluids (`Registry.getTag` of a fluid tag): the game tells
+      membership alone, so each fluid is asked, the game's four and the mods'. A `TagKey`
+      writes itself as Java's. (Mekanism's 69 "Empty tag" were taken for these and are not:
+      see what launch 32 leaves.)
+    - 12 from Simulated, whose search aliases are lists of `ExtraCodecs.TAG_OR_ELEMENT_ID`
+      (an entry's id, or a tag's after `#`): the codec was not there. None in launch 32.
+  - A player's login lost most of what the mods send them then. The game takes 32 messages a
+    tick for one player and 30,000 bytes a message; the pack's mods send a player more than
+    that at once when they join (their configs and registries, the quests, the claimed
+    chunks, the waystones), and what was past the 32nd was dropped: 20 kinds in launch 29.
+    What the game takes no more of now waits and goes with the next ticks, each player's
+    in the order sent (given up after half a minute, and when the world closes); the window's
+    messages to its server wait the same way, before it has joined too. A payload larger
+    than a message goes in parts on a channel of the runtime's own and is one payload again
+    where it arrives, as NeoForge splits what is past a packet's size.
+  - A mod's own event that can be canceled (GeckoLib posts one before it draws anything):
+    `isCanceled` and `setCanceled` keep it where the bus reads whether to go on.
+    `clone()` of Java's collections and maps.
+  - Probing a native with made-up arguments wrote a 4-byte file named `null` into the folder
+    the translator ran in: Guava's `Files.write(text, file, charset)`. It refuses a null file.
+  - Launch 31 (708 s, 7 crates, 2,036,298,848 bytes) ended at 361 s with a log of 411 MB. With
+    its level's thread answered, Immersive Portals went past its check and on to empty its
+    queue of chunks, `while (!queue.isEmpty()) queue.removeFirstLong()`, and nothing answered
+    `removeFirstLong`: the queue never emptied, and the mod warned of each chunk, 4.7 million
+    times before the watch stopped the game. (The runtime ends a hook that has made a million
+    unanswered calls in ten seconds; the server's next tick began the loop again.) An ordered
+    set's ends are answered under fastutil's names for a set of primitives (`firstLong`,
+    `removeFirstLong`, `removeLastInt`, `addAndMoveToFirst`...) and Java 21's (`removeFirst`).
+    What a mod logs is traced with each argument as its own `toString()` writes it
+    (`ChunkPos@555ac2` and `TagKey@15f679` said nothing of what was wrong).
+  - Launch 32 (703 s, 11 crates, 2,036,298,256 bytes) is whole: ready after 404 s, content from
+    320 mods, the shaft turns and the press presses the ingot into `create:iron_sheet`. 102
+    handlers ended with an error where launch 29 had 814: the armour layer's 715 are gone, and
+    87 of the 102 are Amendments' colour, asked while the game learns the blocks. The mods'
+    own errors are 17,853 lines where 29 had 27,768: none of Immersive Portals' 9,330, none
+    of Easy Mob Farm's 136, 62 of MineColonies' 168. The server spends 5.0 to 5.9 s of 20 in
+    the mods' code, the window's thread 14.8 to 17.3 s.
+    A player's login now reaches the client: 56 kinds of payload arrive (FTB Quests' quests,
+    FTB Chunks' login data, the waystones, Balm's config, KleeSlabs' registry, Curios' slots).
+  - The pack's coverage, run 55: 121,668 of 132,304 API methods (92.0%, was 91.1%), 362,284 of
+    376,864 call sites (96.1%, was 95.6%), 4,787 distinct methods missing (was 5,134); Create
+    90.7% and 98.2%.
+  - What launch 32 leaves, in the order it will be taken:
+    - JourneyMap's 17,088 "STB resize failed" are still there. The image it scales into is of
+      a class of its own (`ComparableNativeImage extends NativeImage`), and an address was
+      taken for an image only where the object's class is `NativeImage` itself.
+    - One payload's channel is none the game carries (`puzzleslib:`, a name left empty). It
+      waited at the head of the player's queue for the half minute, and what was behind it
+      (a part of a large payload, MineColonies' diseases, a creeper's cosmetics) was given up
+      with it. Every payload will go inside one of the runtime's own.
+    - A tag of a mod's own registry lists nothing, nothing reading its files: Mekanism finds
+      its chemical tags empty (`mekanism:water_vapor`, `mekanism:bio`) and leaves 69 recipes
+      out as incomplete. A block tag lists nothing either, the game telling membership
+      alone: Sable knows none of its physics tags, Lootr none of its `convert` ones.
+    - 153 classes of the game's are named in the runtime's sources only as the type of some
+      record's component in the generated table (`com.mojang.math.Transformation`,
+      `PackResources`, `DensityFunction`): named, so their own code is not carried, and
+      nothing answers them. 259 of the missing methods and 831 call sites are theirs, and
+      `BlockModelRotation.getRotation()` over `Transformation` is what a mod's loop asks
+      300,000 times until the runtime stops its hook, 20 times a launch.
+    - A vanilla item's durability is 0 while the mods load (no game answers then), and
+      MineColonies divides by a bow's: its 62 that remain.
+    - Handlers that run now that their payloads arrive: Balm's config reads a null where an
+      `Integer` was written, Ars Nouveau's documentation counts its potion recipes wrong.
+    - `Codec.BYTE_BUFFER` is not answered: Create Ore Excavation reads none of its 15 veins.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

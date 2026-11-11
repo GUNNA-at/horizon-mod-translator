@@ -153,6 +153,8 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
             // may also be an angle about an axis).
             "VECTOR3F" => native(rt, "vector3f"),
             "QUATERNIONF" => native(rt, "quaternionf"),
+            // An entry's id, or a tag's after `#` (`minecraft:stone`, `#c:ores`).
+            "TAG_OR_ELEMENT_ID" => native(rt, "tag_or_element"),
             _ => return None,
         },
         ("net/minecraft/nbt/NbtOps", "INSTANCE") => crate::ops::nbt_ops(rt),
@@ -1498,6 +1500,18 @@ fn write_primitive(rt: &Rt, name: &str, v: V) -> Result<Nbt, String> {
 pub(crate) fn write_native(rt: &mut Rt, name: &str, v: V) -> Result<Nbt, String> {
     Ok(match name {
         "resource_location" => Nbt::String(rt.str_of(v).ok_or("Not a resource location")?.to_owned()),
+        // `ExtraCodecs.TagOrElementLocation`: its id, after `#` for a tag.
+        "tag_or_element" => {
+            let id = rt
+                .str_of(rt.get_field(v, "id"))
+                .ok_or("Not a tag or an element")?
+                .to_owned();
+            Nbt::String(if rt.get_field(v, "tag").i() != 0 {
+                format!("#{id}")
+            } else {
+                id
+            })
+        }
         "block_pos" | "vec3i" => Nbt::IntArray(crate::api::pos_of(rt, v).to_vec()),
         // `[x, y, z]` as doubles (`Vec3.CODEC` is `DOUBLE.listOf()` of three).
         "vec3" => {
@@ -2658,6 +2672,54 @@ mod tests {
     /// is read, or given as an angle about an axis. The bits are what a JVM with JOML 1.10.5 gives
     /// for `new Quaternionf(.1f, .2f, .3f, .4f).normalize()` and `new Quaternionf(new
     /// AxisAngle4f(angle, new Vector3f(0, .6f, .8f)))`.
+    /// `ExtraCodecs.TAG_OR_ELEMENT_ID` reads an entry's id or, after `#`, a tag's, as vanilla's
+    /// record of the two, and writes it back as it was (Simulated's search aliases list them:
+    /// unanswered, each of its alias files failed to parse).
+    #[test]
+    fn a_tag_or_an_elements_id_reads_as_vanillas_record() {
+        crate::install();
+        let mut rt = Rt::new();
+        let codec = get_static(
+            &mut rt,
+            "net/minecraft/util/ExtraCodecs",
+            "TAG_OR_ELEMENT_ID",
+        )
+        .unwrap();
+        let list = crate::api::call(
+            &mut rt,
+            "com/mojang/serialization/Codec.listOf.()Lcom/mojang/serialization/Codec;",
+            &[codec],
+        );
+        let read = decode(&mut rt, list, &serde_json::json!(["#c:ores", "stone"])).unwrap();
+        let read = crate::jutil::elements(&rt, read);
+        let parts = |rt: &mut Rt, v: V| {
+            let id = crate::api::call(
+                rt,
+                "net/minecraft/util/ExtraCodecs$TagOrElementLocation.id.()Lnet/minecraft/resources/ResourceLocation;",
+                &[v],
+            );
+            let tag = crate::api::call(
+                rt,
+                "net/minecraft/util/ExtraCodecs$TagOrElementLocation.tag.()Z",
+                &[v],
+            );
+            (rt.str_of(id).unwrap_or("?").to_owned(), tag.i())
+        };
+        assert_eq!(parts(&mut rt, read[0]), ("c:ores".to_owned(), 1));
+        assert_eq!(parts(&mut rt, read[1]), ("minecraft:stone".to_owned(), 0));
+        assert_eq!(
+            encode(&mut rt, codec, read[0]),
+            Ok(Nbt::String("#c:ores".into()))
+        );
+        assert_eq!(
+            encode(&mut rt, codec, read[1]),
+            Ok(Nbt::String("minecraft:stone".into()))
+        );
+        assert!(decode(&mut rt, codec, &serde_json::json!("#Not A Tag")).is_err());
+        assert!(decode(&mut rt, codec, &serde_json::json!(7)).is_err());
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn jomls_vectors_and_quaternions_read_and_write_as_vanillas_codecs() {
         let mut rt = Rt::new();

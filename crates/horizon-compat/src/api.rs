@@ -1993,7 +1993,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 97] = [
+const CHAIN: [Module; 98] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -2053,6 +2053,7 @@ const CHAIN: [Module; 97] = [
     crate::functions::call,
     crate::gamerules::call,
     crate::value_providers::call,
+    crate::weighted::call,
     crate::nightconfig::call,
     crate::mod_configs::call,
     crate::rotation::call,
@@ -2096,7 +2097,7 @@ const CHAIN: [Module; 97] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 97] = [
+const CLAIMS: [Claims; 98] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -2156,6 +2157,7 @@ const CLAIMS: [Claims; 97] = [
     crate::functions::claims,
     crate::gamerules::claims,
     crate::value_providers::claims,
+    crate::weighted::claims,
     crate::nightconfig::claims,
     crate::mod_configs::claims,
     crate::rotation::claims,
@@ -2197,7 +2199,7 @@ const CLAIMS: [Claims; 97] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 97] = [
+const MODULE_NAMES: [&str; 98] = [
     "diodes",
     "rails",
     "fake_players",
@@ -2257,6 +2259,7 @@ const MODULE_NAMES: [&str; 97] = [
     "functions",
     "gamerules",
     "value_providers",
+    "weighted",
     "nightconfig",
     "mod_configs",
     "rotation",
@@ -3119,6 +3122,15 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         // NeoForge's: no block snapshots are captured or restored here.
         (_, "$restoringBlockSnapshots" | "$captureBlockSnapshots") if level => V::I(0),
+        // The thread a level is ticked on (`Level.thread`): the one asking, as the server's
+        // running thread is, since a level's hooks run on its own thread. Immersive Portals
+        // reads it through a mixin at every packet and chunk ticket, and logs an error with a
+        // stack trace where it is another thread's.
+        (_, "$thread") if level => call(
+            rt,
+            "java/lang/Thread.currentThread.()Ljava/lang/Thread;",
+            &[],
+        ),
         // A level's side is its own (vanilla's `isClientSide` field: the client's level, a mod's
         // wrapper made on either side); one that doesn't carry it is on the host's.
         (_, "isClientSide" | "$isClientSide") if level => match rt.get_field(a(0), "isClientSide") {

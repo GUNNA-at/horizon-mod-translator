@@ -372,12 +372,69 @@ fn field_parts(rt: &mut Rt, field: V) -> (String, &'static str, &'static str) {
     (class, rt.static_key(&name), key)
 }
 
+/// The name an object keeps instance field `name` under, found through mod class `class` (the
+/// class a `Field` is of, or one below the class declaring it): the field's name, or, where the
+/// class declaring it hides a field of the same name above it (the translator's mark among the
+/// class's fields, [`crate::HIDES`]), the name with that class, as the translated code reads and
+/// writes it ([`crate::hidden_key`]). Java has both fields in the object: reflection on
+/// `GeoArmorRenderer`'s `head` must not find `HumanoidModel`'s.
+pub(crate) fn stored_name(rt: &mut Rt, class: &str, name: &'static str) -> &'static str {
+    thread_local! {
+        /// By class and field (the interned `class.name`): the answer, which a bundle's classes
+        /// settle.
+        static STORED: std::cell::RefCell<std::collections::HashMap<&'static str, &'static str>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    if !rt.is_mod_class(class) {
+        return name;
+    }
+    let key = rt.static_key(&format!("{class}.{name}"));
+    if let Some(known) = STORED.with(|s| s.borrow().get(key).copied()) {
+        return known;
+    }
+    let mut stored = name;
+    let mut c = class.to_owned();
+    while rt.is_mod_class(&c) {
+        let lines = match rt.reflect(&c, "fields", &[]) {
+            Some(v) => rt.str_of(v).unwrap_or("").to_owned(),
+            None => String::new(),
+        };
+        let (mut declares, mut hides) = (false, false);
+        for l in lines.lines() {
+            let mut p = l.splitn(3, ' ');
+            let (Some(access), Some(n)) = (p.next(), p.next()) else {
+                continue;
+            };
+            if n == crate::HIDES {
+                hides |= p
+                    .next()
+                    .is_some_and(|names| names.split(' ').any(|h| h == name));
+            } else if n == name && access.parse::<u16>().is_ok_and(|a| a & 0x0008 == 0) {
+                declares = true;
+            }
+        }
+        if declares {
+            if hides {
+                stored = rt.static_key(&crate::hidden_key(name, &c));
+            }
+            break;
+        }
+        match rt.supers.get(c.as_str()) {
+            Some(&above) => c = above.to_owned(),
+            None => break,
+        }
+    }
+    STORED.with(|s| s.borrow_mut().insert(key, stored));
+    stored
+}
+
 /// What `field` holds in `obj`, or, given no object, its class's static: a mod class's once its
 /// class is initialised, else the API's.
 pub(crate) fn field_value(rt: &mut Rt, field: V, obj: V) -> V {
     let (class, name, _) = field_parts(rt, field);
     if obj.r() != 0 {
-        return rt.get_field(obj, name);
+        let stored = stored_name(rt, &class, name);
+        return rt.get_field(obj, stored);
     }
     static_of(rt, &class, name)
 }
@@ -397,6 +454,7 @@ pub(crate) fn static_of(rt: &mut Rt, class: &str, name: &str) -> V {
 /// a primitive is unboxed.
 pub(crate) fn field_store(rt: &mut Rt, field: V, obj: V, v: V) {
     let (class, name, key) = field_parts(rt, field);
+    let name = if obj.r() != 0 { stored_name(rt, &class, name) } else { name };
     let old = if obj.r() != 0 { rt.get_field(obj, name) } else { rt.statics.get(key).copied().unwrap_or(V::Void) };
     let v = match old {
         V::I(_) => crate::mixin::unbox(rt, v, 'I'),
@@ -6170,6 +6228,79 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// A field that hides one of the same name above it is another field of the object
+    /// (GeckoLib's `GeoArmorRenderer.head`, a bone, over `HumanoidModel.head`, a model part).
+    /// The translated code keeps it under the name with its class and marks it among the
+    /// class's fields; reflection reads and writes each where it is, by the class the `Field`
+    /// was asked of, and through a class below the one declaring it finds the hiding one.
+    #[test]
+    fn reflection_finds_a_hiding_field_apart_from_the_one_above() {
+        fn reflect(rt: &mut Rt, class: &str, what: &str, _: &[V]) -> Option<V> {
+            let fields = match (class, what) {
+                ("t/Model", "fields") => "1 head Ljava/lang/Object;\n1 size I",
+                ("t/Armor", "fields") => "0 <hides> head\n1 head Ljava/lang/String;\n1 count I",
+                ("t/Plate", "fields") => "1 weight I",
+                _ => return None,
+            };
+            Some(rt.string(fields))
+        }
+        const GET: &str = "java/lang/reflect/Field.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        const SET: &str = "java/lang/reflect/Field.set.(Ljava/lang/Object;Ljava/lang/Object;)V";
+        let mut rt = Rt::new();
+        for (class, above) in [
+            ("t/Plate", "t/Armor"),
+            ("t/Armor", "t/Model"),
+            ("t/Model", "java/lang/Object"),
+        ] {
+            rt.supers.insert(class, above);
+        }
+        rt.reflect = Some(reflect);
+        // An object as the translated code leaves it: the part under the plain name, the bone
+        // under its own.
+        let plate = rt.new_object("t/Plate");
+        let (part, bone, other) = (rt.string("part"), rt.string("bone"), rt.string("other"));
+        let own = rt.static_key(&crate::hidden_key("head", "t/Armor"));
+        rt.put_field(plate, "head", part);
+        rt.put_field(plate, own, bone);
+        let field = |rt: &mut Rt, class: &str, how: &'static str| {
+            let (k, n) = (class_object(rt, class), rt.string("head"));
+            c(rt, how, &[k, n])
+        };
+        const DECLARED: &str =
+            "java/lang/Class.getDeclaredField.(Ljava/lang/String;)Ljava/lang/reflect/Field;";
+        let (above, hiding) = (
+            field(&mut rt, "t/Model", DECLARED),
+            field(&mut rt, "t/Armor", DECLARED),
+        );
+        assert_eq!(c(&mut rt, GET, &[above, plate]), part);
+        assert_eq!(c(&mut rt, GET, &[hiding, plate]), bone);
+        c(&mut rt, SET, &[hiding, plate, other]);
+        assert_eq!(
+            (rt.get_field(plate, "head"), rt.get_field(plate, own)),
+            (part, other)
+        );
+        c(&mut rt, SET, &[above, plate, bone]);
+        assert_eq!(
+            (rt.get_field(plate, "head"), rt.get_field(plate, own)),
+            (bone, other)
+        );
+        let through = field(
+            &mut rt,
+            "t/Plate",
+            "java/lang/Class.getField.(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+        );
+        assert_eq!(c(&mut rt, GET, &[through, plate]), other);
+        // A field that hides nothing is where it always was, whichever class it is asked of.
+        assert_eq!(stored_name(&mut rt, "t/Plate", "count"), "count");
+        assert_eq!(stored_name(&mut rt, "t/Plate", "size"), "size");
+        assert_eq!(stored_name(&mut rt, "t/Plate", "weight"), "weight");
+        assert_eq!(
+            stored_name(&mut rt, "net/minecraft/world/item/Item", "head"),
+            "head"
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// Create's contraption keeps its level behind a `WeakReference`; nothing collects it here.
     #[test]
     fn a_weak_reference_gives_back_what_it_holds_until_cleared() {
@@ -7317,12 +7448,14 @@ mod tests {
 
 /// What a mod logs at `info`, `warn` or `error`, printed when tracing (`HORIZON_COMPAT_TRACE`): the
 /// message with each `{}` filled from the arguments after it, in turn, as SLF4J and Log4j fill
-/// them (a last `Object...` spread). A marker before the message is left out.
-fn mod_log(rt: &Rt, level: &str, desc: &str, args: &[V]) {
+/// them (a last `Object...` spread): each argument as its own `toString()` writes it (a
+/// `ChunkPos`, a `TagKey`, a mod's own object), which is what the mod is telling of. A marker
+/// before the message is left out.
+fn mod_log(rt: &mut Rt, level: &str, desc: &str, args: &[V]) {
     let marker = desc.starts_with("(Lorg/apache/logging/log4j/Marker;") || desc.starts_with("(Lorg/slf4j/Marker;");
     let args = args.get(usize::from(marker)..).unwrap_or_default();
     let Some((&message, rest)) = args.split_first() else { return };
-    let Some(message) = rt.str_of(message) else { return };
+    let Some(message) = rt.str_of(message).map(str::to_owned) else { return };
     let spread = desc.contains("[Ljava/lang/Object;)");
     let mut values = Vec::new();
     for (i, &v) in rest.iter().enumerate() {
@@ -7337,7 +7470,13 @@ fn mod_log(rt: &Rt, level: &str, desc: &str, args: &[V]) {
     let mut out = parts.next().unwrap_or_default().to_owned();
     for part in parts {
         match values.next() {
-            Some(v) => out.push_str(&rt.to_java_string(v, 'L')),
+            Some(v) => {
+                // (What its `toString()` throws is not the logging code's.)
+                let thrown = rt.thrown.take();
+                let text = crate::linked::java_string(rt, v);
+                rt.thrown = thrown;
+                out.push_str(&rt.to_java_string(text, 'L'));
+            }
             None => out.push_str("{}"),
         }
         out.push_str(part);
@@ -7381,7 +7520,12 @@ fn print_stream(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let inner = if desc.starts_with("(Ljava/io/OutputStream;") {
                 a(1)
             } else {
-                // A file, by name or `File` (a charset after it or not).
+                // A file, by name or `File` (a charset after it or not); none is the caller's
+                // error, as Java's.
+                if a(1).is_null() {
+                    rt.throw_new("java/lang/NullPointerException");
+                    return Some(V::Void);
+                }
                 let file = rt.new_object("java/io/FileOutputStream");
                 let path = text(rt, a(1));
                 let path = rt.string(&path);

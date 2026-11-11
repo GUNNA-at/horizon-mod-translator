@@ -38,6 +38,40 @@ pub fn is_library(class: &str) -> bool {
         || class.starts_with("org/apache/commons/")
 }
 
+/// The instance fields the game's classes above the program's hold: by each class of the game's
+/// that a class of `program` extends (the first above it the program doesn't have), the names
+/// of the instance fields that class and those above it declare. A field of the same name
+/// declared below is another field, which Java tells apart by the class declaring it
+/// (GeckoLib's `GeoArmorRenderer.head` is a bone, `HumanoidModel.head` above it a model part,
+/// both in one object): the translated code keeps it under a name of its own
+/// ([`crate::codegen::set_game_fields`]).
+pub fn fields_above(program: &[ClassFile], game: &Game) -> BTreeMap<String, BTreeSet<String>> {
+    let own: HashSet<&str> = program.iter().map(|c| c.name.as_str()).collect();
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for c in program {
+        let Some(above) = c.superclass.as_deref().filter(|s| !own.contains(s)) else {
+            continue;
+        };
+        if out.contains_key(above) {
+            continue;
+        }
+        let mut names = BTreeSet::new();
+        let mut at = game.class(above);
+        while let Some(k) = at {
+            names.extend(
+                k.fields
+                    .iter()
+                    .filter(|f| f.access & 0x0008 == 0)
+                    .map(|f| f.name.clone()),
+            );
+            at = k.superclass.as_deref().and_then(|s| game.class(s));
+        }
+        out.insert(above.to_owned(), names);
+    }
+    out.retain(|_, names| !names.is_empty());
+    out
+}
+
 /// The methods each class of `program` takes from a class of the game's above it though an
 /// interface it implements has a default method of the same name and descriptor: a class's method
 /// wins over an interface's default, as the JVM resolves a call (TFMG's `CopycatCableBlockEntity`

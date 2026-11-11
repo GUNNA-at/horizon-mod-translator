@@ -696,9 +696,9 @@ pub fn census(rt: &mut Rt, dimension: &str) -> Vec<Census> {
 
 // ---- spawners and a biome's spawn settings ----
 
-/// `Weight.of(w)`: the data-class table's record (its `value`).
+/// `Weight.of(w)` ([`crate::weighted`]: its `value`).
 fn weight(rt: &mut Rt, w: i32) -> V {
-    crate::records::make_data(rt, "net/minecraft/util/random/Weight", "(I)V", &[V::I(w)])
+    crate::weighted::weight(rt, w)
 }
 
 /// `new SpawnerData(type, weight, minCount, maxCount)`: its fields under vanilla's names (mods

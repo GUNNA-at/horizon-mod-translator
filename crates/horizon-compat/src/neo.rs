@@ -2044,6 +2044,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if matches!(name, "registry" | "lookup") { optional(rt, key) } else { key }
         }
         ("net/neoforged/bus/api/Event", "<init>") => V::Void,
+        // A mod's own event that can be canceled (`class Pre extends Event implements
+        // ICancellableEvent`, which GeckoLib posts before it draws and asks after): whether a
+        // listener canceled it, kept where the bus reads it. The game's own events answer
+        // for themselves.
+        (
+            "net/neoforged/bus/api/Event" | "net/neoforged/bus/api/ICancellableEvent",
+            "isCanceled",
+        ) if rt.cid(a(0)) != 0 => V::I(rt.get_field(a(0), "$canceled").i()),
+        (
+            "net/neoforged/bus/api/Event" | "net/neoforged/bus/api/ICancellableEvent",
+            "setCanceled",
+        ) if rt.cid(a(0)) != 0 => {
+            rt.put_field(a(0), "$canceled", V::I(i32::from(a(1).i() != 0)));
+            V::Void
+        }
         // A registry as the owner of its holders, and a holder made for a key apart from
         // registering (`Holder.Reference.createStandAlone`): the registry's own holder for the key,
         // whose value is the entry once it is registered.
@@ -2174,11 +2189,18 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("net/neoforged/fml/loading/FMLLoader" | "net/neoforged/fml/loading/FMLEnvironment", "getDist") => {
             crate::api::get_static(rt, "net/neoforged/api/distmarker/Dist.CLIENT")
         }
-        // The logical side the code runs on: the client's runtime or the server thread's.
+        // The logical side the code runs on: the server's on a thread of the server's group,
+        // the client's on any other (`EffectiveSide.get()` asks the thread's group), so the
+        // client's while the mods load, on either side of the game.
         ("net/neoforged/fml/util/thread/EffectiveSide", "get") => {
-            let side = if is_client(rt) { "net/neoforged/fml/LogicalSide.CLIENT" } else { "net/neoforged/fml/LogicalSide.SERVER" };
+            let side = if on_server_thread(rt) {
+                "net/neoforged/fml/LogicalSide.SERVER"
+            } else {
+                "net/neoforged/fml/LogicalSide.CLIENT"
+            };
             crate::api::get_static(rt, side)
         }
+        (SIDED_THREAD_GROUP, "getSide") => rt.get_field(a(0), "$side"),
         ("net/neoforged/fml/LogicalSide", "isClient" | "isServer") => {
             let side = rt.get_field(a(0), "$name");
             let want = if name == "isClient" { "CLIENT" } else { "SERVER" };
@@ -2814,6 +2836,43 @@ pub fn is_client(rt: &Rt) -> bool {
     rt.interned.contains_key("side:client")
 }
 
+const SIDED_THREAD_GROUP: &str = "net/neoforged/fml/util/thread/SidedThreadGroup";
+
+/// Whether the code runs on a thread of the server's: not the client's runtime, and not while
+/// the mods load, which is no server's work yet.
+fn on_server_thread(rt: &Rt) -> bool {
+    !is_client(rt) && !loading(rt)
+}
+
+/// The group NeoForge keeps a logical side's threads in (`SidedThreadGroups.SERVER` and
+/// `CLIENT`), one object a side, which says its side.
+fn sided_thread_group(rt: &mut Rt, client: bool) -> V {
+    let side = if client { "CLIENT" } else { "SERVER" };
+    rt.intern(format!("compat:sided-thread-group/{side}"), move |rt| {
+        let group = rt.new_object(SIDED_THREAD_GROUP);
+        let key = rt.static_key(&format!("net/neoforged/fml/LogicalSide.{side}"));
+        let of = crate::api::get_static(rt, key);
+        rt.put_field(group, "$side", of);
+        group
+    })
+}
+
+/// The group of the thread that asks (`Thread.getThreadGroup()`): the server's threads are in
+/// `SidedThreadGroups.SERVER`, where NeoForge starts them, and every other thread in Java's
+/// own group, the window's thread too (`SidedThreadGroups.CLIENT` holds the client's network
+/// threads only). The mods tell their side by it: AE2's `Platform.isServer()`, the
+/// Sophisticated mods' storage, and every MCreator mod's `queueServerWork`, which queues
+/// nothing off the server's group.
+pub(crate) fn thread_group(rt: &mut Rt) -> V {
+    if on_server_thread(rt) {
+        sided_thread_group(rt, false)
+    } else {
+        rt.intern("compat:thread-group".into(), |rt| {
+            rt.new_object("java/lang/ThreadGroup")
+        })
+    }
+}
+
 const MOD_CONFIG: &str = "net/neoforged/fml/config/ModConfig";
 const CONFIG_EVENT: &str = "net/neoforged/fml/event/config/ModConfigEvent";
 
@@ -2912,6 +2971,7 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
     }
     match (owner, field) {
         ("cpw/mods/modlauncher/Launcher", "INSTANCE") => Some(rt.intern("compat:modlauncher".into(), |rt| rt.new_object("cpw/mods/modlauncher/Launcher"))),
+        ("net/neoforged/fml/util/thread/SidedThreadGroups", "SERVER" | "CLIENT") => Some(sided_thread_group(rt, field == "CLIENT")),
         // `IEnvironment.Keys.VERSION`: a supplier of the property's key.
         ("cpw/mods/modlauncher/api/IEnvironment$Keys", f) => {
             let name = f.to_ascii_lowercase();
@@ -2920,6 +2980,34 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 let n = rt.string(&name);
                 rt.put_field(key, "$name", n);
                 crate::functions::constant(rt, key)
+            }))
+        }
+        // The abilities each kind of vanilla tool has by default (`DEFAULT_AXE_ACTIONS`...): a
+        // set of them, one object a kind. MineColonies asks every item whether it can do all
+        // of a fishing rod's, of shears' and of a shield's.
+        ("net/neoforged/neoforge/common/ItemAbilities", f) if f.starts_with("DEFAULT_") => {
+            let class = match f.strip_prefix("DEFAULT_")?.strip_suffix("_ACTIONS")? {
+                "AXE" => "AxeItem",
+                "HOE" => "HoeItem",
+                "SHOVEL" => "ShovelItem",
+                "PICKAXE" => "PickaxeItem",
+                "SWORD" => "SwordItem",
+                "SHEARS" => "ShearsItem",
+                "SHIELD" => "ShieldItem",
+                "FISHING_ROD" => "FishingRodItem",
+                "TRIDENT" => "TridentItem",
+                "BRUSH" => "BrushItem",
+                "FLINT" => "FlintAndSteelItem",
+                "FIRECHARGE" => "FireChargeItem",
+                "SPYGLASS" => "SpyglassItem",
+                _ => return None,
+            };
+            Some(rt.intern(format!("item-abilities/{class}"), |rt| {
+                let all: Vec<V> = default_abilities(class)
+                    .iter()
+                    .map(|name| item_ability(rt, name))
+                    .collect();
+                crate::jutil::new_set_of(rt, &all)
             }))
         }
         // NeoForge's abilities: each constant's name lower-cased, but `HOE_TILL`'s is `till`.
@@ -3199,6 +3287,31 @@ mod tests {
         assert_eq!(crate::api::call(&mut client, CURRENT, &[]), V::NULL);
     }
 
+    /// A mod's own event that can be canceled (GeckoLib's `GeoRenderEvent.Entity.Pre`, posted
+    /// before it draws): `setCanceled` and `isCanceled`, called as `Event`'s or the
+    /// interface's, keep it where the bus reads whether to go on.
+    #[test]
+    fn a_mods_own_event_is_canceled_where_the_bus_reads_it() {
+        const IS: &str = "net/neoforged/bus/api/Event.isCanceled.()Z";
+        const SET: &str = "net/neoforged/bus/api/ICancellableEvent.setCanceled.(Z)V";
+        let mut rt = Rt::new();
+        let ev = rt.new_object_id("t/Pre", 7);
+        assert_eq!(crate::api::call(&mut rt, IS, &[ev]), V::I(0));
+        crate::api::call(&mut rt, SET, &[ev, V::I(1)]);
+        assert_eq!(crate::api::call(&mut rt, IS, &[ev]), V::I(1));
+        assert_eq!(rt.get_field(ev, "$canceled"), V::I(1));
+        crate::api::call(&mut rt, SET, &[ev, V::I(0)]);
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "net/neoforged/bus/api/ICancellableEvent.isCanceled.()Z",
+                &[ev]
+            ),
+            V::I(0)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// The logical side code runs on is its runtime's: the server thread's until a client's setup
     /// has fired in it. A holder made for a key apart from registering (`createStandAlone`, its
     /// registry as owner) gives the entry once it is registered.
@@ -3215,6 +3328,52 @@ mod tests {
         let side = c(&mut rt, GET, &[]);
         assert_eq!(c(&mut rt, IS_SERVER, &[side]).i(), 0);
         assert_eq!(c(&mut rt, "net/neoforged/fml/LogicalSide.isClient.()Z", &[side]).i(), 1);
+
+        // A thread's group says the same, and the mods ask it (AE2's `Platform.isServer()`,
+        // MCreator's `queueServerWork`): NeoForge's group of the server's threads on the
+        // server's thread; Java's own on the client's, and while the mods load, when
+        // `EffectiveSide` says "client" on either side of the game.
+        const GROUP: &str = "java/lang/Thread.getThreadGroup.()Ljava/lang/ThreadGroup;";
+        const SIDE: &str = "net/neoforged/fml/util/thread/SidedThreadGroup.getSide.()Lnet/neoforged/fml/LogicalSide;";
+        let mut server = Rt::new();
+        let thread = c(
+            &mut server,
+            "java/lang/Thread.currentThread.()Ljava/lang/Thread;",
+            &[],
+        );
+        let group = c(&mut server, GROUP, &[thread]);
+        let servers = crate::api::get_static(
+            &mut server,
+            "net/neoforged/fml/util/thread/SidedThreadGroups.SERVER",
+        );
+        let clients = crate::api::get_static(
+            &mut server,
+            "net/neoforged/fml/util/thread/SidedThreadGroups.CLIENT",
+        );
+        assert_eq!(group, servers);
+        assert_ne!(servers, clients);
+        assert!(server.instance_of(group, "java/lang/ThreadGroup"));
+        let side = c(&mut server, SIDE, &[group]);
+        assert_eq!(c(&mut server, IS_SERVER, &[side]).i(), 1);
+        let side = c(&mut server, SIDE, &[clients]);
+        assert_eq!(c(&mut server, IS_SERVER, &[side]).i(), 0);
+        let (group, side) =
+            as_loading(&mut server, |rt| (c(rt, GROUP, &[thread]), c(rt, GET, &[])));
+        assert!(group != servers && group != clients && group.r() != 0);
+        assert_eq!(c(&mut server, IS_SERVER, &[side]).i(), 0);
+        // A level's thread (`Level.thread`, read through a mixin) is the one its hooks run on.
+        let level = crate::glue::level(&mut server);
+        assert_eq!(
+            c(
+                &mut server,
+                "net/minecraft/world/level/Level.$thread.()Ljava/lang/Thread;",
+                &[level]
+            ),
+            thread
+        );
+        server.interned.insert("side:client".into(), V::I(1));
+        assert!(c(&mut server, GROUP, &[thread]) != servers);
+        assert!(server.unmapped.is_empty(), "{:?}", server.unmapped);
 
         // The registry as the game's statics give it: its path, a string.
         let blocks = crate::api::get_static(&mut rt, "net/minecraft/core/registries/BuiltInRegistries.BLOCK");
@@ -3840,6 +3999,55 @@ mod tests {
         for (item, ability, expected) in cases {
             assert_eq!(can(&mut rt, item, ability), expected, "{item} {ability}");
         }
+        // The sets a kind of tool has by default (`ItemAbilities.DEFAULT_SHEARS_ACTIONS`...), as
+        // NeoForge 21.1.256 makes them: a mod walks one and asks a stack each (MineColonies,
+        // of every item: whether it can do all a fishing rod does).
+        let set = |rt: &mut Rt, field: &str| {
+            let key = rt.static_key(&format!(
+                "net/neoforged/neoforge/common/ItemAbilities.{field}"
+            ));
+            let all = crate::api::get_static(rt, key);
+            let mut names: Vec<String> = crate::jutil::elements(rt, all)
+                .into_iter()
+                .map(|a| rt.str_of(rt.get_field(a, "name")).unwrap_or("?").to_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            set(&mut rt, "DEFAULT_FISHING_ROD_ACTIONS"),
+            ["fishing_rod_cast"]
+        );
+        assert_eq!(set(&mut rt, "DEFAULT_SHIELD_ACTIONS"), ["shield_block"]);
+        assert_eq!(set(&mut rt, "DEFAULT_HOE_ACTIONS"), ["hoe_dig", "till"]);
+        assert_eq!(
+            set(&mut rt, "DEFAULT_FIRECHARGE_ACTIONS"),
+            ["firestarter_light"]
+        );
+        assert_eq!(set(&mut rt, "DEFAULT_SHEARS_ACTIONS").len(), 6);
+        let shears = crate::api::get_static(
+            &mut rt,
+            "net/neoforged/neoforge/common/ItemAbilities.DEFAULT_SHEARS_ACTIONS",
+        );
+        assert_eq!(
+            crate::api::get_static(
+                &mut rt,
+                "net/neoforged/neoforge/common/ItemAbilities.DEFAULT_SHEARS_ACTIONS"
+            ),
+            shears
+        );
+        let harvest = crate::api::get_static(
+            &mut rt,
+            "net/neoforged/neoforge/common/ItemAbilities.SHEARS_HARVEST",
+        );
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "java/util/Set.contains.(Ljava/lang/Object;)Z",
+                &[shears, harvest]
+            ),
+            V::I(1)
+        );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
@@ -4718,6 +4926,41 @@ mod tests {
                 ),
                 (V::I(1), V::I(0))
             );
+        });
+        // A fluid tag's fluids are listed too, the game's and a mod's (Mekanism makes a
+        // recipe's fluid ingredient of them, and logs the tag by its text when it has none).
+        let steam = rt.new_object("t/Steam");
+        rt.registered
+            .insert(("fluid".into(), "t:steam".into()), steam);
+        host.fluid_tags.insert(
+            "c:hot".into(),
+            vec!["minecraft:lava".into(), "t:steam".into()],
+        );
+        rt.with_host(&mut host, |rt| {
+            let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+            let fluids =
+                crate::api::get_static(rt, "net/minecraft/core/registries/BuiltInRegistries.FLUID");
+            let (hot, cold) = (
+                crate::fluids::tag_key(rt, "fluid", "c:hot"),
+                crate::fluids::tag_key(rt, "fluid", "c:cold"),
+            );
+            let found = c(rt, GET_TAG, &[fluids, hot]);
+            let set = rt.get_field(found, "value");
+            assert_eq!(c(rt, SIZE, &[set]), V::I(2));
+            let listed = c(rt, OR_EMPTY, &[fluids, hot]);
+            let ids: Vec<String> = crate::jutil::elements(rt, listed)
+                .into_iter()
+                .map(|h| rt.str_of(rt.get_field(h, "$id")).unwrap_or("?").to_owned())
+                .collect();
+            assert_eq!(ids, ["minecraft:lava", "t:steam"]);
+            let none = c(rt, GET_TAG, &[fluids, cold]);
+            assert_eq!(rt.get_field(none, "value"), V::NULL);
+            let text = c(
+                rt,
+                "net/minecraft/tags/TagKey.toString.()Ljava/lang/String;",
+                &[cold],
+            );
+            assert_eq!(rt.str_of(text), Some("TagKey[minecraft:fluid / c:cold]"));
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }

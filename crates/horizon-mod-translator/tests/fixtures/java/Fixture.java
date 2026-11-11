@@ -829,4 +829,90 @@ public class Fixture {
             }
         }
     }
+
+    // A field that hides one of the same name above it is another field of the same object:
+    // each class's code reads and writes its own, a cast or `super.` reaches the one above,
+    // reflection finds each by the class asked, a class on the JDK's base keeps its own beside
+    // the base's, and an inner class made of another's inner class keeps both outer objects.
+    // (GeckoLib's armour renderer has `head` as a bone over `HumanoidModel`'s model part.)
+    static class Part {
+        int kind = 1;
+        String label = "part";
+        int kind() { return kind; }
+        void bump() { kind += 10; }
+    }
+    static class Bone extends Part {
+        String kind = "bone";
+        String label = "inner";
+        int both() { return kind.length() * 100 + super.kind; }
+        String labels() { return label + "/" + super.label + "/" + ((Part) this).label; }
+    }
+    static class Rib extends Bone {
+        long kind = 5_000_000_000L;
+        long sum() { return kind + ((Bone) this).kind.length() + ((Part) this).kind; }
+    }
+    static class Tallied extends java.util.AbstractList<Integer> {
+        int modCount;
+        final int[] of = {4, 5, 6};
+        @Override public Integer get(int i) { modCount += 7; return of[i]; }
+        @Override public int size() { return of.length; }
+    }
+    static class Yard {
+        final int n;
+        Yard(int n) { this.n = n; }
+        class Gate { int open() { return n; } }
+    }
+    static class Keeper {
+        final int m;
+        Keeper(int m) { this.m = m; }
+        Yard.Gate gate(Yard yard) {
+            return yard.new Gate() { @Override int open() { return m * 100 + super.open(); } };
+        }
+    }
+    public static int hidden(int part) {
+        Rib rib = new Rib();
+        Bone bone = rib;
+        Part top = rib;
+        switch (part) {
+            case 1:
+                return bone.both();
+            case 2:
+                top.bump();
+                top.kind += 100;
+                return top.kind * 1000 + bone.kind.length() * 10 + (int) (rib.kind % 7) + top.kind();
+            case 3:
+                return rib.labels().hashCode();
+            case 4:
+                return (int) (rib.sum() % 100000);
+            case 5:
+                bone.kind = "longer";
+                bone.label = "x";
+                rib.kind = 12;
+                return top.kind * 100000 + top.label.length() * 10000 + bone.kind.length() * 1000 + bone.label.length() * 100 + (int) rib.kind;
+            case 6:
+                try {
+                    java.lang.reflect.Field up = Part.class.getDeclaredField("kind"), mid = Bone.class.getDeclaredField("kind"), low = Rib.class.getDeclaredField("kind");
+                    int before = (Integer) up.get(rib) * 1000 + ((String) mid.get(rib)).length() * 100 + (int) (low.getLong(rib) % 10);
+                    mid.set(rib, "reflected");
+                    up.setInt(rib, 77);
+                    low.set(rib, 9L);
+                    return before * 1000 + top.kind + bone.kind.length() * 100 + (int) rib.kind * 10000000;
+                } catch (ReflectiveOperationException e) {
+                    return -1;
+                }
+            case 7: {
+                Tallied c = new Tallied();
+                int s = 0;
+                for (int v : c) s += v;
+                return s * 100 + c.modCount;
+            }
+            case 8:
+                return new Keeper(3).gate(new Yard(4)).open();
+            default: {
+                int all = 0;
+                for (int i = 1; i <= 8; i++) all = all * 31 + hidden(i);
+                return all;
+            }
+        }
+    }
 }

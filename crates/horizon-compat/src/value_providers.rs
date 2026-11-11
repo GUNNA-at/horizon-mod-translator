@@ -260,6 +260,21 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     let (i, f) = (|k: usize| a(k).i(), |k: usize| a(k).f());
     Some(match (owner, name) {
+        // `new WeightedListInt(SimpleWeightedRandomList<IntProvider>)`: the list's wrappers
+        // ([`crate::weighted`]), with the smallest minimum and the largest maximum among them.
+        (WEIGHTED_INT, "<init>") => {
+            let entries = rt.get_field(a(1), "$items");
+            let (mut min, mut max) = (i32::MAX, i32::MIN);
+            for e in crate::jutil::elements(rt, entries) {
+                let provider = rt.get_field(e, "data");
+                min = min.min(int_min(rt, provider));
+                max = max.max(int_max(rt, provider));
+            }
+            rt.put_field(a(0), "$entries", entries);
+            rt.put_field(a(0), "minValue", V::I(min));
+            rt.put_field(a(0), "maxValue", V::I(max));
+            V::Void
+        }
         (CONSTANT_INT, "of") => constant_int(rt, i(0)),
         (UNIFORM_INT, "of") => make(rt, UNIFORM_INT, &[("minInclusive", a(0)), ("maxInclusive", a(1))]),
         (BIASED_INT, "of") => make(rt, BIASED_INT, &[("minInclusive", a(0)), ("maxInclusive", a(1))]),

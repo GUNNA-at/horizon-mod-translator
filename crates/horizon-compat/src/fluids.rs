@@ -1043,6 +1043,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (TAG_KEY, "registry") => rt.get_field(a(0), "$registry"),
         (TAG_KEY, "isFor") => V::I((rt.str_of(rt.get_field(a(0), "$registry")) == rt.str_of(a(1))) as i32),
         (TAG_KEY, "equals") => V::I((a(0) == a(1)) as i32),
+        // As the record writes itself (`TagKey[minecraft:fluid / c:water]`): a mod's log names
+        // the tag it found empty.
+        (TAG_KEY, "toString") => {
+            let registry = rt
+                .str_of(rt.get_field(a(0), "$registry"))
+                .unwrap_or("")
+                .to_owned();
+            let registry = if registry.contains(':') {
+                registry
+            } else {
+                format!("minecraft:{registry}")
+            };
+            let location = rt
+                .str_of(rt.get_field(a(0), "$location"))
+                .unwrap_or("")
+                .to_owned();
+            rt.string(&format!("TagKey[{registry} / {location}]"))
+        }
         // The fluid in a block state, in the level at a position, or as a vanilla block class
         // answers (`super.getFluidState(state)`).
         (STATE | STATE_BASE, "getFluidState") => {

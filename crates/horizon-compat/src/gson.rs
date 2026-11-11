@@ -2640,11 +2640,13 @@ fn bound_fields(
             .collect(),
         _ => Vec::new(),
     };
+    // The fields' own names, a class's before those above it: of two of one name, the lower.
+    let mut seen: Vec<String> = Vec::new();
     while rt.is_mod_class(&c) {
         for (access, name, desc, signature) in
             crate::jlang::typed_fields(rt, &c).unwrap_or_default()
         {
-            if access & 0x1000 != 0 || access & excluded != 0 || out.iter().any(|f| f.0 == name) {
+            if access & 0x1000 != 0 || access & excluded != 0 || seen.contains(&name) {
                 continue;
             }
             let ty = signature.unwrap_or(desc);
@@ -2688,7 +2690,10 @@ fn bound_fields(
                     .as_deref()
                     .map_or_else(|| name.clone(), |p| policy_name(p, &name)),
             };
-            out.push((rt.static_key(&name), json, ty));
+            // (Where the object keeps it: a field that hides one above it has a name of its own.)
+            let plain = rt.static_key(&name);
+            out.push((crate::jlang::stored_name(rt, &c, plain), json, ty));
+            seen.push(name);
         }
         match rt.supers.get(c.as_str()) {
             Some(&sup) => c = sup.to_owned(),
