@@ -148,6 +148,49 @@ pub(crate) fn left_to_read(rt: &Rt, b: V) -> Option<Vec<i8>> {
     Some(remaining(rt, &s).into_iter().map(|b| b as i8).collect())
 }
 
+/// How many bytes buffer `b` has room for, from its position to its limit: what a channel's
+/// read may put into it. None for what is no buffer.
+pub(crate) fn room(rt: &Rt, b: V) -> Option<usize> {
+    let s = state(rt, b)?;
+    Some((s.limit - s.position).max(0) as usize)
+}
+
+/// Puts `bytes` into buffer `b` at its position, which moves past them, as a channel's read
+/// does; false for more than it has room for.
+pub(crate) fn fill(rt: &mut Rt, b: V, bytes: &[u8]) -> bool {
+    let Some(s) = state(rt, b) else {
+        return false;
+    };
+    if bytes.len() > (s.limit - s.position).max(0) as usize
+        || !write(rt, s.array, s.offset + s.position, bytes)
+    {
+        return false;
+    }
+    rt.put_field(b, POSITION, V::I(s.position + bytes.len() as i32));
+    true
+}
+
+/// Takes what buffer `b` has left to read, its position moved to its limit, as a channel's
+/// write does. None for what is no buffer.
+pub(crate) fn take_left(rt: &mut Rt, b: V) -> Option<Vec<u8>> {
+    let s = state(rt, b)?;
+    let bytes = remaining(rt, &s);
+    rt.put_field(b, POSITION, V::I(s.limit));
+    Some(bytes)
+}
+
+/// Takes what was put into buffer `b` (its start to its position) and empties it for more,
+/// as `flip()`, a read of it all and `clear()` do.
+pub(crate) fn take_put(rt: &mut Rt, b: V) -> Vec<u8> {
+    let Some(s) = state(rt, b) else {
+        return Vec::new();
+    };
+    let bytes = read(rt, s.array, s.offset, s.position.max(0) as usize).unwrap_or_default();
+    rt.put_field(b, POSITION, V::I(0));
+    rt.put_field(b, LIMIT, V::I(s.capacity));
+    bytes
+}
+
 fn throw(rt: &mut Rt, class: &'static str) -> V {
     rt.throw_new(class);
     V::Void

@@ -1018,14 +1018,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (DATA_IN, "readUTF") if desc.starts_with("(Ljava/io/DataInput;)") => {
             return Some(read_utf(rt, a(0)));
         }
-        // `transferTo(out)`: the rest of this stream, written to `out`.
-        (_, "transferTo") => {
+        // `transferTo(out)`: the rest of this stream, written to `out`. (A stream's: a file
+        // channel's `transferTo` is [`crate::channels`]'.)
+        (_, "transferTo")
+            if owner.starts_with("java/io/") || owner.starts_with("java/util/zip/") =>
+        {
             let bytes = drain(rt, a(0)).unwrap_or_default();
             write_to(rt, a(1), &bytes);
             return Some(V::J(bytes.len() as i64));
         }
         (_, "<init>") => return init(rt, owner, desc, args),
         _ => {}
+    }
+    // A file read and written in place is its own reader and writer ([`crate::channels`]): a
+    // `RandomAccessFile` handed on as a `DataInput` or a `DataOutput`.
+    if matches!(owner, DATA_INPUT | DATA_OUTPUT) && crate::channels::is_file(rt, a(0)) {
+        return crate::channels::data_call(rt, name, desc, args);
     }
     let class = base(rt, a(0));
     let closing = matches!(owner, CLOSEABLE | AUTO_CLOSEABLE);

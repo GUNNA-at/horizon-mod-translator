@@ -1026,4 +1026,287 @@ public class Fixture {
             }
         }
     }
+    // Files read and written in place, and folders gone through: a channel onto a file, a
+    // `RandomAccessFile`, a stream as a channel; a folder's entries, a tree walked by a visitor.
+    // (A folder's order is the disk's: nothing here depends on it.)
+    static class Deleter extends java.nio.file.SimpleFileVisitor<java.nio.file.Path> {
+        int files, folders;
+        @Override public java.nio.file.FileVisitResult visitFile(java.nio.file.Path file, java.nio.file.attribute.BasicFileAttributes attrs) throws java.io.IOException {
+            files++;
+            java.nio.file.Files.delete(file);
+            return java.nio.file.FileVisitResult.CONTINUE;
+        }
+        @Override public java.nio.file.FileVisitResult postVisitDirectory(java.nio.file.Path dir, java.io.IOException failed) throws java.io.IOException {
+            folders++;
+            java.nio.file.Files.delete(dir);
+            return java.nio.file.FileVisitResult.CONTINUE;
+        }
+    }
+    static class Counter extends java.nio.file.SimpleFileVisitor<java.nio.file.Path> {
+        final String skipped;
+        final java.nio.file.FileVisitResult atFile;
+        int pre, post, files;
+        long bytes;
+        Counter(String skipped, java.nio.file.FileVisitResult atFile) { this.skipped = skipped; this.atFile = atFile; }
+        @Override public java.nio.file.FileVisitResult preVisitDirectory(java.nio.file.Path dir, java.nio.file.attribute.BasicFileAttributes attrs) {
+            pre++;
+            return dir.getFileName().toString().equals(skipped) ? java.nio.file.FileVisitResult.SKIP_SUBTREE : java.nio.file.FileVisitResult.CONTINUE;
+        }
+        @Override public java.nio.file.FileVisitResult visitFile(java.nio.file.Path file, java.nio.file.attribute.BasicFileAttributes attrs) {
+            files++;
+            bytes += attrs.isDirectory() ? 1000 : attrs.size();
+            return atFile;
+        }
+        @Override public java.nio.file.FileVisitResult postVisitDirectory(java.nio.file.Path dir, java.io.IOException failed) {
+            post++;
+            return java.nio.file.FileVisitResult.CONTINUE;
+        }
+    }
+    public static int files(int part) {
+        try {
+            java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("hzfix");
+            int result = filesIn(dir, part);
+            Deleter deleter = new Deleter();
+            java.nio.file.Files.walkFileTree(dir, deleter);
+            return result * 31 + (java.nio.file.Files.exists(dir) ? 1 : 0) + (deleter.folders > 0 ? 2 : 0);
+        } catch (java.io.IOException e) {
+            return -1;
+        }
+    }
+    static int filesIn(java.nio.file.Path dir, int part) throws java.io.IOException {
+        StringBuilder s = new StringBuilder();
+        switch (part) {
+            case 1: {
+                java.nio.file.Path p = dir.resolve("region.dat");
+                try (java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(p, java.nio.file.StandardOpenOption.READ,
+                        java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.CREATE)) {
+                    java.nio.ByteBuffer b = java.nio.ByteBuffer.wrap(new byte[] {1, 2, 3, 4});
+                    s.append(ch.size()).append(ch.write(b, 6)).append(b.hasRemaining()).append(ch.size()).append(ch.position());
+                    java.nio.ByteBuffer into = java.nio.ByteBuffer.allocate(8);
+                    s.append(ch.read(into, 5)).append(into.position()).append(into.get(1));
+                    s.append(ch.read(java.nio.ByteBuffer.allocate(8), 10)).append(ch.read(java.nio.ByteBuffer.allocate(0), 10));
+                    s.append(ch.write(java.nio.ByteBuffer.wrap(new byte[] {9, 8}))).append(ch.position());
+                    ch.truncate(1);
+                    s.append(ch.position());
+                    ch.truncate(50);
+                    s.append(ch.size());
+                    ch.position(40);
+                    s.append(ch.read(java.nio.ByteBuffer.allocate(4)));
+                    ch.write(java.nio.ByteBuffer.wrap(new byte[] {7}));
+                    s.append(ch.size()).append(ch.position());
+                    // Written and read back "until the buffer is done", as a file of chunks is.
+                    java.nio.ByteBuffer rest = java.nio.ByteBuffer.allocate(300);
+                    for (int i = 0; i < 300; i++) rest.put((byte) i);
+                    rest.flip();
+                    long at = 100;
+                    while (rest.hasRemaining()) at += ch.write(rest, at);
+                    s.append(at).append(ch.size());
+                    java.nio.ByteBuffer back = java.nio.ByteBuffer.allocate(300);
+                    long from = 100;
+                    while (back.hasRemaining()) {
+                        int n = ch.read(back, from);
+                        if (n < 0) break;
+                        from += n;
+                    }
+                    back.flip();
+                    int sum = 0;
+                    while (back.hasRemaining()) sum = sum * 31 + back.get();
+                    s.append(sum);
+                    ch.force(true);
+                }
+                s.append(java.util.Arrays.toString(java.util.Arrays.copyOf(java.nio.file.Files.readAllBytes(p), 8)));
+                break;
+            }
+            case 2: {
+                java.nio.file.Path missing = dir.resolve("missing.dat");
+                try {
+                    java.nio.channels.FileChannel.open(missing, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.WRITE).close();
+                    s.append("opened");
+                } catch (java.nio.file.NoSuchFileException e) { s.append("nsf"); }
+                try {
+                    java.nio.channels.FileChannel.open(missing, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.CREATE).close();
+                    s.append("opened");
+                } catch (java.nio.file.NoSuchFileException e) { s.append("nsf"); }
+                java.nio.file.Path there = dir.resolve("there.dat");
+                java.nio.file.Files.write(there, new byte[] {5, 6, 7});
+                java.nio.channels.FileChannel ro = java.nio.channels.FileChannel.open(there);
+                try {
+                    ro.write(java.nio.ByteBuffer.wrap(new byte[] {1}), 0);
+                    s.append("written");
+                } catch (java.nio.channels.NonWritableChannelException e) { s.append("nw"); }
+                try { ro.position(-1); } catch (IllegalArgumentException e) { s.append("iae").append(e.getMessage()); }
+                try { ro.read(java.nio.ByteBuffer.allocate(1), -1); } catch (IllegalArgumentException e) { s.append("iae").append(e.getMessage()); }
+                ro.close();
+                s.append(ro.isOpen());
+                try { ro.size(); } catch (java.nio.channels.ClosedChannelException e) { s.append("closed"); }
+                try {
+                    java.nio.channels.FileChannel.open(there, java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.CREATE_NEW).close();
+                } catch (java.nio.file.FileAlreadyExistsException e) { s.append("fae"); }
+                try {
+                    java.nio.channels.FileChannel.open(there, java.nio.file.StandardOpenOption.READ, java.nio.file.StandardOpenOption.APPEND).close();
+                } catch (IllegalArgumentException e) { s.append(e.getMessage()); }
+                java.nio.channels.FileChannel ap = java.nio.channels.FileChannel.open(there, java.nio.file.StandardOpenOption.APPEND);
+                s.append(ap.position());
+                ap.write(java.nio.ByteBuffer.wrap(new byte[] {8}));
+                s.append(ap.position()).append(java.util.Arrays.toString(java.nio.file.Files.readAllBytes(there)));
+                try { ap.read(java.nio.ByteBuffer.allocate(1)); } catch (java.nio.channels.NonReadableChannelException e) { s.append("nr"); }
+                ap.close();
+                java.nio.channels.FileChannel tr = java.nio.channels.FileChannel.open(there, java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.TRUNCATE_EXISTING);
+                s.append(tr.size());
+                java.nio.channels.FileLock lock = tr.tryLock();
+                s.append(lock.isValid()).append(lock.isShared());
+                lock.release();
+                s.append(lock.isValid());
+                tr.close();
+                break;
+            }
+            case 3: {
+                java.nio.channels.FileChannel g = java.nio.channels.FileChannel.open(dir.resolve("sg.dat"), java.nio.file.StandardOpenOption.READ,
+                    java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.CREATE);
+                s.append(g.write(new java.nio.ByteBuffer[] {java.nio.ByteBuffer.wrap(new byte[] {1, 2}), java.nio.ByteBuffer.wrap(new byte[] {3, 4, 5})})).append(g.position());
+                g.position(0);
+                java.nio.ByteBuffer s1 = java.nio.ByteBuffer.allocate(2), s2 = java.nio.ByteBuffer.allocate(8);
+                s.append(g.read(new java.nio.ByteBuffer[] {s1, s2})).append(s1.position()).append(s2.position()).append(g.position());
+                s.append(g.read(new java.nio.ByteBuffer[] {java.nio.ByteBuffer.allocate(2)}));
+                java.nio.channels.FileChannel t = java.nio.channels.FileChannel.open(dir.resolve("t2.dat"), java.nio.file.StandardOpenOption.READ,
+                    java.nio.file.StandardOpenOption.WRITE, java.nio.file.StandardOpenOption.CREATE);
+                t.write(java.nio.ByteBuffer.wrap(new byte[] {9, 9}));
+                s.append(g.transferTo(1, 3, t)).append(g.position()).append(t.position());
+                g.position(0);
+                s.append(t.transferFrom(g, 1, 2)).append(g.position()).append(t.position());
+                s.append(t.transferFrom(g, 99, 2)).append(t.size());
+                g.close();
+                t.close();
+                s.append(java.util.Arrays.hashCode(java.nio.file.Files.readAllBytes(dir.resolve("t2.dat"))));
+                java.nio.channels.ReadableByteChannel in = java.nio.channels.Channels.newChannel(new java.io.ByteArrayInputStream(new byte[] {1, 2, 3, 4, 5}));
+                java.nio.ByteBuffer three = java.nio.ByteBuffer.allocate(3);
+                s.append(in.read(three)).append(in.read(three));
+                three.clear();
+                s.append(in.read(three)).append(three.get(1));
+                three.clear();
+                s.append(in.read(three));
+                java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                java.nio.channels.WritableByteChannel out = java.nio.channels.Channels.newChannel(bytes);
+                s.append(out.write(java.nio.ByteBuffer.wrap(new byte[] {7, 8, 9}))).append(bytes.size());
+                try (java.nio.channels.SeekableByteChannel seek = java.nio.file.Files.newByteChannel(dir.resolve("sg.dat"))) {
+                    java.nio.ByteBuffer two = java.nio.ByteBuffer.allocate(2);
+                    s.append(seek.size()).append(seek.read(two)).append(seek.position());
+                    seek.position(4);
+                    two.clear();
+                    s.append(seek.read(two)).append(two.get(0)).append(seek.read(two));
+                }
+                break;
+            }
+            case 4: {
+                java.io.File f = new java.io.File(dir.toFile(), "index.bin");
+                java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "rw");
+                raf.writeInt(0x01020304);
+                raf.writeLong(-2);
+                raf.writeUTF("é\u0000z");
+                s.append(raf.length()).append(raf.getFilePointer());
+                raf.seek(2);
+                s.append(raf.readUnsignedShort()).append(raf.readLong()).append(raf.readUTF().length()).append(raf.read());
+                raf.seek(0);
+                s.append(((java.io.DataInput) raf).readInt());
+                raf.seek(18);
+                try { raf.readInt(); } catch (java.io.EOFException e) { s.append("eof").append(raf.getFilePointer()); }
+                raf.seek(30);
+                s.append(raf.getFilePointer()).append(raf.length()).append(raf.read()).append(raf.skipBytes(5)).append(raf.getFilePointer());
+                raf.setLength(4);
+                s.append(raf.getFilePointer());
+                java.nio.channels.FileChannel rc = raf.getChannel();
+                s.append(rc.position()).append(rc.size());
+                rc.position(1);
+                s.append(raf.getFilePointer());
+                raf.seek(0);
+                byte[] buf = new byte[10];
+                s.append(raf.read(buf)).append(raf.read(buf)).append(raf.read(buf, 0, 0));
+                raf.seek(0);
+                raf.writeBytes("ab\r\ncd\ne\rf");
+                raf.seek(0);
+                s.append(raf.readLine()).append(raf.readLine()).append(raf.readLine()).append(raf.readLine()).append(raf.readLine());
+                raf.seek(0);
+                raf.writeShort(-2);
+                raf.writeChar('x');
+                raf.writeBoolean(true);
+                raf.writeByte(200);
+                raf.writeFloat(1.5f);
+                raf.writeDouble(-0.25);
+                raf.write(new byte[] {1, 2, 3}, 1, 2);
+                raf.seek(0);
+                s.append(raf.readShort()).append(raf.readChar()).append(raf.readBoolean()).append(raf.readByte()).append(raf.readFloat()).append(raf.readDouble());
+                byte[] two = new byte[2];
+                raf.readFully(two);
+                s.append(two[0]).append(two[1]);
+                raf.close();
+                try { raf.length(); } catch (java.io.IOException e) { s.append(e.getMessage()); }
+                try { new java.io.RandomAccessFile(new java.io.File(dir.toFile(), "none.bin"), "r").close(); } catch (java.io.FileNotFoundException e) { s.append("fnf"); }
+                try { new java.io.RandomAccessFile(f, "x").close(); } catch (IllegalArgumentException e) { s.append(e.getMessage()); }
+                java.io.RandomAccessFile reads = new java.io.RandomAccessFile(f, "r");
+                try { reads.write(1); } catch (java.io.IOException e) { s.append(e.getMessage()); }
+                try { reads.seek(-1); } catch (java.io.IOException e) { s.append(e.getMessage()); }
+                reads.close();
+                break;
+            }
+            default: {
+                for (String name : new String[] {"w/a/one.dat", "w/a/two.txt", "w/a/deep/three.dat", "w/b/four.dat"}) {
+                    java.nio.file.Path file = dir.resolve(name);
+                    java.nio.file.Files.createDirectories(file.getParent());
+                    java.nio.file.Files.write(file, name.getBytes());
+                }
+                java.nio.file.Path w = dir.resolve("w");
+                Counter skip = new Counter("deep", java.nio.file.FileVisitResult.CONTINUE);
+                java.nio.file.Files.walkFileTree(w, skip);
+                s.append(skip.pre).append(skip.post).append(skip.files).append(skip.bytes);
+                Counter flat = new Counter("", java.nio.file.FileVisitResult.CONTINUE);
+                java.nio.file.Files.walkFileTree(w, java.util.EnumSet.noneOf(java.nio.file.FileVisitOption.class), 1, flat);
+                s.append(flat.pre).append(flat.post).append(flat.files).append(flat.bytes);
+                Counter ended = new Counter("", java.nio.file.FileVisitResult.TERMINATE);
+                java.nio.file.Files.walkFileTree(w.resolve("b"), ended);
+                s.append(ended.pre).append(ended.post).append(ended.files);
+                Counter past = new Counter("", java.nio.file.FileVisitResult.SKIP_SIBLINGS);
+                java.nio.file.Files.walkFileTree(w.resolve("b"), past);
+                s.append(past.pre).append(past.post).append(past.files);
+                try {
+                    java.nio.file.Files.walkFileTree(dir.resolve("none"), new Counter("", java.nio.file.FileVisitResult.CONTINUE));
+                    s.append("walked");
+                } catch (java.nio.file.NoSuchFileException e) { s.append("nsf"); }
+                s.append(java.nio.file.Files.walkFileTree(w, new Counter("", java.nio.file.FileVisitResult.CONTINUE)) == w);
+                java.util.List<String> names = new java.util.ArrayList<>();
+                try (java.nio.file.DirectoryStream<java.nio.file.Path> entries = java.nio.file.Files.newDirectoryStream(w.resolve("a"), "*.{dat,json}")) {
+                    for (java.nio.file.Path entry : entries) names.add(entry.getFileName().toString());
+                }
+                int letters = 0;
+                try (java.nio.file.DirectoryStream<java.nio.file.Path> entries = java.nio.file.Files.newDirectoryStream(w.resolve("a"))) {
+                    for (java.nio.file.Path entry : entries) letters += entry.getFileName().toString().length();
+                }
+                int folders = 0;
+                try (java.nio.file.DirectoryStream<java.nio.file.Path> entries = java.nio.file.Files.newDirectoryStream(w.resolve("a"), entry -> java.nio.file.Files.isDirectory(entry))) {
+                    for (java.nio.file.Path entry : entries) folders++;
+                }
+                s.append(names).append(letters).append(folders);
+                try { java.nio.file.Files.newDirectoryStream(w.resolve("a/one.dat")).close(); } catch (java.nio.file.NotDirectoryException e) { s.append("nd"); }
+                try (java.util.stream.Stream<java.nio.file.Path> found = java.nio.file.Files.find(w, 9, (path, attrs) -> attrs.isRegularFile() && path.toString().endsWith(".dat"))) {
+                    s.append(found.count());
+                }
+                try (java.util.stream.Stream<java.nio.file.Path> found = java.nio.file.Files.find(w, 1, (path, attrs) -> true)) {
+                    s.append(found.count());
+                }
+                java.nio.file.attribute.BasicFileAttributes at = java.nio.file.Files.readAttributes(w.resolve("a/one.dat"), java.nio.file.attribute.BasicFileAttributes.class);
+                s.append(at.size()).append(at.isRegularFile()).append(at.isDirectory()).append(at.isSymbolicLink()).append(at.isOther());
+                java.nio.file.Path tmp = java.nio.file.Files.createTempFile(dir, "pre", ".suf");
+                s.append(tmp.getFileName().toString().startsWith("pre")).append(tmp.getFileName().toString().endsWith(".suf")).append(java.nio.file.Files.size(tmp));
+                java.io.File made = java.io.File.createTempFile("abc", null, dir.toFile());
+                s.append(made.getName().endsWith(".tmp")).append(made.exists());
+                try { java.io.File.createTempFile("ab", ".x", dir.toFile()); } catch (IllegalArgumentException e) { s.append(e.getMessage()); }
+                java.nio.file.PathMatcher matcher = java.nio.file.FileSystems.getDefault().getPathMatcher("glob:**/*.{dat,txt}");
+                s.append(matcher.matches(java.nio.file.Paths.get("w/a/one.dat"))).append(matcher.matches(java.nio.file.Paths.get("one.dat")))
+                    .append(matcher.matches(java.nio.file.Paths.get("w/a/x.json")));
+                java.io.File canon = new java.io.File(dir.toFile(), "w/a/../a/./one.dat");
+                s.append(canon.getCanonicalPath().equals(w.resolve("a/one.dat").toRealPath().toString()));
+                break;
+            }
+        }
+        return s.toString().hashCode();
+    }
 }

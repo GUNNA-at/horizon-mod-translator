@@ -696,7 +696,12 @@ fn call_nested(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         let secs = rt
             .hook_first_miss
             .map_or(RUNAWAY_TIME.as_secs(), |t| t.elapsed().as_secs());
-        let n = rt.hook_misses.max(RUNAWAY_MISSES);
+        // (A hook's own count; while the mods load there is none, and the loop's was the limit.)
+        let n = if rt.hook_misses > 0 {
+            rt.hook_misses
+        } else {
+            RUNAWAY_MISSES
+        };
         // What a JVM throws at a method that is not there, which is what this is: code that
         // falls back on such an error does, and code that sorts errors by kind knows this one.
         crate::jlang::throw_with(
@@ -773,11 +778,20 @@ const RUNAWAY_BYTES: u64 = 256 << 20;
 /// Or made this many objects: a loop that makes one on each round (a server thread's accept loop,
 /// run on the game's thread) holds them all until its hook ends, which it never does.
 const RUNAWAY_OBJECTS: usize = 8_000_000;
+/// And this many are enough in a hook that makes a call a stuck hook was stopped on before
+/// ([`STOPPED_ON`]): the same loop, started again. (A map mod's write of its chunks, begun anew
+/// at every tick: each took [`RUNAWAY_TIME`] to be stopped, and the game stood at ten seconds a
+/// tick for as long as it ran.)
+const RUNAWAY_AGAIN: u64 = 10_000;
 
 thread_local! {
     /// What the runtime had allocated at the running hook's first unmapped call: bytes of text
     /// and arrays, and objects.
     static HOOK_ALLOCATED: std::cell::Cell<(u64, usize)> = const { std::cell::Cell::new((0, 0)) };
+    /// The calls nothing maps that this thread's hooks were making when they were stopped as
+    /// stuck ([`RUNAWAY_AGAIN`]).
+    static STOPPED_ON: std::cell::RefCell<std::collections::HashSet<&'static str>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
 }
 
 /// Whether the hook running now (one call of the game's into the mod: a tick, a screen's frame)
@@ -805,9 +819,13 @@ fn runaway(rt: &mut Rt, key: &'static str) -> bool {
     let (_, objects) = HOOK_ALLOCATED.get();
     let grown =
         rt.largest >= RUNAWAY_BYTES || rt.heap.len().saturating_sub(objects) >= RUNAWAY_OBJECTS;
-    let stuck = (rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME)
+    let again =
+        rt.hook_misses >= RUNAWAY_AGAIN && STOPPED_ON.with(|keys| keys.borrow().contains(key));
+    let stuck = again
+        || (rt.hook_misses >= RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_TIME)
         || (rt.hook_misses >= RUNAWAY_FEW && grown);
     if stuck {
+        STOPPED_ON.with(|keys| keys.borrow_mut().insert(key));
         tell_most_asked(rt);
     }
     stuck
@@ -1993,7 +2011,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 98] = [
+const CHAIN: [Module; 99] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -2091,13 +2109,14 @@ const CHAIN: [Module; 98] = [
     world,
     crate::palette::call,
     crate::nio::call,
+    crate::channels::call,
     crate::records::call,
 ];
 
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 98] = [
+const CLAIMS: [Claims; 99] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -2196,10 +2215,11 @@ const CLAIMS: [Claims; 98] = [
     |_, _, _| true,
     crate::palette::claims,
     crate::nio::claims,
+    crate::channels::claims,
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 98] = [
+const MODULE_NAMES: [&str; 99] = [
     "diodes",
     "rails",
     "fake_players",
@@ -2297,6 +2317,7 @@ const MODULE_NAMES: [&str; 98] = [
     "world",
     "palette",
     "nio",
+    "channels",
     "records",
 ];
 
@@ -5975,6 +5996,24 @@ mod tests {
         rt.with_host(&mut game, |rt| {
             call(rt, key, &[]);
             assert!(rt.thrown.is_none(), "the next hook starts afresh");
+            // Back in the loop it was stopped in, it is stopped without the wait.
+            rt.hook_misses = RUNAWAY_AGAIN - 1;
+            rt.hook_first_miss = Some(std::time::Instant::now());
+            call(rt, key, &[]);
+            let e = rt
+                .thrown
+                .take()
+                .expect("a hook back in the loop it was stopped in is stopped at once");
+            assert_eq!(rt.class_of(e), "java/lang/NoSuchMethodError");
+        });
+        rt.with_host(&mut game, |rt| {
+            rt.hook_misses = RUNAWAY_AGAIN - 1;
+            rt.hook_first_miss = Some(std::time::Instant::now());
+            call(rt, "horizon/test/Other.never.()V", &[]);
+            assert!(
+                rt.thrown.is_none(),
+                "ten thousand calls of what no loop was stopped on are a hook going on"
+            );
         });
     }
 

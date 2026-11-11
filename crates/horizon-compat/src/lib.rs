@@ -135,6 +135,7 @@ pub mod palette;
 pub mod particle_engine;
 pub mod game_classes;
 pub mod nio;
+pub mod channels;
 pub mod particles;
 pub mod places;
 pub mod records;

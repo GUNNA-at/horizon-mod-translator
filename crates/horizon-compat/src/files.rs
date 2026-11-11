@@ -222,6 +222,40 @@ pub(crate) fn on_disk(rt: &Rt, text: &str) -> PathBuf {
     path
 }
 
+/// `File.getCanonicalPath()`: the path with its `.` and `..` taken out and the links of what
+/// is there of it followed (a file not made yet has the real path of the folder it will be in).
+fn canonical(disk: &Path) -> PathBuf {
+    let plain = PathBuf::from(normalize(&disk.to_string_lossy()));
+    let mut rest = Vec::new();
+    let mut there = plain.as_path();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(there) {
+            return rest.iter().rev().fold(real, |p, part| p.join(part));
+        }
+        match (there.parent(), there.file_name()) {
+            (Some(up), Some(name)) => {
+                rest.push(name.to_owned());
+                there = up;
+            }
+            _ => return plain,
+        }
+    }
+}
+
+/// Whether the file at `disk` may be run (a folder: entered), as `File.canExecute` asks.
+fn executable(disk: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        disk.metadata()
+            .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        disk.exists()
+    }
+}
+
 /// `a.resolve(b)`: `b` when it is absolute or `a` is empty, `a` when `b` is empty.
 pub(crate) fn resolve(a: &str, b: &str) -> String {
     if b.starts_with('/') || a.is_empty() {
@@ -342,7 +376,7 @@ fn entries(dir: &Path) -> std::io::Result<Vec<String>> {
 
 /// `Files.walk(start, depth)`: the start, then each folder's entries before the next's,
 /// depth first.
-fn walk(rt: &Rt, start: &str, depth: i32, out: &mut Vec<String>) {
+pub(crate) fn walk(rt: &Rt, start: &str, depth: i32, out: &mut Vec<String>) {
     out.push(start.to_owned());
     if depth <= 0 {
         return;
@@ -428,6 +462,12 @@ fn path_method(rt: &mut Rt, name: &str, p: &str, args: &[V]) -> Option<V> {
             new_path(rt, &abs.to_string_lossy())
         }
         "normalize" => new_path(rt, &normalize(p)),
+        // `toRealPath(options...)`: where the file really is, its links followed; one that is
+        // not there has no such path.
+        "toRealPath" => match std::fs::canonicalize(on_disk(rt, p)) {
+            Ok(real) => new_path(rt, &real.to_string_lossy()),
+            Err(e) => throw_io(rt, &e, p),
+        },
         "relativize" => {
             let other = text(rt, a(1))?;
             new_path(rt, &relativize(p, &other))
@@ -503,6 +543,29 @@ fn file_method(rt: &mut Rt, name: &str, desc: &str, f: &str, args: &[V]) -> Opti
         }
         "getAbsolutePath" => rt.string(&disk.to_string_lossy()),
         "getAbsoluteFile" => new_file(rt, &disk.to_string_lossy()),
+        "isAbsolute" => V::I(f.starts_with('/') as i32),
+        "getCanonicalPath" => {
+            let real = canonical(&disk);
+            rt.string(&real.to_string_lossy())
+        }
+        "getCanonicalFile" => {
+            let real = canonical(&disk);
+            new_file(rt, &real.to_string_lossy())
+        }
+        // `setLastModified(millis)`: whether the file took the time.
+        "setLastModified" => {
+            let at =
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(a(1).j().max(0) as u64);
+            V::I(
+                std::fs::File::open(&disk)
+                    .and_then(|file| file.set_modified(at))
+                    .is_ok() as i32,
+            )
+        }
+        // (Nothing is deleted as the game ends: what a mod leaves in its folder of temporary
+        // files stays there.)
+        "deleteOnExit" => V::Void,
+        "canExecute" => V::I(executable(&disk) as i32),
         "getParent" => match parent(f) {
             Some(up) => rt.string(&up),
             None => V::NULL,
@@ -617,6 +680,7 @@ fn files_method(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "isDirectory" => V::I(disk.is_dir() as i32),
         "isRegularFile" => V::I(disk.is_file() as i32),
         "isReadable" => V::I(disk.exists() as i32),
+        "isExecutable" => V::I(executable(&disk) as i32),
         "isWritable" => V::I(disk.metadata().is_ok_and(|m| !m.permissions().readonly()) as i32),
         "isHidden" => V::I(names(&p).last().is_some_and(|n| n.starts_with('.')) as i32),
         "isSymbolicLink" => V::I(disk.symlink_metadata().is_ok_and(|m| m.file_type().is_symlink()) as i32),
@@ -1182,6 +1246,91 @@ mod tests {
         assert_eq!(rt.class_of(e), "java/io/FileNotFoundException");
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where a file really is (JDK 21: `getCanonicalPath` takes the dots out and follows the
+    /// links of what is there; `toRealPath` wants the file itself), and the time it is given.
+    #[test]
+    fn a_file_tells_where_it_really_is() {
+        crate::install();
+        let mut rt = Rt::new();
+        let dir = game(&mut rt, "canonical");
+        let real = std::fs::canonicalize(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/one.txt"), "1").unwrap();
+        let file = new_file(&mut rt, "a/../a/./one.txt");
+        let path = c(
+            &mut rt,
+            "java/io/File.getCanonicalPath.()Ljava/lang/String;",
+            &[file],
+        );
+        assert_eq!(
+            rt.str_of(path),
+            Some(real.join("a/one.txt").to_string_lossy().as_ref())
+        );
+        // One not made yet: under the real path of the folder that is there.
+        let later = new_file(&mut rt, "a/b/../later.txt");
+        let path = c(
+            &mut rt,
+            "java/io/File.getCanonicalFile.()Ljava/io/File;",
+            &[later],
+        );
+        assert_eq!(
+            rt.str_of(path),
+            Some(real.join("a/later.txt").to_string_lossy().as_ref())
+        );
+        let one = new_path(&mut rt, "a/one.txt");
+        let path = c(
+            &mut rt,
+            "java/nio/file/Path.toRealPath.([Ljava/nio/file/LinkOption;)Ljava/nio/file/Path;",
+            &[one, V::NULL],
+        );
+        assert_eq!(
+            rt.str_of(path),
+            Some(real.join("a/one.txt").to_string_lossy().as_ref())
+        );
+        let none = new_path(&mut rt, "a/none.txt");
+        c(
+            &mut rt,
+            "java/nio/file/Path.toRealPath.([Ljava/nio/file/LinkOption;)Ljava/nio/file/Path;",
+            &[none, V::NULL],
+        );
+        let thrown = rt
+            .thrown
+            .take()
+            .expect("a file that is not there has no real path");
+        assert_eq!(rt.class_of(thrown), "java/nio/file/NoSuchFileException");
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/io/File.setLastModified.(J)Z",
+                &[file, V::J(1_700_000_000_000)]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            c(&mut rt, "java/io/File.lastModified.()J", &[file]),
+            V::J(1_700_000_000_000)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/io/File.setLastModified.(J)Z",
+                &[later, V::J(5)]
+            ),
+            V::I(0)
+        );
+        assert_eq!(c(&mut rt, "java/io/File.canExecute.()Z", &[file]), V::I(0));
+        let folder = new_path(&mut rt, "a");
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/nio/file/Files.isExecutable.(Ljava/nio/file/Path;)Z",
+                &[folder]
+            ),
+            V::I(1)
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
