@@ -1518,9 +1518,16 @@ fn image_address(image: V) -> i64 {
 }
 
 /// The image `address` points into ([`image_address`]) while it is open, and how many bytes in.
+/// An image is a `NativeImage` or an object of a mod's class built on it (JourneyMap scales a
+/// chunk's tile into its own `ComparableNativeImage`).
 fn image_at(rt: &Rt, address: i64) -> Option<(V, usize)> {
     let image = V::R(u32::try_from(address >> 32).ok().filter(|&r| r != 0)?);
-    let open = rt.class_of(image) == NATIVE_IMAGE && rt.get_field(image, "$closed").i() == 0;
+    let pixels = matches!(
+        rt.heap.get(image.r() as usize).map(|o| &o.data),
+        Some(Data::Bytes(..))
+    );
+    let open =
+        pixels && rt.instance_of(image, NATIVE_IMAGE) && rt.get_field(image, "$closed").i() == 0;
     open.then_some((image, (address & 0xffff_ffff) as usize))
 }
 
@@ -2377,6 +2384,19 @@ mod tests {
             4
         ));
         assert_eq!(bytes(&rt, tile), expected);
+        // The image scaled into may be of a mod's own class built on `NativeImage`.
+        rt.supers.insert("t/ComparableImage", IMAGE);
+        let own = rt.new_object_id("t/ComparableImage", 9);
+        c(&mut rt, "<init>.(IIZ)V", &[own, V::I(3), V::I(3), V::I(0)]);
+        let mut into_own = cut;
+        into_own[4] = address(&mut rt, own);
+        let done = crate::api::call(
+            &mut rt,
+            "org/lwjgl/stb/STBImageResize.nstbir_resize_uint8.(JIIIJIIII)I",
+            &into_own,
+        );
+        assert_eq!(done, V::I(1));
+        assert_eq!(bytes(&rt, own), expected);
         // A part that would reach past the image's end is refused, as is a place between two
         // pixels.
         for (at, size) in [((3 + 3 * 4) * 4, 2), ((2 + 2 * 4) * 4 + 1, 2)] {

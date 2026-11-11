@@ -1107,6 +1107,9 @@ struct Waiting {
     channel: String,
     data: Vec<u8>,
     ticks: u32,
+    /// The ticks it was the first to go to its receiver and did not: the tick's allowance was
+    /// whole then, so it is the message, or the receiver, that the game does not take.
+    refused: u32,
 }
 
 thread_local! {
@@ -1128,6 +1131,30 @@ const MOST_WAITING: usize = 8192;
 const PART: usize = 29_000;
 /// The channel a large message's parts go on: no mod's id.
 const PARTS_CHANNEL: &str = "hzcompat:part";
+/// Ticks a message to a player may be the first to go and be refused before it is given up:
+/// what waits behind it for the same player goes on then. (The window's messages to its server
+/// are refused until it has joined, and wait [`PATIENCE`].)
+const HEAD_PATIENCE: u32 = 20;
+
+/// Whether the game carries a message on `channel` as it is: `mod_id:name`, the id of
+/// `[a-z0-9_]` and the name of `[a-z0-9_./-]`, each 1 to 64 long, and not the game's own
+/// (`minecraft`, `horizon`), as its mod messages are documented. A payload type of another
+/// name (Puzzles Lib's `puzzleslib:`, with nothing after the colon; a Fabric mod's id with a
+/// dash) goes inside a message of the runtime's own channel.
+fn game_takes(channel: &str) -> bool {
+    let Some((id, name)) = channel.split_once(':') else {
+        return false;
+    };
+    (1..=64).contains(&id.len())
+        && (1..=64).contains(&name.len())
+        && !matches!(id, "minecraft" | "horizon")
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'.' | b'/' | b'-')
+        })
+}
 
 /// Sends a payload already encoded (`data` on channel `channel`) to `to`. One a screen's input
 /// sends (its host only reads) goes with the client's next tick ([`crate::screens::flush`]).
@@ -1138,14 +1165,22 @@ pub fn send_raw(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> b
     if crate::screens::defer_payload(rt, to, channel, data) {
         return true;
     }
-    if data.len() <= PART {
+    if data.len() <= PART && game_takes(channel) {
         return send_whole(rt, to, channel, data);
+    }
+    // In parts, or in one for a small payload whose channel the game would not carry.
+    if channel.len() > 1024 {
+        return false;
     }
     let number = SPLIT.with(|n| {
         n.set(n.get().wrapping_add(1));
         n.get()
     });
-    let chunks: Vec<&[u8]> = data.chunks(PART - channel.len() - 10).collect();
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        vec![data]
+    } else {
+        data.chunks(PART - channel.len() - 10).collect()
+    };
     let Ok(count) = u16::try_from(chunks.len()) else {
         return false;
     };
@@ -1222,6 +1257,7 @@ fn send_whole(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> boo
                     channel: channel.to_owned(),
                     data: data.to_vec(),
                     ticks: 0,
+                    refused: 0,
                 });
             }
             true
@@ -1237,14 +1273,18 @@ fn send_whole(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> boo
 }
 
 /// A tick's start on a server or a client: the messages that waited go, each receiver's in
-/// the order they were sent, until the game takes no more for that one this tick. One that
-/// waited past [`PATIENCE`] is given up.
+/// the order they were sent, until the game takes no more for that one this tick. The first
+/// to go to a receiver finds the tick's allowance whole: refused, it is that message the game
+/// does not take (or the receiver is gone), and after [`HEAD_PATIENCE`] such ticks a player's
+/// is given up, so that what waits behind it goes on. One that waited past [`PATIENCE`] is
+/// given up too.
 pub fn send_waiting(rt: &mut Rt) {
     if WAITING.with(|w| w.borrow().is_empty()) {
         return;
     }
     let waiting: Vec<Waiting> = WAITING.with(|w| w.borrow_mut().drain(..).collect());
-    let mut full: Vec<PayloadTarget> = Vec::new();
+    // The receivers the game took something for this tick, and those it takes no more for.
+    let (mut took, mut full): (Vec<PayloadTarget>, Vec<PayloadTarget>) = (Vec::new(), Vec::new());
     let mut left = std::collections::VecDeque::new();
     for mut m in waiting {
         if !full.contains(&m.to) {
@@ -1252,17 +1292,31 @@ pub fn send_waiting(rt: &mut Rt) {
                 .host_mut()
                 .is_some_and(|h| h.send_payload(m.to, &m.channel, &m.data))
             {
+                if !took.contains(&m.to) {
+                    took.push(m.to);
+                }
                 continue;
             }
-            full.push(m.to);
+            if took.contains(&m.to) {
+                full.push(m.to);
+            } else {
+                m.refused += 1;
+            }
         }
         m.ticks += 1;
-        if m.ticks > PATIENCE {
-            let (channel, to) = (m.channel.clone(), m.to);
+        let lost =
+            m.ticks > PATIENCE || (m.refused > HEAD_PATIENCE && m.to != PayloadTarget::Server);
+        if lost {
+            let (channel, to, ticks) = (m.channel.clone(), m.to, m.ticks);
             crate::glue::trace_some(rt, "payload-given-up", &channel, 8, |_| {
-                format!("payload {channel} to {to:?} waited {PATIENCE} ticks: given up")
+                format!("payload {channel} to {to:?} waited {ticks} ticks: given up")
             });
             continue;
+        }
+        // (One refused as the first holds the rest of its receiver's back for this tick, in
+        // their order.)
+        if !took.contains(&m.to) && !full.contains(&m.to) {
+            full.push(m.to);
         }
         left.push_back(m);
     }
@@ -3508,7 +3562,12 @@ mod tests {
                 vec![(7, [0.0; 3]), (9, [0.0; 3])]
             }
             fn send_payload(&mut self, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
-                if self.left == 0 || data.len() > 30_000 {
+                // (A channel the game does not carry, and one it never takes for this test.)
+                if self.left == 0
+                    || data.len() > 30_000
+                    || !game_takes(channel)
+                    || channel == "t:never"
+                {
                     return false;
                 }
                 self.left -= 1;
@@ -3620,6 +3679,51 @@ mod tests {
             &[0, 1, 2],
             None
         )));
+
+        // A payload type whose name the game carries no message under (nothing after the
+        // colon, as Puzzles Lib's; a dash in the mod's id) goes inside one of the runtime's own.
+        let mut host = Capped {
+            took: Vec::new(),
+            left: 9,
+        };
+        let mut rt = Rt::new();
+        rt.with_host(&mut host, |rt| {
+            assert!(send_raw(rt, seven, "puzzleslib:", &[1, 2, 3]));
+            assert!(send_raw(rt, seven, "fabric-api:hello", &[]));
+        });
+        assert_eq!(host.took.len(), 2);
+        assert!(
+            host.took
+                .iter()
+                .all(|(_, channel, _)| channel == PARTS_CHANNEL)
+        );
+        let inner: Vec<String> = host
+            .took
+            .iter()
+            .map(|(_, _, part)| {
+                let named = usize::from(u16::from_be_bytes([part[8], part[9]]));
+                String::from_utf8_lossy(&part[10..10 + named]).into_owned()
+            })
+            .collect();
+        assert_eq!(inner, ["puzzleslib:", "fabric-api:hello"]);
+        // One the game refuses with its allowance whole is that message's own trouble: it
+        // holds the player's others back for a second, no longer, and they go on without it.
+        let mut host = Capped {
+            took: Vec::new(),
+            left: 0,
+        };
+        rt.with_host(&mut host, |rt| {
+            assert!(send_raw(rt, nine, "t:never", &[1]));
+            assert!(send_raw(rt, nine, "t:after", &[2]));
+        });
+        for _ in 0..HEAD_PATIENCE {
+            host.left = 5;
+            rt.with_host(&mut host, send_waiting);
+        }
+        assert!(host.took.is_empty(), "held back: {:?}", went(&host));
+        host.left = 5;
+        rt.with_host(&mut host, send_waiting);
+        assert_eq!(went(&host), [(nine, "t:after".to_owned(), 2)]);
     }
 
     /// A payload to those tracking a player goes to every player but that one (a player's own client

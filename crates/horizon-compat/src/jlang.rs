@@ -7449,13 +7449,32 @@ mod tests {
 /// What a mod logs at `info`, `warn` or `error`, printed when tracing (`HORIZON_COMPAT_TRACE`): the
 /// message with each `{}` filled from the arguments after it, in turn, as SLF4J and Log4j fill
 /// them (a last `Object...` spread): each argument as its own `toString()` writes it (a
-/// `ChunkPos`, a `TagKey`, a mod's own object), which is what the mod is telling of. A marker
-/// before the message is left out.
+/// `ChunkPos`, a `TagKey`, a mod's own object), which is what the mod is telling of; an
+/// exception handed after them, as the loggers take one, with its class and message. A marker
+/// before the message is left out. A message logged over and over (a mod warning of every
+/// chunk in a loop that never ends wrote 4.7 million lines) is printed 200 times, then every
+/// ten-thousandth time with its count.
 fn mod_log(rt: &mut Rt, level: &str, desc: &str, args: &[V]) {
+    thread_local! {
+        /// How often each message was logged on this thread, by the message as written.
+        static LOGGED: std::cell::RefCell<std::collections::HashMap<u64, u64>> = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
     let marker = desc.starts_with("(Lorg/apache/logging/log4j/Marker;") || desc.starts_with("(Lorg/slf4j/Marker;");
     let args = args.get(usize::from(marker)..).unwrap_or_default();
     let Some((&message, rest)) = args.split_first() else { return };
     let Some(message) = rt.str_of(message).map(str::to_owned) else { return };
+    let times = LOGGED.with(|logged| {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (level, &message).hash(&mut hasher);
+        let mut logged = logged.borrow_mut();
+        let n = logged.entry(hasher.finish()).or_insert(0);
+        *n += 1;
+        *n
+    });
+    if times > 200 && !times.is_multiple_of(10_000) {
+        return;
+    }
     let spread = desc.contains("[Ljava/lang/Object;)");
     let mut values = Vec::new();
     for (i, &v) in rest.iter().enumerate() {
@@ -7480,6 +7499,19 @@ fn mod_log(rt: &mut Rt, level: &str, desc: &str, args: &[V]) {
             None => out.push_str("{}"),
         }
         out.push_str(part);
+    }
+    // An exception after the arguments the message takes: what went wrong.
+    if let Some(e) = values
+        .last()
+        .filter(|&e| e.r() != 0 && rt.instance_of(e, "java/lang/Throwable"))
+    {
+        out.push_str(&format!(" <- {}", rt.class_of(e).replace('/', ".")));
+        if let Some(said) = rt.str_of(rt.get_field(e, "message")) {
+            out.push_str(&format!(": {said}"));
+        }
+    }
+    if times > 200 {
+        out.push_str(&format!(" ({times} times)"));
     }
     eprintln!("horizon-compat: mod {level}: {out}");
 }
