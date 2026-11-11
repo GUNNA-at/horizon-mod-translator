@@ -7761,7 +7761,15 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             if desc.ends_with(';') { box_raw(rt, held) } else { held }
         }
         ("org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair", "of" | "<init>") => {
-            let made = if owner.ends_with("MutablePair") { "org/apache/commons/lang3/tuple/MutablePair" } else { "org/apache/commons/lang3/tuple/Pair" };
+            // DataFixerUpper's keeps its halves where the codecs make and read them.
+            let dfu = owner == "com/mojang/datafixers/util/Pair";
+            let made = if dfu {
+                "com/mojang/datafixers/util/Pair"
+            } else if owner.ends_with("MutablePair") {
+                "org/apache/commons/lang3/tuple/MutablePair"
+            } else {
+                "org/apache/commons/lang3/tuple/Pair"
+            };
             // `new MutablePair<>()` holds null and null, as its fields start.
             let half = |v: V| if matches!(v, V::Void) { V::NULL } else { v };
             let (p, l, r) = if name == "<init>" {
@@ -7769,9 +7777,25 @@ fn libs(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             } else {
                 (rt.new_object(made), a(0), a(1))
             };
-            rt.put_field(p, "$left", l);
-            rt.put_field(p, "$right", r);
+            let (first, second) = if dfu { ("$first", "$second") } else { ("$left", "$right") };
+            rt.put_field(p, first, l);
+            rt.put_field(p, second, r);
             if name == "<init>" { V::Void } else { p }
+        }
+        // A pair's text: commons-lang's `(left,right)`, DataFixerUpper's `(first, second)`,
+        // fastutil's `<left,right>`.
+        (o, "toString") if desc == "()Ljava/lang/String;" && o.ends_with("Pair") && crate::jutil::pair_halves(rt, a(0)).is_some() => {
+            let (l, r) = crate::jutil::pair_halves(rt, a(0)).unwrap_or_default();
+            let (l, r) = (crate::linked::java_string(rt, l), crate::linked::java_string(rt, r));
+            let (l, r) = (text(rt, l), text(rt, r));
+            let shown = if rt.class_of(a(0)) == "com/mojang/datafixers/util/Pair" {
+                format!("({l}, {r})")
+            } else if crate::jutil::fast_pair(rt.class_of(a(0))) {
+                format!("<{l},{r}>")
+            } else {
+                format!("({l},{r})")
+            };
+            new_str(rt, shown)
         }
         (o, "getLeft" | "getKey" | "getFirst" | "left") if o.ends_with("Pair") => rt.get_field(a(0), "$left"),
         (o, "getRight" | "getValue" | "getSecond" | "right") if o.ends_with("Pair") => rt.get_field(a(0), "$right"),

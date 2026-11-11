@@ -49,11 +49,22 @@ fn index_inserted(t: &mut Table, at: usize, h: i32) {
 /// The hash index after the entry at `at`, with hash `h`, was taken out: the entries behind it
 /// moved down by one.
 fn index_removed(t: &mut Table, at: usize, h: i32) {
+    let mut found = false;
     if let Some(slots) = t.index.get_mut(&h) {
+        let before = slots.len();
         slots.retain(|s| *s != at);
+        found = slots.len() != before;
         if slots.is_empty() {
             t.index.remove(&h);
         }
+    }
+    // (A key that hashes otherwise than when it was put, a list that has grown since: its slot
+    // is under the hash it had then.)
+    if !found {
+        t.index.retain(|_, slots| {
+            slots.retain(|s| *s != at);
+            !slots.is_empty()
+        });
     }
     if at < t.entries.len() {
         for slots in t.index.values_mut() {
@@ -68,15 +79,50 @@ const STRATEGY: &str = "it/unimi/dsi/fastutil/Hash$Strategy";
 const STRATEGY_HASH: &str = "it/unimi/dsi/fastutil/Hash$Strategy.hashCode.(Ljava/lang/Object;)I";
 const STRATEGY_EQUALS: &str = "it/unimi/dsi/fastutil/Hash$Strategy.equals.(Ljava/lang/Object;Ljava/lang/Object;)Z";
 
-/// A key's hash in a table with `strategy` (fastutil's custom-hash collections): the strategy's,
-/// else the key's own `hashCode`.
-fn key_hash(rt: &mut Rt, strategy: V, k: V) -> i32 {
-    if strategy.r() != 0 { rt.call_functional(STRATEGY_HASH, strategy, &[k]).i() } else { hash(rt, k) }
+/// What a table of identity keys keeps in its strategy's place (`IdentityHashMap`, fastutil's
+/// `Reference` maps and sets): a number, where a custom-hash table keeps an object.
+const BY_IDENTITY: V = V::I(1);
+
+/// Whether `class` is a table that tells its keys by identity, not by `equals`.
+fn identity_table(class: &str) -> bool {
+    class == "java/util/IdentityHashMap"
+        || class.starts_with("it/unimi/dsi/fastutil/objects/Reference")
 }
 
-/// Whether two keys are one in a table with `strategy`: the strategy's `equals`, else the key's.
+/// Whether an identity table tells `k` by itself alone: an object of the code's own class, a
+/// collection, a pair. What the runtime keeps as a value (a string, a box, a position, a block:
+/// made anew wherever it is asked for) is what it holds there too.
+fn itself_alone(rt: &Rt, k: V) -> bool {
+    match rt.heap.get(k.r() as usize) {
+        Some(o) if k.r() != 0 => {
+            o.cid != 0 || matches!(o.data, Data::List(_) | Data::Table(_)) || is_pair(o.class)
+        }
+        _ => false,
+    }
+}
+
+/// A key's hash in a table with `strategy` (fastutil's custom-hash collections): the strategy's,
+/// else the key's own `hashCode`; in an identity table ([`BY_IDENTITY`]) the object's own number.
+fn key_hash(rt: &mut Rt, strategy: V, k: V) -> i32 {
+    if strategy.r() != 0 {
+        rt.call_functional(STRATEGY_HASH, strategy, &[k]).i()
+    } else if strategy == BY_IDENTITY && itself_alone(rt, k) {
+        k.r() as i32
+    } else {
+        hash(rt, k)
+    }
+}
+
+/// Whether two keys are one in a table with `strategy`: the strategy's `equals`, else the key's;
+/// in an identity table the one object.
 fn key_equals(rt: &mut Rt, strategy: V, a: V, b: V) -> bool {
-    if strategy.r() != 0 { rt.call_functional(STRATEGY_EQUALS, strategy, &[a, b]).i() != 0 } else { equals(rt, a, b) }
+    if strategy.r() != 0 {
+        rt.call_functional(STRATEGY_EQUALS, strategy, &[a, b]).i() != 0
+    } else if strategy == BY_IDENTITY && (itself_alone(rt, a) || itself_alone(rt, b)) {
+        a == b
+    } else {
+        equals(rt, a, b)
+    }
 }
 
 const EQUALS: &str = "equals.(Ljava/lang/Object;)Z";
@@ -117,9 +163,41 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     }
     match (rt.heap.get(x as usize).map(|o| &o.data), rt.heap.get(y as usize).map(|o| &o.data)) {
         (Some(Data::Native(k1, h1)), Some(Data::Native(k2, h2))) => return k1 == k2 && h1 == h2,
-        (Some(Data::List(l1)), Some(Data::List(l2))) if l1.len() == l2.len() => {
+        (Some(Data::List(l1)), Some(Data::List(l2))) => {
+            if l1.len() != l2.len()
+                || !list_by_content(rt, a)
+                || !list_by_content(rt, b)
+                || is_entry(rt.class_of(a)) != is_entry(rt.class_of(b))
+            {
+                return false;
+            }
             let (l1, l2) = (l1.clone(), l2.clone());
-            return l1.iter().zip(&l2).all(|(p, q)| equals(rt, *p, *q));
+            return deeper(|| {
+                l1.iter()
+                    .zip(&l2)
+                    .all(|(p, q)| p == q || equals(rt, *p, *q))
+            })
+            .unwrap_or(false);
+        }
+        // A set is the set of the same members, a map the map of the same keys to equal values
+        // (`AbstractSet.equals`, `AbstractMap.equals`).
+        (Some(Data::Table(t1)), Some(Data::Table(t2))) => {
+            let map = is_map_object(rt, a);
+            if t1.entries.len() != t2.entries.len()
+                || map != is_map_object(rt, b)
+                || !table_by_content(rt, a)
+                || !table_by_content(rt, b)
+            {
+                return false;
+            }
+            let mine = t1.entries.clone();
+            let same = deeper(|| {
+                mine.into_iter().all(|(k, v)| match get_in(rt, b, k) {
+                    Some(theirs) => !map || v == theirs || equals(rt, v, theirs),
+                    None => false,
+                })
+            });
+            return same.unwrap_or(false);
         }
         _ => {}
     }
@@ -132,10 +210,34 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     if rt.class_of(a).starts_with("org/joml/Vector") && rt.class_of(a) == rt.class_of(b) {
         return ["x", "y", "z", "w"].iter().all(|f| rt.get_field(a, f) == rt.get_field(b, f));
     }
-    // Pairs are values (Registrate keys its pending callbacks by `Pair.of(name, registry)`).
-    if is_pair(rt.class_of(a)) && is_pair(rt.class_of(b)) {
-        let (l1, l2, r1, r2) = (rt.get_field(a, "$left"), rt.get_field(b, "$left"), rt.get_field(a, "$right"), rt.get_field(b, "$right"));
-        return (l1 == l2 || equals(rt, l1, l2)) && (r1 == r2 || equals(rt, r1, r2));
+    // Pairs are values (Registrate keys its pending callbacks by `Pair.of(name, registry)`):
+    // one of a library equals another of that library's alone, and commons-lang's, a map's entry
+    // itself, an entry of the same key and value.
+    let halves = |rt: &Rt, v: V| match rt.heap.get(v.r() as usize).map(|o| (&o.data, o.class)) {
+        Some((Data::List(kv), class)) if kv.len() == 2 && is_entry(class) => {
+            Some((kv[0], kv[1], 0))
+        }
+        Some((_, class)) => pair_halves(rt, v).map(|(l, r)| {
+            (
+                l,
+                r,
+                if class == DFU_PAIR {
+                    1
+                } else if fast_pair(class) {
+                    2
+                } else {
+                    0
+                },
+            )
+        }),
+        None => None,
+    };
+    if (is_pair(rt.class_of(a)) || is_pair(rt.class_of(b)))
+        && let (Some((l1, r1, kind1)), Some((l2, r2, kind2))) = (halves(rt, a), halves(rt, b))
+    {
+        let same =
+            |rt: &mut Rt, p: V, q: V| p == q || (p.is_null() && q.is_null()) || equals(rt, p, q);
+        return kind1 == kind2 && same(rt, l1, l2) && same(rt, r1, r2);
     }
     // A stack's custom data is a value: its tag (`CustomData.equals`).
     if let Some(same) = crate::components::same_custom_data(rt, a, b) {
@@ -152,13 +254,87 @@ pub fn equals_own(rt: &mut Rt, a: V, b: V) -> bool {
     false
 }
 
-/// commons-lang's, DataFixerUpper's and fastutil's pairs (the runtime keeps them all as `$left`,
-/// `$right`).
+const DFU_PAIR: &str = "com/mojang/datafixers/util/Pair";
+
+/// commons-lang's, DataFixerUpper's and fastutil's pairs.
 fn is_pair(class: &str) -> bool {
     matches!(
         class,
-        "org/apache/commons/lang3/tuple/Pair" | "org/apache/commons/lang3/tuple/ImmutablePair" | "org/apache/commons/lang3/tuple/MutablePair" | "com/mojang/datafixers/util/Pair"
+        "org/apache/commons/lang3/tuple/Pair"
+            | "org/apache/commons/lang3/tuple/ImmutablePair"
+            | "org/apache/commons/lang3/tuple/MutablePair"
+            | DFU_PAIR
     ) || fast_pair(class)
+}
+
+/// The two halves of the pair at `v`, where its kind keeps them: DataFixerUpper's as `$first`
+/// and `$second` (what the codecs make and read), commons-lang's and fastutil's as `$left` and
+/// `$right`. None for what is no pair.
+pub(crate) fn pair_halves(rt: &Rt, v: V) -> Option<(V, V)> {
+    let class = rt.class_of(v);
+    if !is_pair(class)
+        || !matches!(
+            rt.heap.get(v.r() as usize).map(|o| &o.data),
+            Some(Data::Fields(_))
+        )
+    {
+        return None;
+    }
+    let (first, second) = if class == DFU_PAIR {
+        ("$first", "$second")
+    } else {
+        ("$left", "$right")
+    };
+    Some((rt.get_field(v, first), rt.get_field(v, second)))
+}
+
+/// What `f` answers one collection further into a collection's elements; None so far in that only
+/// a collection holding itself reaches it (Java's answer to that one is a stack overflow), which
+/// is then itself alone.
+fn deeper<T>(f: impl FnOnce() -> T) -> Option<T> {
+    thread_local! {
+        static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    let depth = DEPTH.get();
+    if depth >= 64 {
+        return None;
+    }
+    DEPTH.set(depth + 1);
+    let r = f();
+    DEPTH.set(depth);
+    Some(r)
+}
+
+/// Whether the list at `v` is one Java tells by its elements: a `List` (`AbstractList.equals`
+/// and `hashCode`). A queue or a deque that is no list (`ArrayDeque`, a blocking queue,
+/// fastutil's FIFO queues) is itself alone, as any object; a class of the code's own is what it
+/// extends.
+fn list_by_content(rt: &Rt, v: V) -> bool {
+    let class = library_class(rt, v);
+    let simple = class.rsplit('/').next().unwrap_or(class);
+    !(simple.ends_with("Queue") || simple.ends_with("Deque"))
+}
+
+/// Whether the table at `v` is one Java tells by what it holds: a set or a map of Java's own,
+/// Guava's or fastutil's (`AbstractSet.equals`, `AbstractMap.equals` and their `hashCode`), or a
+/// class of the code's own on one. Another object the runtime keeps as a table (a registry, a
+/// multimap) is itself alone.
+fn table_by_content(rt: &Rt, v: V) -> bool {
+    let class = library_class(rt, v);
+    util_owner(class) && matches!(kind_of(class), Some("table" | "sorted"))
+}
+
+/// The class of the object at `v`, or for one of the code's own classes the first class above
+/// it that is none of the code's.
+fn library_class(rt: &Rt, v: V) -> &'static str {
+    let mut class = rt.class_of(v);
+    for _ in 0..64 {
+        match rt.supers.get(class) {
+            Some(above) => class = above,
+            None => break,
+        }
+    }
+    class
 }
 
 /// Whether `class` is one of fastutil's pairs: `Pair` itself, or a pair of its typed packages
@@ -217,11 +393,58 @@ pub fn hash_own(rt: &mut Rt, v: V) -> i32 {
                 let (x, y) = (rt.get_field(v, "x").i(), rt.get_field(v, "y").i());
                 return 31i32.wrapping_mul(31i32.wrapping_add(x)).wrapping_add(y);
             }
-            // commons-lang's `Pair.hashCode`: the halves' hashes, xor'd.
+            // A pair's, by its halves' hashes: commons-lang's xor'd (a map entry's), fastutil's
+            // `19 * left + right`, DataFixerUpper's as Guava's `Objects.hashCode(first, second)`.
             Some(Data::Fields(_)) if is_pair(rt.class_of(v)) => {
-                let (l, r) = (rt.get_field(v, "$left"), rt.get_field(v, "$right"));
-                let half = |rt: &mut Rt, x: V| if x.r() == 0 && matches!(x, V::R(_)) { 0 } else { hash(rt, x) };
-                return half(rt, l) ^ half(rt, r);
+                let class = rt.class_of(v);
+                let (l, r) = pair_halves(rt, v).unwrap_or_default();
+                let half = |rt: &mut Rt, x: V| if x.is_null() { 0 } else { hash(rt, x) };
+                let (l, r) = (half(rt, l), half(rt, r));
+                return if class == DFU_PAIR {
+                    31i32.wrapping_mul(31i32.wrapping_add(l)).wrapping_add(r)
+                } else if fast_pair(class) {
+                    l.wrapping_mul(19).wrapping_add(r)
+                } else {
+                    l ^ r
+                };
+            }
+            // A list's, by its elements (`AbstractList.hashCode`; fastutil's lists of booleans
+            // count theirs as `Boolean.hashCode` does): equal lists are one key of a map.
+            Some(Data::List(items)) if list_by_content(rt, v) => {
+                let items = items.clone();
+                let booleans = rt
+                    .class_of(v)
+                    .starts_with("it/unimi/dsi/fastutil/booleans/");
+                let folded = deeper(|| {
+                    items.into_iter().fold(1i32, |h, e| {
+                        let e = match e {
+                            V::I(b) if booleans => {
+                                if b != 0 {
+                                    1231
+                                } else {
+                                    1237
+                                }
+                            }
+                            e if e.is_null() => 0,
+                            e => hash(rt, e),
+                        };
+                        h.wrapping_mul(31).wrapping_add(e)
+                    })
+                });
+                return folded.unwrap_or(r as i32);
+            }
+            // A set's: its members' hashes added; a map's: each key's xor'd with its value's,
+            // added (`AbstractSet.hashCode`, `AbstractMap.hashCode`).
+            Some(Data::Table(t)) if table_by_content(rt, v) => {
+                let (entries, map) = (t.entries.clone(), is_map_object(rt, v));
+                let half = |rt: &mut Rt, x: V| if x.is_null() { 0 } else { hash(rt, x) };
+                let added = deeper(|| {
+                    entries.into_iter().fold(0i32, |h, (k, x)| {
+                        let k = half(rt, k);
+                        h.wrapping_add(if map { k ^ half(rt, x) } else { k })
+                    })
+                });
+                return added.unwrap_or(r as i32);
             }
             _ => {}
         }
@@ -815,6 +1038,16 @@ fn take_out(rt: &mut Rt, m: V, k: V) -> Option<V> {
                 .iter()
                 .copied()
                 .find(|&i| key_equals(rt, t.strategy, t.entries[i].0, k))
+        });
+        // A collection that changed since it was put is no more found by what it holds; it is
+        // still taken out as itself (an iterator's `remove` takes its element by its place).
+        let at = at.or_else(|| {
+            matches!(
+                rt.heap.get(k.r() as usize).map(|o| &o.data),
+                Some(Data::List(_) | Data::Table(_))
+            )
+            .then(|| t.entries.iter().position(|(e, _)| *e == k))
+            .flatten()
         });
         at.map(|i| {
             let value = t.entries.remove(i).1;
@@ -2010,6 +2243,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         let class = rt.class_of(this);
         let data = match kind {
             "list" => Data::List(Vec::new()),
+            _ if identity_table(owner) => Data::Table(Table { strategy: BY_IDENTITY, ..Table::default() }),
             _ => Data::Table(Table { sorted: kind == "sorted", ..Table::default() }),
         };
         if let Some(o) = rt.heap.get_mut(this.r() as usize) {
@@ -2757,6 +2991,21 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             };
             match owner {
                 "com/google/common/collect/Lists" => new_list(rt, items),
+                // `Sets.newIdentityHashSet()`, `Maps.newIdentityHashMap()`: empty, of identity keys.
+                _ if n.contains("Identity") => {
+                    let class = if owner.ends_with("Sets") {
+                        "java/util/HashSet"
+                    } else {
+                        "java/util/IdentityHashMap"
+                    };
+                    rt.alloc(
+                        class,
+                        Data::Table(Table {
+                            strategy: BY_IDENTITY,
+                            ..Table::default()
+                        }),
+                    )
+                }
                 "com/google/common/collect/Sets" => new_set(rt, &items),
                 _ => {
                     let sorted = n.contains("Tree");
@@ -3003,7 +3252,20 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         ("java/util/Collections", n) if n.starts_with("unmodifiable") || n.starts_with("synchronized") => a(0),
         // A set over a map (`newSetFromMap(new WeakHashMap<>())`): a set; weak keys make no
         // difference to what it holds while it is used.
-        ("java/util/Collections", "newSetFromMap") => rt.alloc("java/util/HashSet", Data::Table(Table::default())),
+        // (Over an identity map, a set of identity members.)
+        ("java/util/Collections", "newSetFromMap") => {
+            let strategy = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Table(t)) if t.strategy == BY_IDENTITY => BY_IDENTITY,
+                _ => V::default(),
+            };
+            rt.alloc(
+                "java/util/HashSet",
+                Data::Table(Table {
+                    strategy,
+                    ..Table::default()
+                }),
+            )
+        }
         // Guava's `Tables.newCustomTable(backingMap, factory)`: a table of rows.
         ("com/google/common/collect/Tables", "newCustomTable") => rt.alloc("com/google/common/collect/HashBasedTable", Data::Table(Table::default())),
         // A synchronised or unmodifiable view of one of Guava's collections is the collection:
@@ -5517,6 +5779,266 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 
 #[cfg(test)]
 mod tests {
+    /// Pairs, lists, sets and maps are keys by what they hold, and an identity table's keys by
+    /// themselves. Every number and text here is what Java printed for the same program
+    /// (DataFixerUpper 8.0.16, fastutil 8.5.12, commons-lang 3.14): vanilla's `OctahedralGroup`
+    /// keys a map by `Pair.of(permutation, inversions)` and reads it back with pairs made anew,
+    /// which found nothing while a DataFixerUpper pair was compared by halves it does not have
+    /// and a list hashed as an object.
+    #[test]
+    fn pairs_and_collections_are_keys_by_what_they_hold() {
+        const DFU: &str = "com/mojang/datafixers/util/Pair";
+        const LANG: &str = "org/apache/commons/lang3/tuple/Pair";
+        crate::install();
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &str, args: &[V]| {
+            let key = rt.static_key(key);
+            crate::api::call(rt, key, args)
+        };
+        let made = |rt: &mut Rt, class: &'static str, desc: &str, args: &[V]| {
+            let o = rt.new_object(class);
+            let key = rt.static_key(&format!("{class}.<init>.{desc}"));
+            let mut all = vec![o];
+            all.extend_from_slice(args);
+            crate::api::call(rt, key, &all);
+            o
+        };
+        let text = |rt: &mut Rt, v: V| {
+            let t = crate::linked::java_string(rt, v);
+            crate::jlang::text(rt, t)
+        };
+        let strings = |rt: &mut Rt, items: &[&str]| -> Vec<V> {
+            items.iter().map(|i| rt.string(i)).collect()
+        };
+        let (a, b, other) = (rt.string("a"), rt.string("b"), rt.string("c"));
+
+        // DataFixerUpper's pair, made either way.
+        let of = format!("{DFU}.of.(Ljava/lang/Object;Ljava/lang/Object;)L{DFU};");
+        let dfu = c(&mut rt, &of, &[a, b]);
+        let built = made(
+            &mut rt,
+            DFU,
+            "(Ljava/lang/Object;Ljava/lang/Object;)V",
+            &[a, b],
+        );
+        for p in [dfu, built] {
+            assert_eq!(
+                c(
+                    &mut rt,
+                    &format!("{DFU}.getFirst.()Ljava/lang/Object;"),
+                    &[p]
+                ),
+                a
+            );
+            assert_eq!(
+                c(
+                    &mut rt,
+                    &format!("{DFU}.getSecond.()Ljava/lang/Object;"),
+                    &[p]
+                ),
+                b
+            );
+            assert_eq!(
+                (hash(&mut rt, p), text(&mut rt, p)),
+                (4066, "(a, b)".to_owned())
+            );
+        }
+        let lang = c(
+            &mut rt,
+            &format!("{LANG}.of.(Ljava/lang/Object;Ljava/lang/Object;)L{LANG};"),
+            &[a, b],
+        );
+        let unlike = c(&mut rt, &of, &[a, other]);
+        assert!(equals(&mut rt, dfu, built));
+        assert!(
+            !equals(&mut rt, dfu, lang)
+                && !equals(&mut rt, lang, dfu)
+                && !equals(&mut rt, dfu, unlike)
+        );
+        let half = c(&mut rt, &of, &[V::NULL, b]);
+        assert_eq!(
+            (hash(&mut rt, half), text(&mut rt, half)),
+            (1059, "(null, b)".to_owned())
+        );
+        // commons-lang's: a map's entry, equal to one of the same key and value.
+        assert_eq!(
+            (hash(&mut rt, lang), text(&mut rt, lang)),
+            (3, "(a,b)".to_owned())
+        );
+        let entry = entry(&mut rt, a, b);
+        assert!(equals(&mut rt, lang, entry));
+        // fastutil's, of objects and of ints.
+        let fast = made(
+            &mut rt,
+            "it/unimi/dsi/fastutil/objects/ObjectObjectImmutablePair",
+            "(Ljava/lang/Object;Ljava/lang/Object;)V",
+            &[a, b],
+        );
+        let ints = made(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntIntImmutablePair",
+            "(II)V",
+            &[V::I(3), V::I(4)],
+        );
+        assert_eq!(
+            (hash(&mut rt, fast), text(&mut rt, fast)),
+            (1941, "<a,b>".to_owned())
+        );
+        assert_eq!(
+            (hash(&mut rt, ints), text(&mut rt, ints)),
+            (61, "<3,4>".to_owned())
+        );
+        assert!(!equals(&mut rt, fast, lang) && !equals(&mut rt, lang, fast));
+
+        // Lists by their elements.
+        let flags = |rt: &mut Rt, bits: [i32; 3]| {
+            let array = rt.alloc("[Z", Data::Array(bits.map(V::I).to_vec()));
+            made(
+                rt,
+                "it/unimi/dsi/fastutil/booleans/BooleanArrayList",
+                "([Z)V",
+                &[array],
+            )
+        };
+        let (flags1, flags2, flags3) = (
+            flags(&mut rt, [1, 0, 0]),
+            flags(&mut rt, [1, 0, 0]),
+            flags(&mut rt, [1, 1, 0]),
+        );
+        assert_eq!(hash(&mut rt, flags1), 1_252_366);
+        assert!(equals(&mut rt, flags1, flags2) && !equals(&mut rt, flags1, flags3));
+        let numbers = rt.alloc("[I", Data::Array(vec![V::I(3), V::I(4)]));
+        let numbers = made(
+            &mut rt,
+            "it/unimi/dsi/fastutil/ints/IntArrayList",
+            "([I)V",
+            &[numbers],
+        );
+        assert_eq!(hash(&mut rt, numbers), 1058);
+        let words = strings(&mut rt, &["a", "b"]);
+        let list = new_list(&mut rt, words.clone());
+        assert_eq!(hash(&mut rt, list), 4066);
+        let holed = new_list(&mut rt, vec![a, V::NULL]);
+        assert_eq!(hash(&mut rt, holed), 3968);
+
+        // A set and a map by theirs, whatever their classes and orders.
+        let set = new_set(&mut rt, &words);
+        let turned = new_set(&mut rt, &[b, a]);
+        assert_eq!(hash(&mut rt, set), 195);
+        assert!(equals(&mut rt, set, turned));
+        let map = |rt: &mut Rt, class: &'static str| {
+            let m = made(rt, class, "()V", &[]);
+            for (k, v) in [("a", 1), ("b", 2)] {
+                let (k, v) = (rt.string(k), crate::jlang::box_raw(rt, V::I(v)));
+                table_put(rt, m, k, v);
+            }
+            m
+        };
+        let (hashed, sorted) = (
+            map(&mut rt, "java/util/HashMap"),
+            map(&mut rt, "java/util/TreeMap"),
+        );
+        assert_eq!(hash(&mut rt, hashed), 192);
+        assert!(equals(&mut rt, hashed, sorted) && !equals(&mut rt, hashed, set));
+
+        // Each is found again by one made anew.
+        let by = made(&mut rt, "java/util/HashMap", "()V", &[]);
+        for (k, v) in [(list, "list"), (set, "set"), (hashed, "map"), (dfu, "pair")] {
+            let v = rt.string(v);
+            table_put(&mut rt, by, k, v);
+        }
+        let again = new_list(&mut rt, words.clone());
+        let short = new_list(&mut rt, vec![a]);
+        let found: Vec<Option<String>> = [again, turned, sorted, built, short]
+            .into_iter()
+            .map(|k| table_get(&mut rt, by, k).and_then(|v| rt.str_of(v).map(str::to_owned)))
+            .collect();
+        let expected = [Some("list"), Some("set"), Some("map"), Some("pair"), None]
+            .map(|e| e.map(str::to_owned));
+        assert_eq!(found, expected);
+
+        // An identity table tells equal lists apart and finds one that has grown since.
+        for class in [
+            "java/util/IdentityHashMap",
+            "it/unimi/dsi/fastutil/objects/Reference2ObjectOpenHashMap",
+        ] {
+            let id = made(&mut rt, class, "()V", &[]);
+            let (one, two, like) = (
+                new_list(&mut rt, vec![a]),
+                new_list(&mut rt, vec![a]),
+                new_list(&mut rt, vec![a]),
+            );
+            for (k, v) in [(one, "one"), (two, "two")] {
+                let v = rt.string(v);
+                table_put(&mut rt, id, k, v);
+            }
+            list_add(&mut rt, one, b);
+            let held = |rt: &mut Rt, k: V| {
+                table_get(rt, id, k).and_then(|v| rt.str_of(v).map(str::to_owned))
+            };
+            assert_eq!(
+                (held(&mut rt, one), held(&mut rt, two), held(&mut rt, like)),
+                (Some("one".to_owned()), Some("two".to_owned()), None),
+                "{class}"
+            );
+            // (A string is a key by its text there too: the runtime makes one for each use.)
+            let (k, v) = (rt.string("name"), rt.string("named"));
+            table_put(&mut rt, id, k, v);
+            let k = rt.string("name");
+            assert_eq!(held(&mut rt, k), Some("named".to_owned()));
+        }
+        let of_map = made(&mut rt, "java/util/IdentityHashMap", "()V", &[]);
+        let members = c(
+            &mut rt,
+            "java/util/Collections.newSetFromMap.(Ljava/util/Map;)Ljava/util/Set;",
+            &[of_map],
+        );
+        let (one, two) = (new_list(&mut rt, vec![a]), new_list(&mut rt, vec![a]));
+        table_put(&mut rt, members, one, V::I(1));
+        table_put(&mut rt, members, two, V::I(1));
+        assert_eq!(elements(&rt, members).len(), 2);
+
+        // A list that grew while it was a set's member is no more found by an equal one, as in
+        // Java, but it is still taken out as itself, and the set finds its other members after.
+        let grown = new_list(&mut rt, vec![a]);
+        let kept = [rt.string("x"), rt.string("y")];
+        let holding = new_set(&mut rt, &[kept[0], grown, kept[1]]);
+        list_add(&mut rt, grown, b);
+        let equal = new_list(&mut rt, vec![a, b]);
+        assert!(table_get(&mut rt, holding, equal).is_none());
+        assert!(table_remove(&mut rt, holding, grown).is_some());
+        assert_eq!(elements(&rt, holding), kept);
+        assert!(
+            table_get(&mut rt, holding, kept[1]).is_some()
+                && table_get(&mut rt, holding, grown).is_none()
+        );
+
+        // A deque is no list: itself alone, wherever it is kept.
+        let deque = |rt: &mut Rt| {
+            let d = made(rt, "java/util/ArrayDeque", "()V", &[]);
+            c(
+                rt,
+                "java/util/ArrayDeque.add.(Ljava/lang/Object;)Z",
+                &[d, a],
+            );
+            d
+        };
+        let (deque1, deque2) = (deque(&mut rt), deque(&mut rt));
+        assert!(!equals(&mut rt, deque1, deque2));
+        let deques = new_set(&mut rt, &[deque1, deque2]);
+        c(
+            &mut rt,
+            "java/util/ArrayDeque.add.(Ljava/lang/Object;)Z",
+            &[deque1, b],
+        );
+        assert_eq!(elements(&rt, deques).len(), 2);
+        assert!(table_get(&mut rt, deques, deque1).is_some());
+        let linked = made(&mut rt, "java/util/LinkedList", "()V", &[]);
+        list_add(&mut rt, linked, a);
+        assert!(equals(&mut rt, linked, short));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     /// A linked set's ends, as fastutil names them for a set of longs: the first is taken until
     /// the set is empty (Immersive Portals' queue of chunks to load, emptied in a `while`), an
     /// element moves to an end, and an empty set has no end to give.

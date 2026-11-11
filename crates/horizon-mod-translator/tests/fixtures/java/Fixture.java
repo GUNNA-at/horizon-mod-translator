@@ -915,4 +915,115 @@ public class Fixture {
             }
         }
     }
+
+    // Collections are keys by what they hold (a list, a set, a map, an entry found again by an
+    // equal one made anew), an identity map's by themselves, and a deque is no list. The two
+    // groups are built as vanilla's `SymmetricGroup3` and `OctahedralGroup` build themselves: a
+    // table filled in the class's initialiser, keyed by pairs of a permutation and a list of
+    // flags and read back with keys made anew, an inverse found through nested streams, and a
+    // `name` of the enum's own beside `Enum.name`.
+    enum Turn {
+        A(0, 1, 2), B(1, 0, 2), C(0, 2, 1), D(1, 2, 0), E(2, 0, 1), F(2, 1, 0);
+        final int[] order;
+        private static final Turn[][] THEN = make(new Turn[values().length][values().length], table -> {
+            for (Turn a : values()) {
+                for (Turn b : values()) {
+                    int[] o = new int[3];
+                    for (int i = 0; i < 3; i++) o[i] = a.order[b.order[i]];
+                    table[a.ordinal()][b.ordinal()] = java.util.Arrays.stream(values()).filter(p -> java.util.Arrays.equals(p.order, o)).findFirst().get();
+                }
+            }
+        });
+        Turn(int x, int y, int z) { order = new int[] {x, y, z}; }
+        Turn then(Turn o) { return THEN[ordinal()][o.ordinal()]; }
+        static <T> T make(T t, java.util.function.Consumer<T> c) { c.accept(t); return t; }
+    }
+    enum Flip {
+        NONE("none", Turn.A, false, false), X("x", Turn.A, true, false), Y("y", Turn.A, false, true), BOTH("both", Turn.A, true, true),
+        SWAP("swap", Turn.B, false, false), SWAP_X("swap_x", Turn.B, true, false), SWAP_Y("swap_y", Turn.B, false, true), SWAP_BOTH("swap_both", Turn.B, true, true);
+        private final String name;
+        final Turn turn;
+        final boolean x, y;
+        private static final Flip[][] THEN = Turn.make(new Flip[values().length][values().length], table -> {
+            java.util.Map<java.util.Map.Entry<Turn, java.util.List<Boolean>>, Flip> by = java.util.Arrays.stream(values())
+                .collect(java.util.stream.Collectors.toMap(f -> new java.util.AbstractMap.SimpleImmutableEntry<>(f.turn, f.flags()), f -> f));
+            for (Flip a : values()) {
+                for (Flip b : values()) {
+                    java.util.List<Boolean> fa = a.flags(), fb = b.flags();
+                    Turn t = b.turn.then(a.turn);
+                    java.util.ArrayList<Boolean> flags = new java.util.ArrayList<>(2);
+                    for (int i = 0; i < 2; i++) flags.add(fa.get(i) ^ fb.get(a.turn.order[i]));
+                    table[a.ordinal()][b.ordinal()] = by.get(new java.util.AbstractMap.SimpleImmutableEntry<>(t, flags));
+                }
+            }
+        });
+        private static final Flip[] BACK = java.util.Arrays.stream(values())
+            .map(a -> java.util.Arrays.stream(values()).filter(b -> a.then(b) == NONE).findAny().get())
+            .toArray(Flip[]::new);
+        Flip(String name, Turn turn, boolean x, boolean y) { this.name = name; this.turn = turn; this.x = x; this.y = y; }
+        java.util.List<Boolean> flags() { return new java.util.ArrayList<>(java.util.List.of(x, y)); }
+        Flip then(Flip o) { return THEN[ordinal()][o.ordinal()]; }
+        Flip back() { return BACK[ordinal()]; }
+        @Override public String toString() { return name; }
+    }
+    public static int keyed(int part) {
+        switch (part) {
+            case 1: {
+                java.util.Map<Object, String> by = new java.util.HashMap<>();
+                java.util.List<Integer> list = new java.util.ArrayList<>(java.util.List.of(4, 5));
+                java.util.Map<String, Integer> map = new java.util.TreeMap<>();
+                map.put("k", 9);
+                by.put(list, "list");
+                by.put(new java.util.HashSet<>(java.util.List.of("a", "b")), "set");
+                by.put(map, "map");
+                by.put(new java.util.AbstractMap.SimpleEntry<>("e", 3), "entry");
+                String found = by.get(java.util.Arrays.asList(4, 5)) + by.get(new java.util.LinkedHashSet<>(java.util.List.of("b", "a")))
+                    + by.get(java.util.Map.of("k", 9)) + by.get(java.util.Map.entry("e", 3)) + by.get(java.util.List.of(4)) + by.size();
+                return found.hashCode();
+            }
+            case 2: {
+                java.util.Map<String, Integer> map = new java.util.HashMap<>();
+                map.put("a", 1);
+                map.put("b", 2);
+                return java.util.List.of("a", "b").hashCode() * 31 + new java.util.HashSet<>(java.util.List.of("a", "b")).hashCode() * 7 + map.hashCode()
+                    + java.util.Arrays.asList("a", null).hashCode() + new java.util.AbstractMap.SimpleEntry<>("a", "b").hashCode() * 1000;
+            }
+            case 3: {
+                java.util.Map<Object, String> id = new java.util.IdentityHashMap<>();
+                java.util.List<Integer> one = new java.util.ArrayList<>(java.util.List.of(1)), two = new java.util.ArrayList<>(java.util.List.of(1));
+                id.put(one, "one");
+                id.put(two, "two");
+                one.add(7);
+                java.util.Set<Object> members = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+                members.add(one);
+                members.add(two);
+                members.add(one);
+                return (id.size() + id.get(one) + id.get(two) + id.get(new java.util.ArrayList<>(java.util.List.of(1))) + members.size()).hashCode();
+            }
+            case 4: {
+                java.util.Deque<Integer> first = new java.util.ArrayDeque<>(java.util.List.of(1)), second = new java.util.ArrayDeque<>(java.util.List.of(1));
+                java.util.Set<Object> deques = new java.util.HashSet<>();
+                deques.add(first);
+                deques.add(second);
+                first.add(2);
+                return (first.equals(second) ? 1000 : 0) + deques.size() * 100 + (deques.contains(first) ? 10 : 0)
+                    + (new java.util.LinkedList<>(java.util.List.of(1)).equals(java.util.List.of(1)) ? 1 : 0);
+            }
+            case 5: {
+                StringBuilder all = new StringBuilder();
+                for (Turn a : Turn.values()) for (Turn b : Turn.values()) all.append(a.then(b).name());
+                return all.toString().hashCode();
+            }
+            case 6: {
+                StringBuilder all = new StringBuilder();
+                for (Flip a : Flip.values()) all.append(a).append('>').append(a.back()).append(a.then(Flip.SWAP_X).name()).append(' ');
+                return all.toString().hashCode();
+            }
+            default: {
+                int all = 0;
+                for (int i = 1; i <= 6; i++) all = all * 31 + keyed(i);
+                return all;
+            }
+        }
+    }
 }
