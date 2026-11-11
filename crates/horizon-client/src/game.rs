@@ -207,6 +207,7 @@ mod native_explosions;
 mod native_falling;
 mod native_fire;
 mod native_hits;
+mod native_holder_sets;
 mod native_hooks;
 mod native_inventories;
 mod native_level_events;

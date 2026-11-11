@@ -896,6 +896,70 @@ pub(crate) const ALIASED: &str = "compat:registry-aliases";
 
 /// What `registry` holds under `id`: the mod's registrations (a datapack registry's files among
 /// them), vanilla's blocks and items.
+/// The registries whose entries the game lists for the runtime ([`registry_names`]): those whose
+/// vanilla entries the runtime gives an object for by name ([`registry_get`]).
+const LISTED_BY_GAME: [&str; 4] = ["block", "item", "fluid", "entity_type"];
+
+/// Every entry of registry `reg` as the game lists it ([`host::Host::holder_set`] of NeoForge's
+/// `any`), in its order; None for another registry and where no game is in hand. Asked once a
+/// runtime: the registries do not change while the game runs.
+fn game_names(rt: &mut Rt, reg: &str) -> Option<Vec<String>> {
+    if !LISTED_BY_GAME.contains(&reg) {
+        return None;
+    }
+    let key = format!("compat:game-names/{reg}");
+    if let Some(&kept) = rt.interned.get(&key) {
+        return Some(
+            crate::jutil::elements(rt, kept)
+                .into_iter()
+                .filter_map(|v| rt.str_of(v).map(str::to_owned))
+                .collect(),
+        );
+    }
+    let names = rt.host()?.holder_set(reg, r#"{"type":"neoforge:any"}"#)?;
+    let values: Vec<V> = names.iter().map(|n| rt.string(n)).collect();
+    let kept = crate::jutil::new_list(rt, values);
+    rt.interned.insert(key, kept);
+    Some(names)
+}
+
+/// The names of registry `reg`'s entries, in the order a walk over it gives them: a datapack
+/// registry's as its files were registered; one of the game's own ([`LISTED_BY_GAME`]) as the
+/// game lists it, vanilla's entries among the mods' (a mod that walks every item to sort them
+/// into its own lists saw none of vanilla's), then what the mods registered that the game does
+/// not list; any other by name.
+fn registry_names(rt: &mut Rt, reg: &str) -> Vec<String> {
+    let mut mine: Vec<String> = rt
+        .registered
+        .keys()
+        .filter(|(r, _)| r == reg)
+        .map(|(_, k)| k.clone())
+        .collect();
+    if crate::datapack::is_datapack(rt, reg) {
+        mine.sort_by(|x, y| crate::datapack::registration_order(x, y));
+        return mine;
+    }
+    mine.sort();
+    let Some(game) = game_names(rt, reg) else {
+        return mine;
+    };
+    let registered: std::collections::HashSet<&str> = mine.iter().map(String::as_str).collect();
+    // (An entry of the game's that is neither vanilla's nor a translated mod's has no object
+    // here.)
+    let mut all: Vec<String> = game
+        .into_iter()
+        .filter(|n| n.starts_with("minecraft:") || registered.contains(n.as_str()))
+        .collect();
+    let listed: std::collections::HashSet<&str> = all.iter().map(String::as_str).collect();
+    let rest: Vec<String> = mine
+        .iter()
+        .filter(|n| !listed.contains(n.as_str()))
+        .cloned()
+        .collect();
+    all.extend(rest);
+    all
+}
+
 pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
     crate::datapack::read(rt, registry);
     // (Asked for every model of a pack by each mod that looks through them: no key is made
@@ -1964,19 +2028,25 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 "keySet" | "entrySet" | "stream" | "iterator" | "size" | "holders" | "listElements" | "forEach" => {
                     crate::datapack::read(rt, &reg);
-                    let mut entries: Vec<(String, V)> = rt.registered.iter().filter(|((r, _), _)| *r == reg).map(|((_, k), v)| (k.clone(), *v)).collect();
-                    // A datapack registry's in the order its files were registered.
-                    if crate::datapack::is_datapack(rt, &reg) {
-                        entries.sort_by(|x, y| crate::datapack::registration_order(&x.0, &y.0));
-                    } else {
-                        entries.sort_by(|x, y| x.0.cmp(&y.0));
+                    let names = registry_names(rt, &reg);
+                    if n == "size" {
+                        return Some(V::I(names.len() as i32));
                     }
+                    if n == "keySet" {
+                        let keys: Vec<V> = names.iter().map(|k| rt.string(k)).collect();
+                        return Some(crate::jutil::new_set_of(rt, &keys));
+                    }
+                    let entries: Vec<(String, V)> = names
+                        .into_iter()
+                        .map(|k| {
+                            let v = match rt.registry_entry(&reg, &k) {
+                                Some(v) => v,
+                                None => registry_get(rt, &reg, &k),
+                            };
+                            (k, v)
+                        })
+                        .collect();
                     match n {
-                        "size" => V::I(entries.len() as i32),
-                        "keySet" => {
-                            let keys: Vec<V> = entries.iter().map(|(k, _)| rt.string(k)).collect();
-                            crate::jutil::new_set_of(rt, &keys)
-                        }
                         "holders" | "listElements" => {
                             let hs: Vec<V> = entries.iter().map(|(k, v)| registry_holder(rt, &reg, k, *v)).collect();
                             rt.alloc("java/util/stream/Stream", Data::Stream(hs))
@@ -3816,6 +3886,93 @@ mod tests {
         let written = crate::linked::java_string(&mut rt, made);
         let id = rt.concat("\u{1}/fish", "L", &[written], &[]);
         assert_eq!(rt.str_of(id), Some("minecolonies:fisherman/fish"));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A walk over one of the game's registries gives what the game lists, in its order:
+    /// vanilla's entries as the runtime's objects for their names, a mod's as the mod's own,
+    /// then what a mod registered that the game does not list. An entry of the game's that is
+    /// neither is left out. Without a game the mods' entries are all there is (MineColonies
+    /// walked every item to sort them into its lists and saw none of vanilla's).
+    #[test]
+    fn a_registry_walk_gives_the_games_entries_among_the_mods() {
+        struct Game;
+        impl crate::host::Host for Game {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {
+                let set = serde_json::from_str::<serde_json::Value>(set).ok()?;
+                let any =
+                    set.get("type").and_then(serde_json::Value::as_str) == Some("neoforge:any");
+                match registry {
+                    "item" if any => Some(
+                        [
+                            "minecraft:stick",
+                            "mymod:gear",
+                            "elsewhere:thing",
+                            "minecraft:apple",
+                        ]
+                        .map(str::to_owned)
+                        .to_vec(),
+                    ),
+                    "block" if set.as_str() == Some("#minecraft:logs") => Some(
+                        ["minecraft:oak_log", "mymod:rubber_log"]
+                            .map(str::to_owned)
+                            .to_vec(),
+                    ),
+                    _ => None,
+                }
+            }
+        }
+        const ITEM: &str = "net/minecraft/world/item/Item";
+        crate::install();
+        let mut rt = Rt::new();
+        let (gear, late) = (rt.new_object(ITEM), rt.new_object(ITEM));
+        rt.registered
+            .insert(("item".into(), "mymod:gear".into()), gear);
+        rt.registered
+            .insert(("item".into(), "mymod:late".into()), late);
+        let registry = rt.string("item");
+        let c = |rt: &mut Rt, name: &str| {
+            let key = rt.static_key(&format!("net/minecraft/core/Registry.{name}"));
+            crate::api::call(rt, key, &[registry])
+        };
+        let names = |rt: &mut Rt| -> Vec<String> {
+            let keys = c(rt, "keySet.()Ljava/util/Set;");
+            crate::jutil::elements(rt, keys)
+                .into_iter()
+                .filter_map(|k| rt.str_of(k).map(str::to_owned))
+                .collect()
+        };
+        assert_eq!(names(&mut rt), ["mymod:gear", "mymod:late"]);
+        let mut game = Game;
+        rt.with_host(&mut game, |rt| {
+            assert_eq!(names(rt), ["minecraft:stick", "mymod:gear", "minecraft:apple", "mymod:late"]);
+            assert_eq!(c(rt, "size.()I"), V::I(4));
+            let walked = c(rt, "stream.()Ljava/util/stream/Stream;");
+            let walked = crate::jutil::elements(rt, walked);
+            assert_eq!((walked.len(), walked[1], walked[3]), (4, gear, late));
+            // Vanilla's are the items the runtime gives for their names.
+            let key = rt.static_key("net/minecraft/core/Registry.getKey.(Ljava/lang/Object;)Lnet/minecraft/resources/ResourceLocation;");
+            let named: Vec<Option<String>> = [walked[0], walked[2]].into_iter().map(|item| {
+                let id = crate::api::call(rt, key, &[registry, item]);
+                rt.str_of(id).map(str::to_owned)
+            }).collect();
+            assert_eq!(named, [Some("minecraft:stick".to_owned()), Some("minecraft:apple".to_owned())]);
+            // A block tag's members are the game's too (Lootr found its `convert` tags empty);
+            // a tag the game does not have holds nothing.
+            let blocks = rt.string("block");
+            let members = |rt: &mut Rt, tag: &str| {
+                let tag = crate::fluids::tag_key(rt, "block", tag);
+                let held = crate::api::call(rt, "net/minecraft/core/Registry.getTagOrEmpty.(Lnet/minecraft/tags/TagKey;)Ljava/lang/Iterable;", &[blocks, tag]);
+                crate::jutil::elements(rt, held).len()
+            };
+            assert_eq!((members(rt, "minecraft:logs"), members(rt, "minecraft:nothing")), (2, 0));
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

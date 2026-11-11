@@ -382,6 +382,10 @@ fn level_host(krate: &str) -> String {
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
         }}
+        // What a tag of the level's blocks, items and fluids holds, and every block or item.
+        fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
+            self.level.native_holder_set(registry, &serde_json::from_str(set).ok()?)
+        }}
         fn block_facts(&self, state: &str) -> Option<{krate}::compat::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {krate}::compat::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
@@ -477,6 +481,10 @@ fn level_read_host(c: &str) -> String {
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
+        }}
+        // What a tag of the level's blocks, items and fluids holds, and every block or item.
+        fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
+            self.level.native_holder_set(registry, &serde_json::from_str(set).ok()?)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
@@ -2868,6 +2876,11 @@ fn world_reads(get: &str, c: &str) -> String {
         }}
         fn ingredient_items(&self, entry: &str) -> Vec<String> {{
             {get}.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
+        }}
+        // What a tag of the game's registries holds, and every entry of one (a mod walks a block
+        // tag's blocks, or every item there is).
+        fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
+            {get}.native_holder_set(registry, &serde_json::from_str(set).ok()?)
         }}
         fn local_difficulty(&self, pos: [i32; 3]) -> (i32, f32) {{
             {get}.native_local_difficulty(pos)
@@ -5357,6 +5370,10 @@ fn {id}_state_for_placement(
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
         }}
+        // What a tag of the level's blocks, items and fluids holds, and every block or item.
+        fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
+            self.level.native_holder_set(registry, &serde_json::from_str(set).ok()?)
+        }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
         }}
@@ -5453,6 +5470,10 @@ fn {id}_update_shape(
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
             self.level.native_block_name_in_tag(block, tag)
+        }}
+        // What a tag of the level's blocks, items and fluids holds, and every block or item.
+        fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
+            self.level.native_holder_set(registry, &serde_json::from_str(set).ok()?)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.level.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
