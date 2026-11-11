@@ -862,6 +862,10 @@ fn reload_one(rt: &mut Rt, l: V, barrier: V, m: V, profiler: V) -> V {
 /// reloads from its manager, in the order they were registered. What one throws is reported, and
 /// the next goes on.
 pub fn reload(rt: &mut Rt, root: &'static str) {
+    // The client's resources are there to read: what waited for its thread runs first.
+    if root == "assets" {
+        crate::screens::run_client_tasks(rt);
+    }
     let list = listeners(rt, root);
     let all = crate::jutil::elements(rt, list);
     if all.is_empty() {
@@ -911,6 +915,7 @@ pub fn server_reload(rt: &mut Rt) {
     // its constructor runs before the listeners are asked for, and what they inject into
     // `updateRegistryTags` around the tags' binding.
     rt.interned.remove("compat:server-resources");
+    crate::recipes::reloaded(rt);
     let tagged = &crate::places::UPDATE_REGISTRY_TAGS;
     let resources = if crate::places::constructors_heard(rt, SERVER_RESOURCES) || tagged.heard(rt) {
         server_resources(rt)
@@ -919,6 +924,9 @@ pub fn server_reload(rt: &mut Rt) {
     };
     let ev = rt.new_object(SERVER_LISTENERS_EVENT);
     crate::neo::post(rt, SERVER_LISTENERS_EVENT, ev);
+    // Vanilla's own listeners load before the mods': its recipe manager among them.
+    let (m, profiler) = (manager(rt, "data"), profiler(rt));
+    crate::recipes::applied(rt, m, profiler);
     reload(rt, "data");
     // Then the loaded tags bind to the registries, and NeoForge says so: what a mod derives from
     // tags it derives again.

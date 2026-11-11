@@ -1007,17 +1007,29 @@ pub fn decode_recipe(rt: &mut Rt, j: &Json) -> Result<V, String> {
 }
 
 /// The recipes of type `id` the game has, each read once per runtime: `RecipeHolder`s, in the
-/// game's order. A recipe the mod's codec refuses is left out, as vanilla's manager does, and
-/// reported once.
+/// game's order, then those the mods added as the manager loaded ([`applied`]). A recipe the
+/// mod's codec refuses is left out, as vanilla's manager does, and reported once. Where a mod
+/// put tables of its own in the manager, what those hold ([`tables_taken`]).
 pub fn holders(rt: &mut Rt, id: &str) -> Vec<V> {
-    let key = format!("compat:recipes/{id}");
+    tables_taken(rt);
+    let key = format!("{LIST}{id}");
     if let Some(&list) = rt.interned.get(&key) {
         return jutil::elements(rt, list);
     }
+    // A table made of every recipe says what there is: a type it lacks has none.
+    if rt.interned.contains_key(WHOLE) && rt.interned.contains_key(TABLE_TAKEN) {
+        return Vec::new();
+    }
+    let mut more = Vec::new();
+    for added in [ADDED, HELD] {
+        if let Some(&list) = rt.interned.get(&format!("{added}{id}")) {
+            more.extend(jutil::elements(rt, list));
+        }
+    }
     let files = rt.host().map(|h| h.recipes_of_type(id)).unwrap_or_default();
     if files.is_empty() {
-        // Outside a world, or a type nothing uses: asked again next time.
-        return Vec::new();
+        // Outside a world, or a type no file is of: asked again next time.
+        return more;
     }
     let (mut out, mut refused) = (Vec::new(), Vec::new());
     for (rid, text) in &files {
@@ -1033,9 +1045,279 @@ pub fn holders(rt: &mut Rt, id: &str) -> Vec<V> {
     if let Some(first) = refused.first() {
         eprintln!("horizon-compat: {} of {} {id} recipes not read; first: {first}", refused.len(), files.len());
     }
+    // What the mods added, one of a file's id in that file's place.
+    if !more.is_empty() {
+        let ids: std::collections::HashSet<String> = more
+            .iter()
+            .map(|&h| text(rt, rt.get_field(h, "$id")))
+            .collect();
+        out.retain(|&h| !ids.contains(&text(rt, rt.get_field(h, "$id"))));
+        out.extend(more);
+    }
     let list = jutil::new_list(rt, out.clone());
     rt.interned.insert(key, list);
     out
+}
+
+/// Where the manager keeps its recipes by id and by type, as vanilla's fields are named: a
+/// mixin's `@Shadow` reads and writes them under these names, and an accessor does once they
+/// are there. (Under the `$` name where an accessor wrote first.)
+const BY_NAME: [&str; 2] = ["byName", "$byName"];
+const BY_TYPE: [&str; 2] = ["byType", "$byType"];
+const MANAGER_KEY: &str = "compat:recipe-manager";
+/// Under which a runtime keeps a type's recipes, the type's id after it: as read ([`holders`]).
+const LIST: &str = "compat:recipes/";
+/// Those the mods added to the type as the manager loaded ([`applied`]).
+const ADDED: &str = "compat:recipes-added/";
+/// Those a table a mod made beside the game's holds for the type ([`tables_taken`]).
+const HELD: &str = "compat:recipes-held/";
+/// The `byType` table the runtime's lists were last taken from.
+const TABLE_TAKEN: &str = "compat:recipes-table";
+/// Set once a table was made of every recipe the game has: what the mods then make of it and
+/// put in its place is the whole of the recipes too.
+const WHOLE: &str = "compat:recipes-whole";
+/// `RecipeManager.apply`, where it has made the builders its recipes go into.
+const APPLY_BUILT: &str =
+    "hz/inject:net/minecraft/world/item/crafting/RecipeManager.apply@INVOKE:builder:AFTER";
+
+/// The recipe managers whose tables are the game's: the one the server's resources hold (a
+/// mod's own where it put one there: FastSuite and Recipe Essentials replace it with a
+/// subclass that caches, and a mixin reading the resources' field, Slice and Dice's, asks
+/// that one for its tables), and the one `getRecipeManager()` answers with.
+fn managers(rt: &Rt) -> Vec<V> {
+    let mut out = Vec::new();
+    if let Some(&resources) = rt.interned.get("compat:server-resources") {
+        out.push(rt.get_field(resources, "recipes"));
+    }
+    out.extend(rt.interned.get(MANAGER_KEY).copied());
+    out.retain(|m| m.r() != 0);
+    out.dedup();
+    out
+}
+
+/// The managers' table under one of `names`, if a mod asked for it or put one there.
+fn table(rt: &Rt, names: [&'static str; 2]) -> Option<V> {
+    managers(rt)
+        .into_iter()
+        .flat_map(|m| names.map(|n| rt.get_field(m, n)))
+        .find(|v| v.r() != 0)
+}
+
+/// Every recipe type's id: Minecraft's own, then the mods' in the order of their names.
+fn type_ids(rt: &Rt) -> Vec<String> {
+    let mut types: Vec<String> = rt
+        .registered
+        .keys()
+        .filter(|(r, _)| r == "recipe_type")
+        .map(|(_, n)| n.clone())
+        .filter(|n| !VANILLA_TYPES.contains(&n.as_str()))
+        .collect();
+    types.sort();
+    VANILLA_TYPES
+        .iter()
+        .map(|t| (*t).to_owned())
+        .chain(types)
+        .collect()
+}
+
+/// What a multimap of recipes by type holds, by the types' ids, in its keys' order.
+fn by_type_id(rt: &mut Rt, by_type: V) -> Vec<(String, Vec<V>)> {
+    let mut out: Vec<(String, Vec<V>)> = Vec::new();
+    let types = crate::api::call(
+        rt,
+        "com/google/common/collect/Multimap.keySet.()Ljava/util/Set;",
+        &[by_type],
+    );
+    for ty in jutil::elements(rt, types) {
+        let id = type_id(rt, ty);
+        if id.is_empty() {
+            continue;
+        }
+        let held = crate::api::call(
+            rt,
+            "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;",
+            &[by_type, ty],
+        );
+        let items = jutil::elements(rt, held);
+        match out.iter_mut().find(|(i, _)| *i == id) {
+            Some((_, all)) => all.extend(items),
+            None => out.push((id, items)),
+        }
+    }
+    out
+}
+
+/// Forgets what the runtime keeps under the keys that start with one of `kinds`.
+fn forget(rt: &mut Rt, kinds: &[&str]) {
+    rt.interned
+        .retain(|k, _| !kinds.iter().any(|kind| k.starts_with(kind)));
+}
+
+/// The recipes as the manager's `byType` table has them, where a mod put a table of its own
+/// there since the runtime's lists were last taken from one (Slice and Dice and Create:
+/// Dragons Plus add the recipes they make up by copying the manager's tables into larger ones
+/// and putting those in their place). A table made from one of every recipe is all there is:
+/// each type's list becomes what it holds for the type, and a type it lacks has none. One made
+/// where the game had no recipes to hand holds what the mod added alone, kept beside the
+/// files'. Found by the table being another object, so asking costs nothing while it stays.
+fn tables_taken(rt: &mut Rt) {
+    let Some(by_type) = table(rt, BY_TYPE) else {
+        return;
+    };
+    if rt.interned.get(TABLE_TAKEN).copied() == Some(by_type) {
+        return;
+    }
+    rt.interned.insert(TABLE_TAKEN.into(), by_type);
+    let held = by_type_id(rt, by_type);
+    forget(rt, &[LIST, HELD]);
+    let under = if rt.interned.contains_key(WHOLE) {
+        LIST
+    } else {
+        HELD
+    };
+    for (id, items) in held {
+        let list = jutil::new_list(rt, items);
+        rt.interned.insert(format!("{under}{id}"), list);
+    }
+}
+
+/// The type object of recipe type `id`: a mod's as it registered it, or Minecraft's own
+/// constant.
+fn type_of_id(rt: &mut Rt, id: &str) -> Option<V> {
+    match rt
+        .registered
+        .get(&("recipe_type".to_owned(), id.to_owned()))
+    {
+        Some(&ty) => Some(ty),
+        None => vanilla_type_entry(rt, id),
+    }
+}
+
+/// The manager's `byName` (`by_name`) or `byType` table: what a mod put there, else one made
+/// of every recipe the game has, kept in `manager` under the field's name. Asked for where
+/// the game has no recipes to hand (a hook that reaches no world's data), it is empty and not
+/// kept: the next asking makes it again.
+fn made_table(rt: &mut Rt, manager: V, by_name: bool) -> V {
+    let names = if by_name { BY_NAME } else { BY_TYPE };
+    if let Some(made) = table(rt, names) {
+        return made;
+    }
+    let mut any = false;
+    let made = if by_name {
+        let map = rt.alloc("java/util/HashMap", Data::Table(crate::Table::default()));
+        for holder in all_holders(rt) {
+            any = true;
+            let id = rt.get_field(holder, "$id");
+            jutil::table_put(rt, map, id, holder);
+        }
+        map
+    } else {
+        let multimap = crate::api::call(
+            rt,
+            "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;",
+            &[],
+        );
+        for id in type_ids(rt) {
+            let of = holders(rt, &id);
+            let Some(ty) = type_of_id(rt, &id) else {
+                continue;
+            };
+            for holder in of {
+                any = true;
+                crate::api::call(
+                    rt,
+                    "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z",
+                    &[multimap, ty, holder],
+                );
+            }
+        }
+        multimap
+    };
+    if any {
+        if !by_name {
+            // (The runtime's lists are this table's already.)
+            rt.interned.insert(TABLE_TAKEN.into(), made);
+        }
+        rt.interned.insert(WHOLE.into(), V::I(1));
+        rt.put_field(manager, names[0], made);
+    }
+    made
+}
+
+/// The server's data loads anew (a world's first open, `/reload`): the recipes read at the
+/// last load, what the mods added to them and the tables they made of them are forgotten, as
+/// vanilla's manager fills its tables again from the new files.
+pub(crate) fn reloaded(rt: &mut Rt) {
+    forget(rt, &[LIST, ADDED, HELD]);
+    rt.interned.remove(TABLE_TAKEN);
+    rt.interned.remove(WHOLE);
+    for manager in managers(rt) {
+        for name in BY_NAME.into_iter().chain(BY_TYPE) {
+            if rt.get_field(manager, name) != V::Void {
+                rt.put_field(manager, name, V::Void);
+            }
+        }
+    }
+}
+
+/// `RecipeManager.apply`, which each load of the server's data runs before the mods' own
+/// listeners, on `resources` (the server's `ResourceManager`). The handlers mixins inject
+/// where it has made the builders its recipes go into add recipes of their own there
+/// (Cucumber's event, by which Mystical Agriculture makes its crops' recipes): kept beside
+/// the files' ([`holders`]). Then those at its end run. The files themselves the game reads:
+/// a handler at its head, which is handed them as JSON to change, is not run.
+pub(crate) fn applied(rt: &mut Rt, resources: V, profiler: V) {
+    let built = crate::places::heard(rt, APPLY_BUILT);
+    if !built && !crate::places::RECIPES_APPLY.heard(rt) {
+        return;
+    }
+    let manager = match managers(rt).first() {
+        Some(&manager) => manager,
+        None => rt.intern(MANAGER_KEY.into(), |rt| rt.new_object(MANAGER)),
+    };
+    let files = rt.alloc("java/util/HashMap", Data::Table(crate::Table::default()));
+    if built {
+        let by_type = crate::api::call(
+            rt,
+            "com/google/common/collect/ImmutableMultimap.builder.()Lcom/google/common/collect/ImmutableMultimap$Builder;",
+            &[],
+        );
+        let by_name = crate::api::call(
+            rt,
+            "com/google/common/collect/ImmutableMap.builder.()Lcom/google/common/collect/ImmutableMap$Builder;",
+            &[],
+        );
+        crate::places::at_locals(
+            rt,
+            APPLY_BUILT,
+            manager,
+            &[
+                ("Ljava/util/Map;", files),
+                (
+                    "Lnet/minecraft/server/packs/resources/ResourceManager;",
+                    resources,
+                ),
+                ("Lnet/minecraft/util/profiling/ProfilerFiller;", profiler),
+            ],
+            &[
+                (
+                    "Lcom/google/common/collect/ImmutableMultimap$Builder;",
+                    by_type,
+                ),
+                ("Lcom/google/common/collect/ImmutableMap$Builder;", by_name),
+            ],
+        );
+        let added = crate::api::call(
+            rt,
+            "com/google/common/collect/ImmutableMultimap$Builder.build.()Lcom/google/common/collect/ImmutableMultimap;",
+            &[by_type],
+        );
+        for (id, items) in by_type_id(rt, added) {
+            let list = jutil::new_list(rt, items);
+            rt.interned.insert(format!("{ADDED}{id}"), list);
+        }
+    }
+    crate::places::RECIPES_APPLY.end(rt, manager, &[files, resources, profiler]);
 }
 
 /// Minecraft's own recipe types, whose recipes the game hands over as a mod type's.
@@ -1062,18 +1344,8 @@ pub(crate) fn vanilla_type_entry(rt: &mut Rt, id: &str) -> Option<V> {
 /// The recipes of every type: Minecraft's own, then those of every type the mods registered, as
 /// vanilla's manager holds every recipe (`getRecipes`, `byKey`).
 fn all_holders(rt: &mut Rt) -> Vec<V> {
-    let mut types: Vec<String> = rt
-        .registered
-        .keys()
-        .filter(|(r, _)| r == "recipe_type")
-        .map(|(_, n)| n.clone())
-        .filter(|n| !VANILLA_TYPES.contains(&n.as_str()))
-        .collect();
-    types.sort();
-    VANILLA_TYPES
-        .iter()
-        .map(|t| (*t).to_owned())
-        .chain(types)
+    type_ids(rt)
+        .into_iter()
         .flat_map(|t| holders(rt, &t))
         .collect()
 }
@@ -1257,6 +1529,21 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             let all = holders(rt, &id);
             jutil::new_list(rt, all)
         }
+        // A mod's own manager (`super(registries)`): its tables are made when asked for.
+        "<init>" => V::Void,
+        // The tables themselves, read as the fields they are or through an accessor.
+        "$byName" if desc.starts_with("()") => made_table(rt, a(0), true),
+        "$byType" if desc.starts_with("()") => made_table(rt, a(0), false),
+        // By id: in the table by name, where there is one of every recipe.
+        "byKey" if rt.interned.contains_key(WHOLE) && table(rt, BY_NAME).is_some() => {
+            let by_name = table(rt, BY_NAME).unwrap_or_default();
+            let found = crate::api::call(
+                rt,
+                "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[by_name, a(1)],
+            );
+            optional(rt, Some(found).filter(|h| h.r() != 0))
+        }
         "byKey" => {
             let wanted = text(rt, a(1));
             let all = all_holders(rt);
@@ -1333,7 +1620,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     }
     Some(match (owner, name) {
         (_, "getRecipeManager") if desc == "()Lnet/minecraft/world/item/crafting/RecipeManager;" => {
-            rt.intern("compat:recipe-manager".into(), |rt| rt.new_object(MANAGER))
+            rt.intern(MANAGER_KEY.into(), |rt| rt.new_object(MANAGER))
         }
         (MANAGER, n) => return manager_call(rt, n, desc, args),
         (CACHED_CHECK, n) => return cached_check_call(rt, n, args),
@@ -2358,6 +2645,202 @@ mod tests {
             assert_eq!(found(rt, &[Some("minecraft:red_mushroom"), Some("minecraft:brown_mushroom")]).as_deref(), Some("test:mushroom_soup"));
             assert_eq!(found(rt, &[Some("minecraft:beef"), Some("minecraft:carrot")]), None);
             assert_eq!(found(rt, &[Some("minecraft:beef"), Some("minecraft:carrot"), Some("minecraft:potato"), Some("minecraft:beef")]), None);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    const BY_NAME_KEY: &str =
+        "net/minecraft/world/item/crafting/RecipeManager.$byName.()Ljava/util/Map;";
+    const BY_TYPE_KEY: &str = "net/minecraft/world/item/crafting/RecipeManager.$byType.()Lcom/google/common/collect/Multimap;";
+    const ALL_FOR: &str = "net/minecraft/world/item/crafting/RecipeManager.getAllRecipesFor.(Lnet/minecraft/world/item/crafting/RecipeType;)Ljava/util/List;";
+    const BY_KEY: &str = "net/minecraft/world/item/crafting/RecipeManager.byKey.(Lnet/minecraft/resources/ResourceLocation;)Ljava/util/Optional;";
+    const MULTIMAP_BUILDER: &str = "com/google/common/collect/ImmutableMultimap$Builder";
+    const BUILDER_PUT: &str = "com/google/common/collect/ImmutableMultimap$Builder.put.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableMultimap$Builder;";
+
+    /// A game with two smelting recipes in its files.
+    fn smelting_host() -> MemoryHost {
+        let mut host = MemoryHost::default();
+        host.recipes.insert(
+            "minecraft:smelting".into(),
+            vec![
+                ("minecraft:iron_ingot_from_smelting_raw_iron".into(), r#"{"type":"minecraft:smelting","category":"misc","cookingtime":200,"experience":0.7,"group":"iron_ingot","ingredient":"minecraft:raw_iron","result":{"id":"minecraft:iron_ingot"}}"#.into()),
+                ("minecraft:stone".into(), r#"{"type":"minecraft:smelting","category":"blocks","experience":0.1,"ingredient":"minecraft:cobblestone","result":{"id":"minecraft:stone"}}"#.into()),
+            ],
+        );
+        host
+    }
+
+    fn the_manager(rt: &mut Rt) -> V {
+        let level = rt.new_object("net/minecraft/world/level/Level");
+        crate::api::call(
+            rt,
+            "net/minecraft/world/level/Level.getRecipeManager.()Lnet/minecraft/world/item/crafting/RecipeManager;",
+            &[level],
+        )
+    }
+
+    /// The ids of the smelting recipes the manager answers with.
+    fn smelted(rt: &mut Rt, manager: V) -> Vec<String> {
+        let smelting = vanilla_type_entry(rt, "minecraft:smelting").unwrap();
+        let all = crate::api::call(rt, ALL_FOR, &[manager, smelting]);
+        jutil::elements(rt, all)
+            .into_iter()
+            .map(|h| text(rt, rt.get_field(h, "$id")))
+            .collect()
+    }
+
+    /// A recipe of the mod's own making: the stone recipe under another id.
+    fn made_up(rt: &mut Rt, id: &str) -> V {
+        let stone = holders(rt, "minecraft:smelting")
+            .into_iter()
+            .find(|&h| text(rt, rt.get_field(h, "$id")) == "minecraft:stone")
+            .unwrap();
+        let (id, recipe) = (rt.string(id), rt.get_field(stone, "$value"));
+        holder(rt, id, recipe)
+    }
+
+    /// The manager's `byName` and `byType`, read as Slice and Dice and Create: Dragons Plus
+    /// read them, hold every recipe the game has; larger ones a mod builds of them and puts
+    /// in their place are then what the manager answers from; and the next load of the
+    /// server's data starts from the files again.
+    #[test]
+    fn the_managers_tables_hold_every_recipe_and_a_mods_tables_take_their_place() {
+        let mut rt = Rt::new();
+        crate::install();
+        let mut host = smelting_host();
+        rt.with_host(&mut host, |rt| {
+            let manager = the_manager(rt);
+            let (by_name, by_type) = (crate::api::call(rt, BY_NAME_KEY, &[manager]), crate::api::call(rt, BY_TYPE_KEY, &[manager]));
+            assert_eq!(crate::api::call(rt, "java/util/Map.size.()I", &[by_name]), V::I(2));
+            let smelting = vanilla_type_entry(rt, "minecraft:smelting").unwrap();
+            let of = crate::api::call(rt, "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;", &[by_type, smelting]);
+            assert_eq!(jutil::elements(rt, of).len(), 2);
+            // The tables stay the manager's: the field a `@Shadow` reads, the accessor again.
+            assert_eq!(rt.get_field(manager, "byType"), by_type);
+            assert_eq!(crate::api::call(rt, BY_NAME_KEY, &[manager]), by_name);
+            // `ImmutableMap.builder().putAll(byName).put(id, holder).build()`, and the multimap's.
+            let extra = made_up(rt, "test:stone_again");
+            let names = crate::api::call(rt, "com/google/common/collect/ImmutableMap.builder.()Lcom/google/common/collect/ImmutableMap$Builder;", &[]);
+            crate::api::call(rt, "com/google/common/collect/ImmutableMap$Builder.putAll.(Ljava/util/Map;)Lcom/google/common/collect/ImmutableMap$Builder;", &[names, by_name]);
+            let id = rt.get_field(extra, "$id");
+            crate::api::call(rt, "com/google/common/collect/ImmutableMap$Builder.put.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableMap$Builder;", &[names, id, extra]);
+            let names = crate::api::call(rt, "com/google/common/collect/ImmutableMap$Builder.build.()Lcom/google/common/collect/ImmutableMap;", &[names]);
+            let types = rt.new_object(MULTIMAP_BUILDER);
+            crate::api::call(rt, "com/google/common/collect/ImmutableMultimap$Builder.<init>.()V", &[types]);
+            crate::api::call(rt, "com/google/common/collect/ImmutableMultimap$Builder.putAll.(Lcom/google/common/collect/Multimap;)Lcom/google/common/collect/ImmutableMultimap$Builder;", &[types, by_type]);
+            crate::api::call(rt, BUILDER_PUT, &[types, smelting, extra]);
+            let types = crate::api::call(rt, "com/google/common/collect/ImmutableMultimap$Builder.build.()Lcom/google/common/collect/ImmutableMultimap;", &[types]);
+            // (An accessor's setter writes the field that is there.)
+            rt.put_field(manager, "byName", names);
+            rt.put_field(manager, "byType", types);
+            assert_eq!(smelted(rt, manager), ["minecraft:iron_ingot_from_smelting_raw_iron", "minecraft:stone", "test:stone_again"]);
+            let found = crate::api::call(rt, BY_KEY, &[manager, id]);
+            assert_eq!(rt.get_field(found, "value"), extra);
+            let all = crate::api::call(rt, "net/minecraft/world/item/crafting/RecipeManager.getRecipes.()Ljava/util/Collection;", &[manager]);
+            assert_eq!(jutil::elements(rt, all).len(), 3);
+            // A table that leaves a recipe out has taken it out.
+            let fewer = crate::api::call(rt, "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;", &[]);
+            crate::api::call(rt, "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z", &[fewer, smelting, extra]);
+            rt.put_field(manager, "byType", fewer);
+            assert_eq!(smelted(rt, manager), ["test:stone_again"]);
+            // The data loads again: the files' recipes, and tables made anew.
+            reloaded(rt);
+            assert_eq!(rt.get_field(manager, "byType"), V::Void);
+            assert_eq!(smelted(rt, manager), ["minecraft:iron_ingot_from_smelting_raw_iron", "minecraft:stone"]);
+            let again = crate::api::call(rt, BY_TYPE_KEY, &[manager]);
+            assert!(again != by_type && again.r() != 0);
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// Tables asked for where the game has no recipes to hand are empty and not kept; what a
+    /// mod makes of them and puts in the manager holds only what it added, which then stands
+    /// beside the files' recipes instead of in their place.
+    #[test]
+    fn tables_made_without_the_games_recipes_only_add_to_them() {
+        let mut rt = Rt::new();
+        crate::install();
+        let (mut bare, mut host) = (MemoryHost::default(), smelting_host());
+        let mut manager = V::NULL;
+        let mut extra = V::NULL;
+        rt.with_host(&mut host, |rt| extra = made_up(rt, "test:stone_again"));
+        forget(&mut rt, &[LIST]);
+        rt.with_host(&mut bare, |rt| {
+            manager = the_manager(rt);
+            let by_type = crate::api::call(rt, BY_TYPE_KEY, &[manager]);
+            assert_eq!(crate::api::call(rt, "com/google/common/collect/Multimap.size.()I", &[by_type]), V::I(0));
+            assert_eq!(rt.get_field(manager, "byType"), V::Void);
+            let smelting = vanilla_type_entry(rt, "minecraft:smelting").unwrap();
+            let own = crate::api::call(rt, "com/google/common/collect/HashMultimap.create.(Lcom/google/common/collect/Multimap;)Lcom/google/common/collect/HashMultimap;", &[by_type]);
+            crate::api::call(rt, "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z", &[own, smelting, extra]);
+            // (An accessor's setter where no field is yet.)
+            rt.put_field(manager, "$byType", own);
+            assert_eq!(smelted(rt, manager), ["test:stone_again"]);
+        });
+        rt.with_host(&mut host, |rt| {
+            assert_eq!(
+                smelted(rt, manager),
+                [
+                    "minecraft:iron_ingot_from_smelting_raw_iron",
+                    "minecraft:stone",
+                    "test:stone_again"
+                ]
+            );
+            assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+        });
+    }
+
+    /// As the manager loads, a handler a mixin injects where `apply` has made its builders
+    /// (Cucumber's) adds a recipe to them: it stands with the files' from then on, and the
+    /// tables a mod then asks for hold it too.
+    #[test]
+    fn a_handler_adds_recipes_to_the_builders_the_manager_loads_into() {
+        fn adds(rt: &mut Rt, _lid: u32, args: &[V]) -> Option<V> {
+            // The manager, the files, the resources, the profiler, the `CallbackInfo`, the builders.
+            assert_eq!(args.len(), 8);
+            assert_eq!(rt.class_of(args[1]), MANAGER);
+            assert_eq!(rt.class_of(args[6]), MULTIMAP_BUILDER);
+            let smelting = vanilla_type_entry(rt, "minecraft:smelting").unwrap();
+            let extra = rt.interned["test:extra"];
+            crate::api::call(rt, BUILDER_PUT, &[args[6], smelting, extra]);
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.lambda_call = Some(adds);
+        rt.subscribers.insert(
+            "t/RecipeManagerMixin",
+            vec![(
+                APPLY_BUILT,
+                "t/RecipeManagerMixin.adds.(Ljava/util/Map;Lnet/minecraft/server/packs/resources/ResourceManager;Lnet/minecraft/util/profiling/ProfilerFiller;Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;Lcom/google/common/collect/ImmutableMultimap$Builder;Lcom/google/common/collect/ImmutableMap$Builder;)V",
+                false,
+                1,
+            )],
+        );
+        let mut host = smelting_host();
+        rt.with_host(&mut host, |rt| {
+            let extra = made_up(rt, "test:stone_again");
+            rt.interned.insert("test:extra".into(), extra);
+            reloaded(rt);
+            let (resources, profiler) = (
+                rt.new_object("net/minecraft/server/packs/resources/ResourceManager"),
+                rt.new_object("net/minecraft/util/profiling/ProfilerFiller"),
+            );
+            applied(rt, resources, profiler);
+            let manager = the_manager(rt);
+            assert_eq!(
+                smelted(rt, manager),
+                [
+                    "minecraft:iron_ingot_from_smelting_raw_iron",
+                    "minecraft:stone",
+                    "test:stone_again"
+                ]
+            );
+            let by_name = crate::api::call(rt, BY_NAME_KEY, &[manager]);
+            assert_eq!(
+                crate::api::call(rt, "java/util/Map.size.()I", &[by_name]),
+                V::I(3)
+            );
             assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
         });
     }

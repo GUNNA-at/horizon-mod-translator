@@ -2467,6 +2467,7 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
     rt.safe_point();
     client_setup(rt, host);
     rt.with_host(host, |rt| {
+        crate::screens::run_client_tasks(rt);
         crate::gui::frame(rt);
         // What mixins inject into `Minecraft.tick` and, in a world, into the client level's
         // ticks runs around what the runtime does of them ([`crate::places`]).

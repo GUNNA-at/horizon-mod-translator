@@ -821,6 +821,25 @@ fn plain_handler(h: &crate::class::Method) -> bool {
         && h.param_annotations.iter().all(Vec::is_empty)
 }
 
+/// The game's methods whose locals the runtime has in hand where it stands for them (class,
+/// method): an instance handler injected into one of these may capture them.
+/// `RecipeManager.apply`: the two builders the read recipes go into, which a handler adds
+/// recipes of its own to (Cucumber's, for Mystical Agriculture's crops).
+const LOCAL_PLACES: [(&str, &str); 1] =
+    [("net/minecraft/world/item/crafting/RecipeManager", "apply")];
+
+/// Whether an instance handler takes, after the method's arguments (or none) and a
+/// `CallbackInfo`, locals of the method it is injected into (`LocalCapture`'s, or MixinExtras'
+/// `@Local` ones): the runtime hands those it has at the place, each by its type
+/// ([`LOCAL_PLACES`]).
+fn local_handler(h: &crate::class::Method) -> bool {
+    const INFO: &str = "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;";
+    h.desc.ends_with(")V")
+        && h.desc
+            .find(INFO)
+            .is_some_and(|at| !h.desc[at + INFO.len()..].starts_with(')'))
+}
+
 /// An `@At`'s `args` (`["doubleValue=0.25d", "log=true"]`, joined by `,`) as pairs.
 fn at_args(v: &str) -> BTreeMap<String, String> {
     let mut out: Vec<(String, String)> = Vec::new();
@@ -1071,9 +1090,12 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                 // its returns, where the runtime has the object in hand as the method begins
                 // or ends (a level's tick, the end of its constructor), and only a plain
                 // `@Inject` that takes the method's arguments, or none, and a `CallbackInfo`.
+                // One that captures locals too, anywhere in a method whose locals the runtime
+                // has ([`LOCAL_PLACES`]).
                 for h in mixin.methods.iter().filter(|h| h.code.is_some()) {
                     let instance = h.access & 0x0008 == 0;
-                    if instance && !plain_handler(h) {
+                    let plain = plain_handler(h);
+                    if instance && !plain && !local_handler(h) {
                         continue;
                     }
                     for a in &h.annotations {
@@ -1088,9 +1110,12 @@ pub fn plan_with(classes: &[&ClassFile], configs: &[crate::MixinConfig]) -> Plan
                             // `name(desc)`, with or without the class before it.
                             let name = method.split('(').next().unwrap_or("");
                             let name = name.rsplit([';', '.']).next().unwrap_or(name);
+                            let locals_known = LOCAL_PLACES.contains(&(target_name.as_str(), name));
                             for at in a.nested("at").iter().filter_map(|at| parse_at(at).ok()) {
                                 if instance
-                                    && !matches!(at, At::Head | At::Return { .. } | At::Tail)
+                                    && !locals_known
+                                    && !(plain
+                                        && matches!(at, At::Head | At::Return { .. } | At::Tail))
                                 {
                                     continue;
                                 }
@@ -1593,5 +1618,53 @@ mod tests {
             plan.vanilla["lib/mixin/GameDataMixin"],
             ["net/neoforged/neoforge/registries/GameData"]
         );
+        // An instance handler that captures locals: listed where the runtime has the method's
+        // locals in hand (`RecipeManager.apply`'s builders), and nowhere else.
+        const ADDS: &str = "(Ljava/util/Map;Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;Lcom/google/common/collect/ImmutableMultimap$Builder;)V";
+        let built = at(&[
+            ("value", "INVOKE_ASSIGN"),
+            (
+                "target",
+                "Lcom/google/common/collect/ImmutableMap;builder()Lcom/google/common/collect/ImmutableMap$Builder;",
+            ),
+        ]);
+        let class = |name: &str, target: &str, into: &str| ClassFile {
+            pool: Vec::new(),
+            access: 0x0021,
+            name: name.to_owned(),
+            superclass: Some("java/lang/Object".to_owned()),
+            interfaces: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![method(
+                "adds",
+                ADDS,
+                0x0001,
+                vec![note(
+                    "injection/Inject",
+                    &[("method", into)],
+                    vec![built.clone()],
+                )],
+            )],
+            bootstrap: Vec::new(),
+            annotations: vec![note("Mixin", &[("value", target)], Vec::new())],
+            signature: None,
+        };
+        let recipes = class(
+            "lib/mixin/RecipeManagerMixin",
+            "Lnet/minecraft/world/item/crafting/RecipeManager;",
+            "apply(Ljava/util/Map;)V",
+        );
+        let elsewhere = class(
+            "lib/mixin/OtherMixin",
+            "Lnet/neoforged/neoforge/registries/GameData;",
+            "postRegisterEvents",
+        );
+        let plan = plan_with(&[&recipes, &elsewhere], &[]);
+        let expected: BTreeMap<String, Vec<String>> = [(
+            format!("lib/mixin/RecipeManagerMixin.adds.{ADDS}"),
+            vec!["hz/inject:net/minecraft/world/item/crafting/RecipeManager.apply@INVOKE:builder:AFTER".to_owned()],
+        )]
+        .into();
+        assert_eq!(plan.native, expected);
     }
 }

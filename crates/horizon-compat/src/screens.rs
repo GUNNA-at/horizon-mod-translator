@@ -1037,6 +1037,30 @@ fn key_calls(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Op
 
 // ---- Minecraft ----
 
+/// The tasks given to the client's thread while the mods loaded, in order.
+fn client_tasks(rt: &mut Rt) -> V {
+    rt.intern("compat:client-tasks".into(), |rt| {
+        crate::jutil::new_list(rt, Vec::new())
+    })
+}
+
+/// Runs what was given to the client's thread while the mods loaded, once the client has its
+/// resources (as they first load, or at its first tick), each in the order it was given.
+pub(crate) fn run_client_tasks(rt: &mut Rt) {
+    let Some(&queue) = rt.interned.get("compat:client-tasks") else {
+        return;
+    };
+    let tasks = crate::jutil::elements(rt, queue);
+    if tasks.is_empty() {
+        return;
+    }
+    crate::api::call(rt, "java/util/List.clear.()V", &[queue]);
+    for task in tasks {
+        rt.call_functional(RUN, task, &[]);
+        rt.report_thrown("a task for the client thread");
+    }
+}
+
 fn client_calls(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     Some(match name {
@@ -1054,9 +1078,22 @@ fn client_calls(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             V::Void
         }
         // The client thread's queue (`BlockableEventLoop.tell`, `execute`): run now, on it.
+        // Not while the mods load: they load off the client's thread on a JVM, where the
+        // task waits in the queue until the client runs it, its resources there to read by
+        // then (Immersive Portals reads its shaders' text in such a task). Here it waits for
+        // the client's resources to load ([`run_client_tasks`]).
         "tell" | "execute" | "submit" => {
-            rt.call_functional(RUN, a(1), &[]);
-            rt.report_thrown("a task for the client thread");
+            if rt.host().is_none() {
+                let queue = client_tasks(rt);
+                crate::api::call(
+                    rt,
+                    "java/util/List.add.(Ljava/lang/Object;)Z",
+                    &[queue, a(1)],
+                );
+            } else {
+                rt.call_functional(RUN, a(1), &[]);
+                rt.report_thrown("a task for the client thread");
+            }
             if name == "submit" { crate::jutil::completed_future(rt, V::NULL) } else { V::Void }
         }
         "isSameThread" => V::I(1),
@@ -1341,6 +1378,46 @@ mod tests {
     use crate::host::{GuiDraw, MemoryHost};
 
     const TEST_SCREEN: &str = "test/ValueScreen";
+
+    /// A task given to the client's thread while the mods load waits until the client has its
+    /// resources; given in the game, it runs at once.
+    #[test]
+    fn a_task_for_the_client_waits_while_the_mods_load() {
+        fn ran(rt: &mut Rt, _key: &'static str, _short: &'static str, args: &[V]) -> V {
+            let count = rt.get_field(args[0], "runs").i();
+            rt.put_field(args[0], "runs", V::I(count + 1));
+            V::Void
+        }
+        let mut rt = Rt::new();
+        rt.vcall = Some(ran);
+        rt.supers.insert("t/Task", "java/lang/Object");
+        let task = rt.new_object_id("t/Task", 9);
+        let mc = crate::api::call(
+            &mut rt,
+            "net/minecraft/client/Minecraft.getInstance.()Lnet/minecraft/client/Minecraft;",
+            &[],
+        );
+        crate::api::call(
+            &mut rt,
+            "net/minecraft/client/Minecraft.execute.(Ljava/lang/Runnable;)V",
+            &[mc, task],
+        );
+        assert_eq!(rt.get_field(task, "runs").i(), 0);
+        let mut host = MemoryHost::default();
+        rt.with_host(&mut host, |rt| {
+            run_client_tasks(rt);
+            assert_eq!(rt.get_field(task, "runs").i(), 1);
+            // Nothing is left to run again; in the game a task runs where it is given.
+            run_client_tasks(rt);
+            assert_eq!(rt.get_field(task, "runs").i(), 1);
+            crate::api::call(
+                rt,
+                "net/minecraft/client/Minecraft.execute.(Ljava/lang/Runnable;)V",
+                &[mc, task],
+            );
+            assert_eq!(rt.get_field(task, "runs").i(), 2);
+        });
+    }
 
     /// The test screen (`test/ValueScreen`): `init` adds nothing and counts; `mouseReleased`
     /// with the use key's button sends a payload and closes, as Create's value settings do;

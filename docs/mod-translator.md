@@ -10842,6 +10842,47 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     itself whether it is static, so invoking it reads no table.
   - Open from this launch: the game's physical footprint peaked at 30 GB while loading
     (13 GB once in the world), on a machine of 24.
+- [x] 2026-11-11 Part 187: the recipe manager's tables.
+  - Launch 21 (Parts 184 to 186: 2,181 s, 575 crates, 2,036,392,496 bytes): the server ticks
+    20 times a second. In 20 s it made 411 ticks with 5.3 s of them in the mods' hooks, where
+    launch 20 made 43; Waves' listener takes 0.07 ms of a player's tick (312 ms before) and
+    Structurize's no longer shows. The motor still turns the shaft. 24 uncaught exceptions
+    (25), 869 unmapped lines (950). Ready after 371 s, 43 s later than launch 20: Chisels &
+    Bits builds its sphere shapes bit by bit, 7 million calls of a lambda, in its mod's
+    constructor; in launch 20 that ended just under the 90 s a piece of a mod may run without
+    coming back, and here just over, so the mod was stopped. The window's thread is the slow
+    one now (Part 188).
+  - Slice and Dice, Create: Dragons Plus and Bookshelf read `RecipeManager`'s `byName` and
+    `byType` through accessors, and the first two put larger tables in their place, with the
+    recipes they make up. The manager had no such tables (`getByName(...) must not be null`).
+    Asked for, a table is made of every recipe the game has and kept in the manager under
+    the field's name, where an accessor and a `@Shadow` both find it. A table a mod puts
+    there is seen by being another object, and from then on is what the manager answers
+    from: each type's recipes are what it holds for the type, and a recipe it leaves out is
+    gone. A table asked for where the game has no recipes to hand is empty and not kept, and
+    what a mod makes of that one only adds to the files' recipes.
+  - The tables are those of the manager the server's resources hold: FastSuite and Recipe
+    Essentials put a caching subclass of their own in `ReloadableServerResources.recipes`,
+    and Slice and Dice asks that object.
+  - Each load of the server's data forgets the recipes of the last and the tables made of
+    them. Before, `/reload` kept the recipes the first load had read.
+  - `RecipeManager.apply` is a place now. Cucumber injects where it has made the two builders
+    its recipes go into and captures them (`@Local`), to post the event Mystical Agriculture
+    adds its crops' recipes at. A handler that captures locals is listed for the methods
+    whose locals the runtime has in hand (this one), and gets each by its type after its
+    `CallbackInfo`; what the handlers put in the builders stands with the files' recipes.
+    The handlers at the method's end run after (Bookshelf counts the reloads there). One at
+    its head is handed the files as JSON to change, which the game reads itself: not run.
+  - Every host that holds the game hands over its recipes and what its tags hold. Only three
+    did: the hook the server's data loads in had none, so the tables asked for there would
+    have been empty, and the window's thread saw no recipe at all.
+  - Guava's immutable multimaps and their builders (`put`, `putAll` of a key's values, of a
+    multimap, of entries; `copyOf`, `of`), and `create(multimap)` of the mutable ones, which
+    made an empty one.
+  - `Map.remove(key, value)` removes the entry only when it holds that value (Lucene's
+    directory renames a file with it; GuideME's index stopped at "File was unexpectedly
+    replaced"). A task given to the client's thread while the mods load waits until the
+    client's resources are there to read (Immersive Portals reads a shader's text in one).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

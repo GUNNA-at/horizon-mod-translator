@@ -2496,7 +2496,27 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
         // Guava: a row → (column → value) table, and key → collection multimaps.
         (o, "create") if (o.ends_with("BasedTable") || o.ends_with("Multimap")) && o.starts_with("com/google/common/collect/") => {
             let class: &'static str = rt.static_key(o);
-            rt.alloc(class, Data::Table(Table::default()))
+            let made = rt.alloc(class, Data::Table(Table::default()));
+            // `create(multimap)`: with what another holds.
+            if desc.starts_with("(Lcom/google/common/collect/Multimap;") {
+                multimap_call(rt, "putAll", &[made, a(0)]);
+            }
+            made
+        }
+        // Guava's immutable multimaps: `of(key, value...)` and `copyOf(a multimap, or entries)`.
+        (
+            IMMUTABLE_MULTIMAP | IMMUTABLE_LIST_MULTIMAP | IMMUTABLE_SET_MULTIMAP,
+            "of" | "copyOf",
+        ) => {
+            let made = rt.alloc(immutable_multimap(owner), Data::Table(Table::default()));
+            if name == "copyOf" {
+                multimap_call(rt, "putAll", &[made, a(0)]);
+            } else {
+                for pair in args.chunks_exact(2) {
+                    multimap_call(rt, "put", &[made, pair[0], pair[1]]);
+                }
+            }
+            made
         }
         // `Multimaps.newMultimap(map, factory)` (`newListMultimap`, `newSetMultimap`): an empty
         // multimap whose keys hold the factory's collections, a set holding each value once.
@@ -2553,11 +2573,14 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             | "com/google/common/collect/ImmutableSortedSet"
             | "com/google/common/collect/ImmutableMap"
             | "com/google/common/collect/ImmutableSortedMap"
-            | "com/google/common/collect/ImmutableBiMap",
+            | "com/google/common/collect/ImmutableBiMap"
+            | IMMUTABLE_MULTIMAP
+            | IMMUTABLE_LIST_MULTIMAP
+            | IMMUTABLE_SET_MULTIMAP,
             "builder" | "builderWithExpectedSize" | "naturalOrder",
         ) => {
             let class: &'static str = rt.static_key(&format!("{owner}$Builder"));
-            if owner.ends_with("Map") {
+            if owner.ends_with("Map") || owner.ends_with("Multimap") {
                 rt.alloc(class, Data::Table(Table::default()))
             } else {
                 rt.alloc(class, Data::List(Vec::new()))
@@ -4002,6 +4025,19 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             V::Void
         }
+        // `remove(key, value)`: only where the key holds that value, and whether it did.
+        // Lucene's in-memory directory renames a file so (`files.remove(source, file)`), and
+        // took the answer for "replaced meanwhile": GuideME's index never opened.
+        "remove" if desc.ends_with(")Z") && crate::jlang::kinds(desc).len() == 2 => {
+            let holds = match table_get(rt, this, a(1)) {
+                Some(cur) => equals(rt, cur, a(2)) || (is_null(cur) && is_null(a(2))),
+                None => false,
+            };
+            if holds {
+                table_remove(rt, this, a(1));
+            }
+            V::I(holds as i32)
+        }
         "remove" => {
             let v = table_remove(rt, this, a(1));
             found(rt, v)
@@ -4236,9 +4272,15 @@ fn immutable_builder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
     let map = owner.ends_with("Map$Builder");
+    // A multimap's builder is a multimap being filled ([`multimap_call`]).
+    let multi = owner.ends_with("Multimap$Builder");
     Some(match name {
         "<init>" => {
-            let data = if map { Data::Table(Table::default()) } else { Data::List(Vec::new()) };
+            let data = if map || multi {
+                Data::Table(Table::default())
+            } else {
+                Data::List(Vec::new())
+            };
             if let Some(o) = rt.heap.get_mut(this.r() as usize) {
                 o.data = data;
             }
@@ -4272,6 +4314,34 @@ fn immutable_builder_call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args
             }
             this
         }
+        "put" if multi => {
+            if desc.starts_with("(Ljava/util/Map$Entry;") {
+                let kv = elements(rt, a(1));
+                multimap_call(
+                    rt,
+                    "put",
+                    &[
+                        this,
+                        kv.first().copied().unwrap_or_default(),
+                        kv.get(1).copied().unwrap_or_default(),
+                    ],
+                );
+            } else {
+                multimap_call(rt, "put", args);
+            }
+            this
+        }
+        // (`putAll(key, values)`, `putAll(multimap)`, `putAll(entries)`.)
+        "putAll" if multi => {
+            multimap_call(rt, "putAll", args);
+            this
+        }
+        "orderKeysBy" | "orderValuesBy" | "expectedValuesPerKey" if multi => this,
+        "build" | "buildOrThrow" if multi => {
+            let made = rt.alloc(immutable_multimap(owner), Data::Table(Table::default()));
+            multimap_call(rt, "putAll", &[made, this]);
+            made
+        }
         "putAll" if map => {
             for (k, v) in table_entries(rt, a(1)) {
                 table_put(rt, this, k, v);
@@ -4304,6 +4374,20 @@ fn this_as_map(rt: &mut Rt, this: V) -> V {
     out
 }
 
+const IMMUTABLE_MULTIMAP: &str = "com/google/common/collect/ImmutableMultimap";
+const IMMUTABLE_LIST_MULTIMAP: &str = "com/google/common/collect/ImmutableListMultimap";
+const IMMUTABLE_SET_MULTIMAP: &str = "com/google/common/collect/ImmutableSetMultimap";
+
+/// The class of the immutable multimap `owner` (one of them, or a builder of one) makes: a
+/// set's values once each, a list's as they came (`ImmutableMultimap` itself makes lists).
+fn immutable_multimap(owner: &str) -> &'static str {
+    if owner.contains("SetMultimap") {
+        IMMUTABLE_SET_MULTIMAP
+    } else {
+        IMMUTABLE_LIST_MULTIMAP
+    }
+}
+
 fn multimap_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -4332,6 +4416,36 @@ fn multimap_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
                 list_mut(rt, c)?.push(a(2));
                 V::I(1)
             }
+        }
+        // `putAll(multimap)`: every value of every key of another (or of a builder of one), and
+        // `putAll(entries)`.
+        "putAll" if args.len() == 2 => {
+            let from = a(1);
+            let other = rt.class_of(from).starts_with("com/google/common/collect/")
+                && rt.class_of(from).contains("Multimap")
+                && matches!(
+                    rt.heap.get(from.r() as usize).map(|o| &o.data),
+                    Some(Data::Table(_))
+                );
+            let mut pairs = Vec::new();
+            if other {
+                for (k, c) in table_entries(rt, from) {
+                    pairs.extend(elements(rt, c).into_iter().map(|v| (k, v)));
+                }
+            } else {
+                for e in elements(rt, from) {
+                    let kv = elements(rt, e);
+                    pairs.push((
+                        kv.first().copied().unwrap_or_default(),
+                        kv.get(1).copied().unwrap_or_default(),
+                    ));
+                }
+            }
+            let mut changed = false;
+            for (k, v) in pairs {
+                changed |= multimap_call(rt, "put", &[this, k, v]) == Some(V::I(1));
+            }
+            V::I(changed as i32)
         }
         "putAll" => {
             let c = values(rt, a(1), true)?;
@@ -5002,6 +5116,49 @@ mod tests {
 
     fn c(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         call(rt, key, args).unwrap_or_else(|| panic!("unmodelled {key}"))
+    }
+
+    /// `Map.remove(key, value)` takes the entry out only where the key holds that value, and
+    /// says whether it did; `remove(key)` whatever it holds.
+    #[test]
+    fn a_map_removes_a_key_with_a_given_value() {
+        let mut rt = Rt::new();
+        let m = rt.new_object("java/util/concurrent/ConcurrentHashMap");
+        c(
+            &mut rt,
+            "java/util/concurrent/ConcurrentHashMap.<init>.()V",
+            &[m],
+        );
+        let (k, one, two) = (
+            rt.string("pending_segments_1"),
+            rt.new_object("t/File"),
+            rt.new_object("t/File"),
+        );
+        c(
+            &mut rt,
+            "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[m, k, one],
+        );
+        const REMOVE: &str =
+            "java/util/concurrent/ConcurrentHashMap.remove.(Ljava/lang/Object;Ljava/lang/Object;)Z";
+        assert_eq!(c(&mut rt, REMOVE, &[m, k, two]), V::I(0));
+        assert_eq!(c(&mut rt, "java/util/Map.size.()I", &[m]), V::I(1));
+        assert_eq!(c(&mut rt, REMOVE, &[m, k, one]), V::I(1));
+        assert_eq!(c(&mut rt, "java/util/Map.size.()I", &[m]), V::I(0));
+        assert_eq!(c(&mut rt, REMOVE, &[m, k, one]), V::I(0));
+        c(
+            &mut rt,
+            "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[m, k, two],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Map.remove.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[m, k]
+            ),
+            two
+        );
     }
 
     #[test]
@@ -6215,6 +6372,104 @@ mod tests {
         let got = c(&mut rt, "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;", &[m, block]);
         assert_eq!(elements(&rt, got), [V::I(7), V::I(8)]);
         assert_eq!(c(&mut rt, "com/google/common/collect/Multimap.size.()I", &[m]), V::I(2));
+    }
+
+    /// Guava's immutable multimaps: a builder takes a value, a key's values, another multimap's
+    /// and entries, and builds what it holds (a set's values once each); `copyOf` and a mutable
+    /// one's `create(multimap)` copy another, which then changes without them.
+    #[test]
+    fn an_immutable_multimap_is_built_and_copied() {
+        let mut rt = Rt::new();
+        crate::install();
+        let (a, b) = (rt.string("a"), rt.string("b"));
+        let size = "com/google/common/collect/Multimap.size.()I";
+        let get =
+            "com/google/common/collect/Multimap.get.(Ljava/lang/Object;)Ljava/util/Collection;";
+        let put = "com/google/common/collect/Multimap.put.(Ljava/lang/Object;Ljava/lang/Object;)Z";
+        let source = c(
+            &mut rt,
+            "com/google/common/collect/ArrayListMultimap.create.()Lcom/google/common/collect/ArrayListMultimap;",
+            &[],
+        );
+        c(&mut rt, put, &[source, a, V::I(1)]);
+        c(&mut rt, put, &[source, b, V::I(2)]);
+        // `new ImmutableMultimap.Builder<>()`, as Slice and Dice makes it.
+        let builder = rt.new_object("com/google/common/collect/ImmutableMultimap$Builder");
+        c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap$Builder.<init>.()V",
+            &[builder],
+        );
+        let all = "com/google/common/collect/ImmutableMultimap$Builder.putAll.(Lcom/google/common/collect/Multimap;)Lcom/google/common/collect/ImmutableMultimap$Builder;";
+        assert_eq!(c(&mut rt, all, &[builder, source]), builder);
+        c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap$Builder.put.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableMultimap$Builder;",
+            &[builder, a, V::I(3)],
+        );
+        let more = new_list(&mut rt, vec![V::I(4), V::I(5)]);
+        c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap$Builder.putAll.(Ljava/lang/Object;Ljava/lang/Iterable;)Lcom/google/common/collect/ImmutableMultimap$Builder;",
+            &[builder, b, more],
+        );
+        let built = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap$Builder.build.()Lcom/google/common/collect/ImmutableMultimap;",
+            &[builder],
+        );
+        assert_eq!(c(&mut rt, size, &[built]), V::I(5));
+        let of_a = c(&mut rt, get, &[built, a]);
+        assert_eq!(elements(&rt, of_a), [V::I(1), V::I(3)]);
+        let of_b = c(&mut rt, get, &[built, b]);
+        assert_eq!(elements(&rt, of_b), [V::I(2), V::I(4), V::I(5)]);
+        // What was built does not grow with its builder, nor a copy with what it was made of.
+        c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap$Builder.put.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableMultimap$Builder;",
+            &[builder, a, V::I(9)],
+        );
+        assert_eq!(c(&mut rt, size, &[built]), V::I(5));
+        let copy = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap.copyOf.(Lcom/google/common/collect/Multimap;)Lcom/google/common/collect/ImmutableMultimap;",
+            &[source],
+        );
+        let sets = c(
+            &mut rt,
+            "com/google/common/collect/HashMultimap.create.(Lcom/google/common/collect/Multimap;)Lcom/google/common/collect/HashMultimap;",
+            &[built],
+        );
+        c(&mut rt, put, &[source, a, V::I(7)]);
+        assert_eq!(c(&mut rt, size, &[copy]), V::I(2));
+        assert_eq!(c(&mut rt, size, &[sets]), V::I(5));
+        // A set's builder holds a value once; `of` is one key's one value.
+        let set = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableSetMultimap.builder.()Lcom/google/common/collect/ImmutableSetMultimap$Builder;",
+            &[],
+        );
+        for _ in 0..2 {
+            c(
+                &mut rt,
+                "com/google/common/collect/ImmutableSetMultimap$Builder.put.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableSetMultimap$Builder;",
+                &[set, a, V::I(1)],
+            );
+        }
+        let set = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableSetMultimap$Builder.build.()Lcom/google/common/collect/ImmutableSetMultimap;",
+            &[set],
+        );
+        assert_eq!(c(&mut rt, size, &[set]), V::I(1));
+        let one = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableMultimap.of.(Ljava/lang/Object;Ljava/lang/Object;)Lcom/google/common/collect/ImmutableMultimap;",
+            &[a, V::I(6)],
+        );
+        let held = c(&mut rt, get, &[one, a]);
+        assert_eq!(elements(&rt, held), [V::I(6)]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `Multimaps.newMultimap(new HashMap<>(), HashSet::new)` (Create's station screen): the keys

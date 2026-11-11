@@ -7,7 +7,9 @@
 //! game's object it has in hand: `@Inject` handlers at the method's `HEAD`, `RETURN` or `TAIL`
 //! that take the method's own arguments, or none, and a `CallbackInfo`. The translator lists
 //! each among its mixin class's subscribers by the place it names
-//! (`hz/inject:<owner>.<method>@<place>`), with the lambda that runs it.
+//! (`hz/inject:<owner>.<method>@<place>`), with the lambda that runs it. Where the runtime has
+//! a method's locals in hand too (the builders `RecipeManager.apply` fills), a handler may
+//! capture them after its `CallbackInfo` ([`at_locals`]).
 //!
 //! A static handler listens for its place as for an event ([`crate::neo`]'s `at_place`); these
 //! run on an object, so they are kept here by place, and called with it.
@@ -18,6 +20,7 @@ use std::rc::Rc;
 
 /// What the name of a place starts with.
 pub(crate) const PLACE: &str = "hz/inject:";
+const CALLBACK_INFO: &str = "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;";
 
 /// An instance handler a mixin injects at a place of the game's code.
 struct Handler {
@@ -27,6 +30,8 @@ struct Handler {
     lid: u32,
     /// The types of its parameters before the `CallbackInfo`: the target method's own, or none.
     params: Vec<String>,
+    /// The types of those after it: the locals of the target method it captures.
+    locals: Vec<String>,
 }
 
 impl Handler {
@@ -109,9 +114,19 @@ impl Places {
             events.sort_unstable();
             let desc = key.find(".(").map_or("", |at| &key[at + 1..]);
             let mut params = crate::neo::desc_params(desc);
-            // The `CallbackInfo`.
+            // The `CallbackInfo` (the last parameter, or the one the captured locals follow).
+            let info = params
+                .iter()
+                .rposition(|p| p == CALLBACK_INFO)
+                .map_or(params.len(), |at| at + 1);
+            let locals = params.split_off(info.min(params.len()));
             params.pop();
-            let handler = Rc::new(Handler { key, lid, params });
+            let handler = Rc::new(Handler {
+                key,
+                lid,
+                params,
+                locals,
+            });
             let classes: Vec<Option<&'static str>> =
                 events.iter().copied().map(constructed_class).collect();
             if classes.iter().all(Option::is_some) {
@@ -201,9 +216,9 @@ fn places(rt: &mut Rt) -> Rc<Places> {
     found
 }
 
-/// Runs handler `h` on the game's object `object` with `arguments` and the `CallbackInfo` of
-/// the method `method`. What it throws is left thrown.
-fn run(rt: &mut Rt, h: &Handler, object: V, arguments: &[V], method: &str) {
+/// Runs handler `h` on the game's object `object` with `arguments`, the `CallbackInfo` of the
+/// method `method` and the locals it captures. What it throws is left thrown.
+fn run(rt: &mut Rt, h: &Handler, object: V, arguments: &[V], locals: &[V], method: &str) {
     let Some(call) = rt.lambda_call else { return };
     let info = rt.new_object(crate::mixin::CALLBACK_INFO);
     let name = rt.string(method);
@@ -216,11 +231,12 @@ fn run(rt: &mut Rt, h: &Handler, object: V, arguments: &[V], method: &str) {
         &[info, name, V::I(1)],
     );
     // No lambda object before them: nothing is captured, the handler runs on exactly these.
-    let mut full = Vec::with_capacity(arguments.len() + 3);
+    let mut full = Vec::with_capacity(arguments.len() + locals.len() + 3);
     full.push(V::NULL);
     full.push(object);
     full.extend_from_slice(arguments);
     full.push(info);
+    full.extend_from_slice(locals);
     call(rt, h.lid, &full);
 }
 
@@ -230,6 +246,20 @@ fn run(rt: &mut Rt, h: &Handler, object: V, arguments: &[V], method: &str) {
 /// none gets none, and one that takes others was written for another method of the name, so it
 /// is not this place's. A handler that throws is told of, and the next one runs.
 pub(crate) fn at(rt: &mut Rt, place: &str, object: V, given: &[(&str, V)]) {
+    at_locals(rt, place, object, given, &[]);
+}
+
+/// [`at`], at a place where the runtime has locals of the method in hand (`locals`, each by its
+/// type, in the method's order): a handler that captures locals after its `CallbackInfo`
+/// (`LocalCapture`'s, MixinExtras' `@Local` ones) gets for each the first one of its type not
+/// yet taken, and one that captures a local the runtime has none for is not run.
+pub(crate) fn at_locals(
+    rt: &mut Rt,
+    place: &str,
+    object: V,
+    given: &[(&str, V)],
+    locals: &[(&str, V)],
+) {
     let all = places(rt);
     let Some(handlers) = all.at.get(place) else {
         return;
@@ -246,7 +276,18 @@ pub(crate) fn at(rt: &mut Rt, place: &str, object: V, given: &[(&str, V)]) {
         } else {
             continue;
         };
-        run(rt, h, object, &arguments, method);
+        let mut left: Vec<(&str, V)> = locals.to_vec();
+        let mut captured = Vec::with_capacity(h.locals.len());
+        for wanted in &h.locals {
+            let Some(found) = left.iter().position(|(ty, _)| ty == wanted) else {
+                break;
+            };
+            captured.push(left.remove(found).1);
+        }
+        if captured.len() != h.locals.len() {
+            continue;
+        }
+        run(rt, h, object, &arguments, &captured, method);
         if rt.thrown.is_some() {
             rt.report_thrown(&format!("{} at {}", h.key, &place[PLACE.len()..]));
         }
@@ -267,7 +308,7 @@ fn ended(rt: &mut Rt, object: V, class: &str, chain: &Chain, given: &[(&str, V)]
     CONSTRUCTING.with(|c| c.borrow_mut().push(object.r()));
     for (target, h) in chain.iter() {
         let arguments = h.arguments(given, *target == class);
-        run(rt, h, object, &arguments, "<init>");
+        run(rt, h, object, &arguments, &[], "<init>");
         if rt.thrown.is_some() {
             if thrown_on {
                 break;
@@ -363,7 +404,7 @@ pub(crate) fn constructed_late(rt: &mut Rt, object: V, mixin: &str) {
     };
     for h in handlers {
         let arguments = h.arguments(&[], false);
-        run(rt, h, object, &arguments, "<init>");
+        run(rt, h, object, &arguments, &[], "<init>");
         if rt.thrown.is_some() {
             rt.report_thrown(&format!("{} at the end of a constructor", h.key));
         }
@@ -482,6 +523,15 @@ pub(crate) const RESTORE_FROM: Method = method!(
     "restoreFrom",
     "Lnet/minecraft/server/level/ServerPlayer;",
     "Z"
+);
+/// `RecipeManager.apply(files, resources, profiler)`: the server's recipes load
+/// ([`crate::recipes::applied`]).
+pub(crate) const RECIPES_APPLY: Method = method!(
+    "net/minecraft/world/item/crafting/RecipeManager",
+    "apply",
+    "Ljava/util/Map;",
+    "Lnet/minecraft/server/packs/resources/ResourceManager;",
+    "Lnet/minecraft/util/profiling/ProfilerFiller;"
 );
 /// `ReloadableServerResources.updateRegistryTags()`: the loaded tags bind to the registries.
 pub(crate) const UPDATE_REGISTRY_TAGS: Method = method!(
@@ -649,6 +699,64 @@ mod tests {
             rt.subscribers.insert(*class, all.clone());
         }
         rt
+    }
+
+    /// A handler that captures locals of the method gets them where the runtime has them in
+    /// hand, each by its type, after its `CallbackInfo`; one that captures a local the runtime
+    /// has none for is not run, and where the runtime hands no locals neither is.
+    #[test]
+    fn a_handler_captures_the_locals_the_runtime_has() {
+        const BUILT: &str =
+            "hz/inject:net/minecraft/world/item/crafting/RecipeManager.apply@INVOKE:builder:AFTER";
+        fn captures(rt: &mut Rt, lid: u32, args: &[V]) -> Option<V> {
+            let list = rt.interned["test:log"];
+            crate::jutil::list_add(rt, list, V::I(lid as i32));
+            for &v in &args[1..] {
+                crate::jutil::list_add(rt, list, v);
+            }
+            Some(V::Void)
+        }
+        let mut rt = runtime(&[(
+            "t/RecipesMixin",
+            vec![
+                (
+                    BUILT,
+                    "t/RecipesMixin.adds.(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;Ljava/util/Map;Ljava/util/List;)V",
+                    false,
+                    1,
+                ),
+                (
+                    BUILT,
+                    "t/RecipesMixin.wants.(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;Ljava/util/Set;)V",
+                    false,
+                    2,
+                ),
+            ],
+        )]);
+        rt.lambda_call = Some(captures);
+        let manager = rt.new_object("net/minecraft/world/item/crafting/RecipeManager");
+        let (list, map) = (
+            rt.new_object("java/util/ArrayList"),
+            rt.new_object("java/util/HashMap"),
+        );
+        // The locals in the method's order; the handler takes them in its own.
+        at_locals(
+            &mut rt,
+            BUILT,
+            manager,
+            &[],
+            &[("Ljava/util/List;", list), ("Ljava/util/Map;", map)],
+        );
+        let log = rt.interned["test:log"];
+        let seen = crate::jutil::elements(&rt, log);
+        assert_eq!(seen.len(), 5);
+        assert_eq!(
+            (seen[0], seen[1], seen[3], seen[4]),
+            (V::I(1), manager, map, list)
+        );
+        assert_eq!(rt.class_of(seen[2]), crate::mixin::CALLBACK_INFO);
+        at(&mut rt, BUILT, manager, &[]);
+        assert_eq!(crate::jutil::elements(&rt, log).len(), 5);
     }
 
     /// A handler at a method's head runs on the object with the method's arguments, one that

@@ -839,9 +839,6 @@ fn client_host(c: &str, id: &str) -> String {
         fn is_server(&self) -> bool {{
             false
         }}
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.get().native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
-        }}
         fn send_payload(&mut self, to: {c}::host::PayloadTarget, channel: &str, data: &[u8]) -> bool {{
             to == {c}::host::PayloadTarget::Server && self.game.get_mut().is_some_and(|g| g.native_net_send_to_server(channel, data).is_ok())
         }}
@@ -1272,11 +1269,6 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
         }}
         fn is_server(&self) -> bool {{
             false
-        }}
-        // Which items exist (an update tag's stacks are read through it: an item the client
-        // didn't know would read as an empty stack) and what a tag holds.
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
         fn game_time(&self) -> i64 {{
             self.draw.game_time
@@ -2725,12 +2717,6 @@ fn game_host(c: &str, server_send: &str) -> String {
             let dim = self.game.native_dimension();
             self.game.native_server_players().into_iter().filter(|p| p.dimension == dim).map(|p| (p.uuid, p.position)).collect()
         }}
-        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
-            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
-        }}
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
-        }}
         fn game_time(&self) -> i64 {{
             self.game.native_game_time()
         }}
@@ -2838,12 +2824,6 @@ fn spawn_host(c: &str) -> String {
             let dim = self.game.native_dimension();
             self.game.native_server_players().into_iter().filter(|p| p.dimension == dim).map(|p| (p.uuid, p.position)).collect()
         }}
-        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
-            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
-        }}
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
-        }}
         fn game_time(&self) -> i64 {{
             self.game.native_game_time()
         }}
@@ -2876,6 +2856,14 @@ fn world_reads(get: &str, c: &str) -> String {
     format!(
         r#"        fn day_time(&self) -> i64 {{
             {get}.native_day_time()
+        }}
+        // The game's recipes and what its tags hold: wherever the game is in hand (a hook
+        // without them made a mod's table of every recipe an empty one).
+        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
+            {get}.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
+        }}
+        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
+            {get}.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
         fn local_difficulty(&self, pos: [i32; 3]) -> (i32, f32) {{
             {get}.native_local_difficulty(pos)
@@ -3818,12 +3806,6 @@ fn player_host(c: &str, server_effects: &str) -> String {
         fn players(&self) -> Vec<(u128, [f64; 3])> {{
             let dim = self.game.native_dimension();
             self.game.native_server_players().into_iter().filter(|p| p.dimension == dim).map(|p| (p.uuid, p.position)).collect()
-        }}
-        fn recipes_of_type(&self, kind: &str) -> Vec<(String, String)> {{
-            self.game.native_recipes_of_type(kind).iter().map(|r| (r.id.clone(), r.json.to_string())).collect()
-        }}
-        fn ingredient_items(&self, entry: &str) -> Vec<String> {{
-            self.game.native_recipe_ingredient(&serde_json::Value::String(entry.to_owned())).map(|i| i.1).unwrap_or_default()
         }}
         fn player_message(&mut self, component: &str, overlay: bool) {{
             let (Some(uuid), Ok(json)) = (self.game.native_acting_player().map(|p| p.uuid), serde_json::from_str::<serde_json::Value>(component)) else {{
