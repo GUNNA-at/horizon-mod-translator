@@ -2,6 +2,28 @@
 //! counts them), `StringBuilder`, the boxed number classes, `Character`, `Math` and `Object`.
 use crate::{Data, Rt, V};
 
+/// The UTF-16 unit at `at` of `s`, as `charAt` counts: its byte while the text up to it is
+/// ASCII (what a scanner's text nearly always is), else found among its units. None past
+/// either end.
+pub(crate) fn char_at(s: &str, at: i32) -> Option<u16> {
+    let i = usize::try_from(at).ok()?;
+    let bytes = s.as_bytes();
+    if i < bytes.len() && bytes[..=i].is_ascii() {
+        return Some(u16::from(bytes[i]));
+    }
+    s.encode_utf16().nth(i)
+}
+
+/// Throws what `charAt` does past the text's end.
+pub(crate) fn throw_char_index(rt: &mut Rt, at: i32, length: usize) -> V {
+    throw_with(
+        rt,
+        "java/lang/StringIndexOutOfBoundsException",
+        &format!("Index {at} out of bounds for length {length}"),
+    );
+    V::I(0)
+}
+
 fn utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
@@ -2876,6 +2898,52 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         _ => {}
     }
     let this = a(0);
+    // What is asked of strings most, answered of the text where it lies: the rest below takes
+    // a copy of it and its UTF-16 for each call, which is most of the cost of a short answer.
+    // (ASCII text has a unit for each byte; a part of a text is the same part of its units.)
+    if let Some(held) = rt.str_of(this) {
+        let other = rt.str_of(a(1));
+        let index = |found: Option<usize>| V::I(found.map_or(-1, |i| i as i32));
+        let fast = match (name, desc) {
+            ("isEmpty", _) => Some(V::I(held.is_empty() as i32)),
+            ("hashCode", _) => Some(V::I(string_hash(held))),
+            ("toString", _) if rt.class_of(this) == "java/lang/String" => Some(this),
+            ("startsWith", "(Ljava/lang/String;)Z") => {
+                other.map(|p| V::I(held.starts_with(p) as i32))
+            }
+            ("endsWith", _) => other.map(|p| V::I(held.ends_with(p) as i32)),
+            ("contains", _) => other.map(|p| V::I(held.contains(p) as i32)),
+            ("indexOf", "(I)I") if held.is_ascii() => match u8::try_from(a(1).i()) {
+                Ok(c) if c.is_ascii() => Some(index(held.bytes().position(|b| b == c))),
+                _ => Some(V::I(-1)),
+            },
+            ("lastIndexOf", "(I)I") if held.is_ascii() => match u8::try_from(a(1).i()) {
+                Ok(c) if c.is_ascii() => Some(index(held.bytes().rposition(|b| b == c))),
+                _ => Some(V::I(-1)),
+            },
+            ("indexOf", "(Ljava/lang/String;)I") if held.is_ascii() => {
+                other.map(|p| index(held.find(p)))
+            }
+            ("lastIndexOf", "(Ljava/lang/String;)I") if held.is_ascii() => {
+                other.map(|p| index(held.rfind(p)))
+            }
+            _ => None,
+        };
+        if let Some(v) = fast {
+            return Some(v);
+        }
+        // A part of an ASCII text: its bytes, the ends kept within it as below.
+        if matches!(name, "substring" | "subSequence") && held.is_ascii() {
+            let lo = (a(1).i().max(0) as usize).min(held.len());
+            let hi = if ks.len() > 1 {
+                (a(2).i().max(0) as usize).min(held.len())
+            } else {
+                held.len()
+            };
+            let part = held[lo..hi.max(lo)].to_owned();
+            return Some(new_str(rt, part));
+        }
+    }
     let s = rt.str_of(this)?.to_owned();
     let u = utf16(&s);
     let arg_s = |rt: &Rt, i: usize| text(rt, a(i));
@@ -2916,7 +2984,11 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
         "equalsIgnoreCase" => V::I(rt.str_of(a(1)).is_some_and(|o| o.to_lowercase() == s.to_lowercase()) as i32),
         "compareTo" => V::I(java_compare(&s, &arg_s(rt, 1))),
         "compareToIgnoreCase" => V::I(compare_ignore_case(&s, &arg_s(rt, 1))),
-        "charAt" => V::I(u.get(a(1).i().max(0) as usize).copied().unwrap_or(0) as i32),
+        // (Past the string's end it throws, as Java's: [`crate::api`] answers the call itself.)
+        "charAt" => match usize::try_from(a(1).i()).ok().and_then(|i| u.get(i)) {
+            Some(c) => V::I(i32::from(*c)),
+            None => throw_char_index(rt, a(1).i(), u.len()),
+        },
         // A code point: where two surrogates meet, the character they make together.
         "codePointAt" | "codePointBefore" => {
             let pair = |high: u16, low: u16| {
@@ -3303,8 +3375,12 @@ fn builder(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Opti
             } else {
                 piece
             };
-            let s = cur(rt) + &piece;
-            set(rt, s);
+            // Onto the text where it lies: with a copy of it all made for each piece, a
+            // long text built piece by piece took the square of its length.
+            match rt.heap.get_mut(this.r() as usize).map(|o| &mut o.data) {
+                Some(Data::Str(s)) => s.push_str(&piece),
+                _ => set(rt, piece),
+            }
             this
         }
         "insert" => {
@@ -3324,9 +3400,24 @@ fn builder(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Opti
             let s = cur(rt);
             new_str(rt, s)
         }
-        "length" => V::I(utf16(&cur(rt)).len() as i32),
-        "isEmpty" => V::I(cur(rt).is_empty() as i32),
-        "charAt" => V::I(utf16(&cur(rt)).get(a(1).i().max(0) as usize).copied().unwrap_or(0) as i32),
+        // What a scanner asks at every character: answered of the text where it lies.
+        "length" | "isEmpty" | "charAt" => {
+            let held = match rt.heap.get(this.r() as usize).map(|o| &o.data) {
+                Some(Data::Str(s)) => s.as_str(),
+                _ => "",
+            };
+            match name {
+                "length" => V::I(held.encode_utf16().count() as i32),
+                "isEmpty" => V::I(held.is_empty() as i32),
+                _ => match char_at(held, a(1).i()) {
+                    Some(c) => V::I(i32::from(c)),
+                    None => {
+                        let length = held.encode_utf16().count();
+                        throw_char_index(rt, a(1).i(), length)
+                    }
+                },
+            }
+        }
         "setLength" => {
             let mut u = utf16(&cur(rt));
             u.resize(a(1).i().max(0) as usize, 0);
@@ -6246,6 +6337,56 @@ mod tests {
         c(&mut rt, "java/lang/StringBuilder.append.(D)Ljava/lang/StringBuilder;", &[b, V::D(1.5)]);
         let s = c(&mut rt, "java/lang/StringBuilder.toString.()Ljava/lang/String;", &[b]);
         assert_eq!(rt.str_of(s), Some("x=-31.5"));
+        // The string it gave is its own: what is appended after is not in it. A character
+        // of the builder is read where it lies, and past its end is an error as Java's.
+        let e = rt.string("\u{e9}!");
+        for _ in 0..10_000 {
+            c(
+                &mut rt,
+                "java/lang/StringBuilder.append.(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+                &[b, e],
+            );
+        }
+        assert_eq!(rt.str_of(s), Some("x=-31.5"));
+        assert_eq!(
+            c(&mut rt, "java/lang/StringBuilder.length.()I", &[b]),
+            V::I(20_007)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/StringBuilder.charAt.(I)C",
+                &[b, V::I(1)]
+            ),
+            V::I('=' as i32)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/StringBuilder.charAt.(I)C",
+                &[b, V::I(20_005)]
+            ),
+            V::I(0xe9)
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/lang/StringBuilder.charAt.(I)C",
+                &[b, V::I(20_006)]
+            ),
+            V::I('!' as i32)
+        );
+        assert!(rt.thrown.is_none());
+        c(
+            &mut rt,
+            "java/lang/StringBuilder.charAt.(I)C",
+            &[b, V::I(20_007)],
+        );
+        let thrown = rt.thrown.take().expect("past the end");
+        assert_eq!(
+            rt.class_of(thrown),
+            "java/lang/StringIndexOutOfBoundsException"
+        );
         let f = rt.string("%s has %03d rpm (%.2f)");
         let n = rt.string("shaft");
         let i = c(&mut rt, "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;", &[V::I(7)]);
@@ -7112,6 +7253,60 @@ mod tests {
             ),
             out
         );
+        // A stream of the mod's own making gets what is printed to it: a trace written into
+        // bytes for a log (JourneyMap's), text and raw bytes.
+        let bytes = rt.new_object("java/io/ByteArrayOutputStream");
+        crate::api::call(
+            &mut rt,
+            "java/io/ByteArrayOutputStream.<init>.()V",
+            &[bytes],
+        );
+        let own = rt.new_object(PRINT_STREAM);
+        crate::api::call(
+            &mut rt,
+            "java/io/PrintStream.<init>.(Ljava/io/OutputStream;)V",
+            &[own, bytes],
+        );
+        crate::api::call(
+            &mut rt,
+            "java/lang/Throwable.printStackTrace.(Ljava/io/PrintStream;)V",
+            &[e, own],
+        );
+        crate::api::call(
+            &mut rt,
+            "java/io/PrintStream.print.(Ljava/lang/String;)V",
+            &[own, x],
+        );
+        crate::api::call(&mut rt, "java/io/PrintStream.write.(I)V", &[own, V::I(33)]);
+        crate::api::call(&mut rt, "java/io/PrintStream.flush.()V", &[own]);
+        let written = crate::api::call(
+            &mut rt,
+            "java/io/ByteArrayOutputStream.toString.()Ljava/lang/String;",
+            &[bytes],
+        );
+        let written = rt.str_of(written).unwrap_or("").to_owned();
+        assert!(written.starts_with("java.lang."), "{written}");
+        assert!(
+            written.ends_with(&format!("{}!", rt.str_of(x).unwrap_or(""))),
+            "{written}"
+        );
+        // Log4j's `Strings`: a null is empty and blank.
+        for (check, of, answer) in [
+            ("isEmpty", V::NULL, 1),
+            ("isNotEmpty", V::NULL, 0),
+            ("isEmpty", x, 0),
+            ("isBlank", V::NULL, 1),
+            ("isNotBlank", x, 1),
+        ] {
+            let key = rt.static_key(&format!(
+                "org/apache/logging/log4j/util/Strings.{check}.(Ljava/lang/CharSequence;)Z"
+            ));
+            assert_eq!(
+                crate::api::call(&mut rt, key, &[of]),
+                V::I(answer),
+                "{check}"
+            );
+        }
         assert!(
             rt.unmapped.is_empty() && rt.thrown.is_none(),
             "{:?}",
@@ -7172,13 +7367,71 @@ pub(crate) fn print_std(err: bool, text: &str) {
     }
 }
 
-/// A `PrintStream` (`System.out`, `System.err`): `print`, `println`, `printf`, `format`,
-/// `append` and `write` print what they are given ([`print_std`]); `flush` and `close` have
-/// nothing to do.
+/// A `PrintStream`: `System.out` and `System.err`, whose `print`, `println`, `printf`,
+/// `format`, `append` and `write` print what they are given ([`print_std`]), or one a mod
+/// makes over a stream of its own (`new PrintStream(out)`, over a file by its name or its
+/// `File`), which gets the text's UTF-8 and is flushed and closed with it.
 fn print_stream(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
     let ks = kinds(desc);
+    let out = rt.get_field(this, "$out");
+    match name {
+        "<init>" => {
+            let inner = if desc.starts_with("(Ljava/io/OutputStream;") {
+                a(1)
+            } else {
+                // A file, by name or `File` (a charset after it or not).
+                let file = rt.new_object("java/io/FileOutputStream");
+                let path = text(rt, a(1));
+                let path = rt.string(&path);
+                crate::api::call(
+                    rt,
+                    "java/io/FileOutputStream.<init>.(Ljava/lang/String;)V",
+                    &[file, path],
+                );
+                file
+            };
+            rt.put_field(this, "$out", inner);
+            return Some(V::Void);
+        }
+        "flush" | "close" if out.r() != 0 => {
+            let key = if name == "flush" {
+                "java/io/OutputStream.flush.()V"
+            } else {
+                "java/io/OutputStream.close.()V"
+            };
+            crate::api::call(rt, key, &[out]);
+            // (A `PrintStream` keeps what goes wrong beneath it to itself: `checkError`.)
+            if rt.thrown.take().is_some() {
+                rt.unwinding.clear();
+            }
+            return Some(V::Void);
+        }
+        // Bytes to a stream of the mod's own go as they are.
+        "write" if out.r() != 0 => {
+            let bytes: Vec<u8> = match ks.as_slice() {
+                ['I'] => vec![a(1).i() as u8],
+                _ => {
+                    let all: Vec<u8> = crate::jutil::elements(rt, a(1))
+                        .iter()
+                        .map(|v| v.i() as u8)
+                        .collect();
+                    let (from, len) = if ks.len() == 3 {
+                        (a(2).i().max(0) as usize, a(3).i().max(0) as usize)
+                    } else {
+                        (0, all.len())
+                    };
+                    all.get(from..from.saturating_add(len).min(all.len()))
+                        .unwrap_or_default()
+                        .to_vec()
+                }
+            };
+            crate::streams::write_to(rt, out, &bytes);
+            return Some(V::Void);
+        }
+        _ => {}
+    }
     let text = match name {
         "print" | "println" | "append" => {
             let mut s = match ks.first() {
@@ -7229,7 +7482,11 @@ fn print_stream(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "checkError" => return Some(V::I(0)),
         _ => return None,
     };
-    print_std(rt.get_field(this, "$err").i() != 0, &text);
+    if out.r() != 0 {
+        crate::streams::write_to(rt, out, text.as_bytes());
+    } else {
+        print_std(rt.get_field(this, "$err").i() != 0, &text);
+    }
     Some(if desc.ends_with(")V") { V::Void } else { this })
 }
 

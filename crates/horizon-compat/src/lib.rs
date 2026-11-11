@@ -128,6 +128,7 @@ pub mod rotation;
 pub mod scan;
 pub mod screens;
 pub mod shapes;
+pub mod stb_resize;
 pub mod streams;
 pub mod entity_commands;
 pub mod entity_hits;
@@ -148,6 +149,8 @@ pub mod vanilla_tags;
 pub mod value_providers;
 pub mod vitals;
 pub mod worldgen;
+pub mod zips;
+pub mod guava_io;
 
 // BEGIN RUNTIME HELPERS: bundles inline this part of the root into their `compat` module too.
 

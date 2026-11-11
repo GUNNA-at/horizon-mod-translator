@@ -1612,6 +1612,72 @@ fn content_root_registers_a_mod_menu_type() {
     fs::remove_dir_all(&scratch).unwrap();
 }
 
+/// A tag is a file under `data/<namespace>/tags/`; a folder named `tags` deeper in a mod's own
+/// data is that mod's to read (Create Big Cannons gives a tag's blocks their armour in
+/// `block_armor/tags/concrete.json`, which lists no values), and joins the root as it is. A tag
+/// file the game can't read is left out with a warning, and the mods' content loads without
+/// it: a translated pack's data is hundreds of Java mods', and one odd file among it cost
+/// every mod its blocks.
+#[test]
+fn a_mods_own_tags_folder_is_no_tag_and_an_unreadable_tag_is_left_out() {
+    assert!(is_tag_file(
+        "data/minecraft/tags/block/mineable/pickaxe.json"
+    ));
+    assert!(is_tag_file("data/c/tags/item/gems.json"));
+    assert!(!is_tag_file("data/cannons/block_armor/tags/concrete.json"));
+    assert!(!is_tag_file("data/cannons/tags/block/list.txt"));
+    assert!(!is_tag_file("assets/cannons/tags/block/list.json"));
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-odd-tags-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let armour = r#"{"block_hardness": 4.5, "toughness": 3.0}"#;
+    let cannons = folder_mod(
+        &scratch.join("cannons"),
+        &[
+            ("horizon-mod.toml", &manifest("cannons", "")),
+            ("data/cannons/block_armor/tags/concrete.json", armour),
+            (
+                "data/cannons/tags/block/soft.json",
+                r#"{"entries": ["minecraft:dirt"]}"#,
+            ),
+            ("data/cannons/tags/block/broken.json", "{"),
+            (
+                "data/cannons/tags/block/hard.json",
+                r#"{"values": ["minecraft:stone"]}"#,
+            ),
+        ],
+    );
+    let root = scratch.join("root");
+    let warnings = build(&base, &[cannons], &root).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("data/cannons/block_armor/tags/concrete.json")).unwrap(),
+        armour
+    );
+    let left: Vec<&String> = warnings
+        .iter()
+        .filter(|w| w.contains("is left out"))
+        .collect();
+    assert_eq!(left.len(), 2, "{warnings:?}");
+    assert!(
+        left.iter().any(|w| w
+            .starts_with("mod cannons: data/cannons/tags/block/soft.json is left out: no values")),
+        "{left:?}"
+    );
+    assert!(
+        left.iter()
+            .any(|w| w.starts_with("mod cannons: data/cannons/tags/block/broken.json is left out")),
+        "{left:?}"
+    );
+    let hard: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("data/cannons/tags/block/hard.json")).unwrap())
+            .unwrap();
+    assert_eq!(hard["values"], serde_json::json!(["minecraft:stone"]));
+    assert!(!root.join("data/cannons/tags/block/soft.json").exists());
+    fs::remove_dir_all(&scratch).unwrap();
+}
+
 /// A content mod folder from `(path, text)` pairs, read as the game reads it.
 fn folder_mod(dir: &Path, files: &[(&str, &str)]) -> ContentMod {
     for (name, text) in files {

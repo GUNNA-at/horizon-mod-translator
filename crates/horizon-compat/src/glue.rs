@@ -459,13 +459,32 @@ pub(crate) fn block_entity_at(rt: &mut Rt, pos: [i32; 3]) -> V {
     if be.r() == 0 {
         return V::NULL;
     }
-    let l = level(rt);
-    rt.put_field(be, "level", l);
+    enter_level(rt, be);
     rt.put_field(be, "$demand", V::I(1));
     rt.block_entities.insert(pos, be);
     let block = crate::host::state_block(&state);
     rt.block_entity_meta.insert(pos, (block.to_owned(), false));
     be
+}
+
+const SET_LEVEL: &str = "setLevel.(Lnet/minecraft/world/level/Level;)V";
+const SET_LEVEL_KEY: &str = "net/minecraft/world/level/block/entity/BlockEntity.setLevel.(Lnet/minecraft/world/level/Level;)V";
+
+/// Puts the block entity just made, `be`, in its level, as vanilla's chunk does with one it takes
+/// (`LevelChunk.setBlockEntity`: `setLevel(level)`); the level. The mod's own `setLevel` runs where
+/// its class has one: it makes there what needs the level (Amendments' cauldron its tank, from the
+/// level's registries, which its colour is then asked of).
+fn enter_level(rt: &mut Rt, be: V) -> V {
+    let l = level(rt);
+    rt.put_field(be, "level", l);
+    let class = rt.class_of(be);
+    if let Some(vc) = rt.vcall
+        && rt.overrides.is_some_and(|o| o(class, SET_LEVEL))
+    {
+        vc(rt, SET_LEVEL_KEY, SET_LEVEL, &[be, l]);
+        rt.report_thrown("BlockEntity.setLevel");
+    }
+    l
 }
 
 /// `native_block_entity_tick`: one server tick of the mod's block entity at `pos`, of which the game
@@ -480,11 +499,7 @@ pub fn block_entity_tick(rt: &mut Rt, host: &mut dyn Host, pos: [i32; 3], state:
         // it was put in (`setLevel`), which its chunk's ticker passes it (`LevelChunk.this.level`).
         let level = match rt.get_field(be, "level") {
             l if l.r() != 0 => l,
-            _ => {
-                let l = level(rt);
-                rt.put_field(be, "level", l);
-                l
-            }
+            _ => enter_level(rt, be),
         };
         let (st, ticker) = ticker_for(rt, be, b, level, state);
         if ticker.r() != 0 {
@@ -1462,8 +1477,7 @@ fn client_block_entity_object(rt: &mut Rt, pos: [i32; 3], state: &str) -> Option
             if be.r() == 0 {
                 return None;
             }
-            let l = level(rt);
-            rt.put_field(be, "level", l);
+            enter_level(rt, be);
             rt.block_entities.insert(pos, be);
             rt.block_entity_meta.insert(pos, (block.to_owned(), true));
             (be, true)
@@ -1634,9 +1648,15 @@ pub fn client_mod_seat(
 fn client_setup(rt: &mut Rt, host: &mut dyn Host) {
     if !crate::neo::is_client(rt) {
         crate::neo::fire_client_setup(rt);
+        // The client's first resource load is before any world, on a JVM: its listeners find
+        // no player and no level, whatever the game has open by the time this hook comes
+        // (a mod that finds a player there takes the world for open and begins what it does
+        // in one, before the level is told of).
         rt.with_host(host, |rt| {
-            crate::resources::reload(rt, "assets");
-            crate::baked_models::client_resources_loaded(rt);
+            crate::neo::as_loading(rt, |rt| {
+                crate::resources::reload(rt, "assets");
+                crate::baked_models::client_resources_loaded(rt);
+            });
         });
     }
     // The server's configs, as the server in this process has them: a JVM's client shares the
@@ -3052,6 +3072,71 @@ mod tests {
             }
             _ => api::call(rt, key, args),
         }
+    }
+
+    /// A block entity enters its level through its own `setLevel` (vanilla's chunk calls it for
+    /// each block entity it takes): Amendments' cauldron makes its tank there, and its colour is
+    /// asked of that tank as soon as the block is drawn. Once, whether the block entity was made
+    /// by its first tick or by something asking for it.
+    #[test]
+    fn a_block_entity_enters_its_level_through_its_own_set_level() {
+        const CAULDRON: &str = "test/CauldronBlock";
+        const CAULDRON_ENTITY: &str = "test/CauldronBlockEntity";
+        fn code(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            match short {
+                NEW_BLOCK_ENTITY => rt.new_object(CAULDRON_ENTITY),
+                GET_TICKER => V::NULL,
+                // `super.setLevel(level); tank = makeTank(level);`
+                SET_LEVEL => {
+                    api::call(rt, key, args);
+                    rt.put_field(args[0], "tank", args[1]);
+                    let n = rt.get_field(args[0], "entered").i();
+                    rt.put_field(args[0], "entered", V::I(n + 1));
+                    V::Void
+                }
+                _ => api::call(rt, key, args),
+            }
+        }
+        let mut rt = Rt::new();
+        crate::install();
+        rt.overrides = Some(|class, method| {
+            (class == CAULDRON && method == NEW_BLOCK_ENTITY)
+                || (class == CAULDRON_ENTITY && method == SET_LEVEL)
+        });
+        rt.vcall = Some(code);
+        rt.supers
+            .insert(CAULDRON, "net/minecraft/world/level/block/Block");
+        rt.supers.insert(
+            CAULDRON_ENTITY,
+            "net/minecraft/world/level/block/entity/BlockEntity",
+        );
+        let block = rt.new_object(CAULDRON);
+        rt.registered
+            .insert(("block".into(), "test:cauldron".into()), block);
+        let mut host = MemoryHost::default();
+        let (asked, ticked) = ([3, 70, -2], [4, 70, -2]);
+        host.blocks.insert(asked, "test:cauldron".into());
+        host.blocks.insert(ticked, "test:cauldron".into());
+        let be = rt.with_host(&mut host, |rt| block_entity_at(rt, asked));
+        let tank = rt.get_field(be, "tank");
+        assert_ne!(tank.r(), 0, "its own setLevel ran");
+        assert_eq!(
+            api::call(
+                &mut rt,
+                "net/minecraft/world/level/block/entity/BlockEntity.getLevel.()Lnet/minecraft/world/level/Level;",
+                &[be]
+            ),
+            tank
+        );
+        let mut held = std::collections::BTreeMap::new();
+        for at in [asked, ticked, asked, ticked] {
+            block_entity_tick(&mut rt, &mut host, at, "test:cauldron", &mut held);
+        }
+        for at in [asked, ticked] {
+            let be = rt.block_entities[&at];
+            assert_eq!(rt.get_field(be, "entered"), V::I(1), "{at:?}");
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A block set with data (`/setblock ... {Text:...}`) whose block entity something made before

@@ -32,6 +32,11 @@ const DATA_OUT: &str = "java/io/DataOutputStream";
 const DATA_OUTPUT: &str = "java/io/DataOutput";
 const GZIP_OUT: &str = "java/util/zip/GZIPOutputStream";
 const DEFLATER_OUT: &str = "java/util/zip/DeflaterOutputStream";
+/// Zip streams: the stream classes' side here, the zips themselves in [`crate::zips`].
+const ZIP_IN: &str = "java/util/zip/ZipInputStream";
+const JAR_IN: &str = "java/util/jar/JarInputStream";
+const ZIP_OUT: &str = "java/util/zip/ZipOutputStream";
+const JAR_OUT: &str = "java/util/jar/JarOutputStream";
 const FLUSHABLE: &str = "java/io/Flushable";
 const CLOSEABLE: &str = "java/io/Closeable";
 const AUTO_CLOSEABLE: &str = "java/lang/AutoCloseable";
@@ -54,7 +59,10 @@ const CLOSE_OUT: (&str, &str) = ("java/io/OutputStream.close.()V", "close.()V");
 const DRAIN_LIMIT: usize = 1 << 30;
 
 fn in_class(c: &str) -> bool {
-    matches!(c, DATA_IN | GZIP_IN | INFLATER_IN | FILE_IN)
+    matches!(
+        c,
+        DATA_IN | GZIP_IN | INFLATER_IN | FILE_IN | ZIP_IN | JAR_IN
+    )
 }
 
 fn out_class(c: &str) -> bool {
@@ -68,6 +76,8 @@ fn out_class(c: &str) -> bool {
             | DATA_OUT
             | GZIP_OUT
             | DEFLATER_OUT
+            | ZIP_OUT
+            | JAR_OUT
     )
 }
 
@@ -85,14 +95,21 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
 pub(crate) fn is_a(c: &str, class: &str) -> bool {
     match class {
         INPUT_STREAM => in_class(c),
-        "java/io/FilterInputStream" => matches!(c, DATA_IN | GZIP_IN | INFLATER_IN),
-        INFLATER_IN => c == GZIP_IN,
+        "java/io/FilterInputStream" => {
+            matches!(c, DATA_IN | GZIP_IN | INFLATER_IN | ZIP_IN | JAR_IN)
+        }
+        INFLATER_IN => matches!(c, GZIP_IN | ZIP_IN | JAR_IN),
+        ZIP_IN => c == JAR_IN,
         DATA_INPUT => c == DATA_IN,
         OUTPUT_STREAM | CLOSEABLE | AUTO_CLOSEABLE | FLUSHABLE => {
             out_class(c) || (class != OUTPUT_STREAM && class != FLUSHABLE && in_class(c))
         }
-        FILTER_OUT => matches!(c, BUFFERED_OUT | DATA_OUT | GZIP_OUT | DEFLATER_OUT),
-        DEFLATER_OUT => c == GZIP_OUT,
+        FILTER_OUT => matches!(
+            c,
+            BUFFERED_OUT | DATA_OUT | GZIP_OUT | DEFLATER_OUT | ZIP_OUT | JAR_OUT
+        ),
+        DEFLATER_OUT => matches!(c, GZIP_OUT | ZIP_OUT | JAR_OUT),
+        ZIP_OUT => c == JAR_OUT,
         DATA_OUTPUT => c == DATA_OUT,
         _ => false,
     }
@@ -522,7 +539,8 @@ fn write_as(rt: &mut Rt, this: V, class: &str, bytes: &[u8]) {
                 throw(rt, IO_EXCEPTION, &e.to_string());
             }
         }
-        GZIP_OUT | DEFLATER_OUT => {
+        // (A zip's stream keeps the bytes of the entry it writes: [`crate::zips`].)
+        GZIP_OUT | DEFLATER_OUT | ZIP_OUT | JAR_OUT => {
             if rt.get_field(this, "$finished").i() != 0 {
                 return throw(rt, IO_EXCEPTION, "write beyond end of stream");
             }
@@ -584,12 +602,12 @@ pub(crate) fn close_out(rt: &mut Rt, out: V) {
 fn close_as(rt: &mut Rt, this: V, class: &str) {
     match class {
         FILE_OUT => rt.put_field(this, "$closed", V::I(1)),
-        FILTER_OUT | BUFFERED_OUT | DATA_OUT | GZIP_OUT | DEFLATER_OUT => {
+        FILTER_OUT | BUFFERED_OUT | DATA_OUT | GZIP_OUT | DEFLATER_OUT | ZIP_OUT | JAR_OUT => {
             if rt.get_field(this, "$closed").i() != 0 {
                 return;
             }
             rt.put_field(this, "$closed", V::I(1));
-            if matches!(class, GZIP_OUT | DEFLATER_OUT) {
+            if matches!(class, GZIP_OUT | DEFLATER_OUT | ZIP_OUT | JAR_OUT) {
                 finish(rt, this, class);
             } else {
                 flush_out(rt, this);
@@ -609,6 +627,11 @@ fn finish(rt: &mut Rt, this: V, class: &str) {
         return;
     }
     rt.put_field(this, "$finished", V::I(1));
+    if matches!(class, ZIP_OUT | JAR_OUT) {
+        let zip = crate::zips::finished(rt, this);
+        let inner = rt.get_field(this, "$out");
+        return write_to(rt, inner, &zip);
+    }
     let raw = bytes_mut(rt, this).map(std::mem::take).unwrap_or_default();
     let packed = if class == GZIP_OUT {
         gzip(&raw)
@@ -703,9 +726,12 @@ fn out_other(rt: &mut Rt, class: &'static str, name: &str, desc: &str, args: &[V
             close_as(rt, this, class);
             V::Void
         }
-        ("finish", _) if matches!(class, GZIP_OUT | DEFLATER_OUT) => {
+        ("finish", _) if matches!(class, GZIP_OUT | DEFLATER_OUT | ZIP_OUT | JAR_OUT) => {
             finish(rt, this, class);
             V::Void
+        }
+        (_, _) if matches!(class, ZIP_OUT | JAR_OUT) => {
+            return crate::zips::out_call(rt, name, args);
         }
         ("size", _) if class == DATA_OUT => rt.get_field(this, "$written"),
         ("size", _) if class == BYTES_OUT => V::I(bytes_of(rt, this).map_or(0, Vec::len) as i32),
@@ -784,10 +810,11 @@ fn init(rt: &mut Rt, owner: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         BYTES_OUT => crate::resources::become_bytes(rt, this, Vec::new()),
         FILTER_OUT | BUFFERED_OUT | DATA_OUT => rt.put_field(this, "$out", a(1)),
-        GZIP_OUT | DEFLATER_OUT => {
+        GZIP_OUT | DEFLATER_OUT | ZIP_OUT | JAR_OUT => {
             crate::resources::become_bytes(rt, this, Vec::new());
             rt.put_field(this, "$out", a(1));
         }
+        ZIP_IN | JAR_IN => crate::zips::open_stream(rt, this, a(1)),
         // A mod's own stream's `super()`.
         OUTPUT_STREAM if desc == "()V" => {}
         _ => return None,
@@ -1007,6 +1034,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return out_call(rt, class, name, desc, args);
     }
     if in_class(owner) || owner == DATA_INPUT || (closing && in_class(class)) {
+        if matches!(class, ZIP_IN | JAR_IN)
+            && let Some(v) = crate::zips::stream_call(rt, class == JAR_IN, name, args)
+        {
+            return Some(v);
+        }
         return in_call(rt, name, desc, args);
     }
     None

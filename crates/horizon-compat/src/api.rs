@@ -404,13 +404,100 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     call_unobserved(rt, key, args)
 }
 
+/// What of a thread's stack is left to the runtime's own code under the mods': an API call
+/// made with less than this below it throws `StackOverflowError`. The mods' code that calls
+/// itself without end through its own methods alone never nests an API call
+/// ([`MAX_DEPTH`]), but it makes one at every turn: JourneyMap's minimap, made for the first
+/// time with a player in the world, asks for the minimap being made, and the game's stack
+/// ended where a JVM throws an error the mod catches.
+const STACK_RESERVE: usize = 1 << 20;
+
+/// The lowest address on this thread's stack an API call may be made at ([`STACK_RESERVE`]
+/// above the stack's end, a quarter of a small stack), found once for the thread.
+fn stack_floor() -> usize {
+    thread_local! {
+        static FLOOR: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    FLOOR.with(|floor| {
+        if floor.get() == 0 {
+            floor.set(match stack_bounds() {
+                Some((low, size)) => low + STACK_RESERVE.min(size / 4),
+                // No telling where it ends: nothing is too deep.
+                None => 1,
+            });
+        }
+        floor.get()
+    })
+}
+
+/// This thread's stack: its lowest address and its size.
+#[cfg(target_vendor = "apple")]
+fn stack_bounds() -> Option<(usize, usize)> {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn pthread_self() -> *mut c_void;
+        fn pthread_get_stackaddr_np(thread: *mut c_void) -> *mut c_void;
+        fn pthread_get_stacksize_np(thread: *mut c_void) -> usize;
+    }
+    // SAFETY: both ask about the calling thread, which is alive; they read and return.
+    let (top, size) = unsafe {
+        let me = pthread_self();
+        (
+            pthread_get_stackaddr_np(me) as usize,
+            pthread_get_stacksize_np(me),
+        )
+    };
+    (size != 0 && top > size).then(|| (top - size, size))
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn stack_bounds() -> Option<(usize, usize)> {
+    use std::ffi::{c_int, c_void};
+    // `pthread_attr_t`: 56 bytes on x86-64, 64 on aarch64 (glibc and musl).
+    #[repr(C, align(8))]
+    struct Attr([u8; 64]);
+    unsafe extern "C" {
+        fn pthread_self() -> usize;
+        fn pthread_getattr_np(thread: usize, attr: *mut Attr) -> c_int;
+        fn pthread_attr_getstack(
+            attr: *const Attr,
+            low: *mut *mut c_void,
+            size: *mut usize,
+        ) -> c_int;
+        fn pthread_attr_destroy(attr: *mut Attr) -> c_int;
+    }
+    let mut attr = Attr([0; 64]);
+    let (mut low, mut size) = (std::ptr::null_mut(), 0usize);
+    // SAFETY: the attributes are the calling thread's, filled by the first call, read by the
+    // second and released by the third; `low` and `size` are this function's own.
+    let found = unsafe {
+        if pthread_getattr_np(pthread_self(), &mut attr) != 0 {
+            return None;
+        }
+        let found = pthread_attr_getstack(&attr, &mut low, &mut size) == 0;
+        pthread_attr_destroy(&mut attr);
+        found
+    };
+    (found && size != 0).then_some((low as usize, size))
+}
+
+#[cfg(not(unix))]
+fn stack_bounds() -> Option<(usize, usize)> {
+    None
+}
+
 fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     let depth = DEPTH.with(|d| {
         d.set(d.get() + 1);
         d.get()
     });
-    let r = if depth > MAX_DEPTH {
-        rt.throw_new("java/lang/StackOverflowError");
+    // (Where this call's own frame lies: a local's address.)
+    let here = std::ptr::from_ref(&depth) as usize;
+    let r = if depth > MAX_DEPTH || here < stack_floor() {
+        // (One already thrown is on its way up: the code that unwinds asks nothing new.)
+        if rt.thrown.is_none() {
+            rt.throw_new("java/lang/StackOverflowError");
+        }
         V::Void
     } else if let Some(secs) = over_time().filter(|_| rt.thrown.is_none()) {
         crate::jlang::throw_with(
@@ -1283,6 +1370,26 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
             V::I((rt.str_of(a(0)).is_some() && rt.str_of(a(0)) == rt.str_of(a(1))) as i32)
         }
         "java/lang/String.length.()I" => V::I(rt.str_of(a(0)).map_or(0, |s| s.encode_utf16().count() as i32)),
+        // A character of a string, where a parser asks for every one of them in turn: read
+        // where it lies (its byte, while the text up to it is ASCII), not out of a copy of
+        // the whole string made for the one call.
+        "java/lang/String.charAt.(I)C" | "java/lang/CharSequence.charAt.(I)C"
+            if rt.str_of(a(0)).is_some() =>
+        {
+            let (s, at) = (rt.str_of(a(0)).unwrap_or(""), a(1).i());
+            match crate::jlang::char_at(s, at) {
+                Some(c) => V::I(i32::from(c)),
+                None => {
+                    let length = s.encode_utf16().count();
+                    crate::jlang::throw_char_index(rt, at, length)
+                }
+            }
+        }
+        "java/lang/String.isEmpty.()Z" => V::I(rt.str_of(a(0)).is_some_and(str::is_empty) as i32),
+        "java/lang/CharSequence.length.()I" if rt.str_of(a(0)).is_some() => V::I(
+            rt.str_of(a(0))
+                .map_or(0, |s| s.encode_utf16().count() as i32),
+        ),
         "java/lang/Integer.valueOf.(I)Ljava/lang/Integer;" => {
             let o = rt.new_object("java/lang/Integer");
             rt.put_field(o, "value", a(0));
@@ -1724,9 +1831,27 @@ fn call_exact(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
         k if exception_class(k) && k.contains(".printStackTrace.") => {
             let mut trace = String::new();
             stack_trace(rt, a(0), "", "", &mut trace, &mut Vec::new());
-            let out =
-                k.contains("(Ljava/io/PrintStream;)") && rt.get_field(a(1), "$err") == V::I(0);
-            crate::jlang::print_std(!out, &trace);
+            // Into the stream or the writer it is given, where that is one of the mod's own
+            // making (JourneyMap writes a trace into a string so, for its log).
+            if k.contains("(Ljava/io/PrintWriter;)") && a(1).r() != 0 {
+                let text = rt.string(&trace);
+                call(
+                    rt,
+                    "java/io/PrintWriter.write.(Ljava/lang/String;)V",
+                    &[a(1), text],
+                );
+            } else if k.contains("(Ljava/io/PrintStream;)") && rt.get_field(a(1), "$out").r() != 0 {
+                let text = rt.string(&trace);
+                call(
+                    rt,
+                    "java/io/PrintStream.print.(Ljava/lang/String;)V",
+                    &[a(1), text],
+                );
+            } else {
+                let out =
+                    k.contains("(Ljava/io/PrintStream;)") && rt.get_field(a(1), "$err") == V::I(0);
+                crate::jlang::print_std(!out, &trace);
+            }
             V::Void
         }
         k if exception_class(k) && k.contains(".fillInStackTrace.") => a(0),
@@ -1868,7 +1993,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 95] = [
+const CHAIN: [Module; 97] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -1944,6 +2069,8 @@ const CHAIN: [Module; 95] = [
     crate::neo::call,
     crate::files::call,
     crate::resources::call,
+    crate::zips::call,
+    crate::guava_io::call,
     crate::streams::call,
     crate::gson::call,
     crate::jtypes::call,
@@ -1969,7 +2096,7 @@ const CHAIN: [Module; 95] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 95] = [
+const CLAIMS: [Claims; 97] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -2045,6 +2172,8 @@ const CLAIMS: [Claims; 95] = [
     crate::neo::claims,
     crate::files::claims,
     crate::resources::claims,
+    crate::zips::claims,
+    crate::guava_io::claims,
     crate::streams::claims,
     crate::gson::claims,
     crate::jtypes::claims,
@@ -2068,7 +2197,7 @@ const CLAIMS: [Claims; 95] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 95] = [
+const MODULE_NAMES: [&str; 97] = [
     "diodes",
     "rails",
     "fake_players",
@@ -2144,6 +2273,8 @@ const MODULE_NAMES: [&str; 95] = [
     "neo",
     "files",
     "resources",
+    "zips",
+    "guava_io",
     "streams",
     "gson",
     "jtypes",
@@ -2582,6 +2713,17 @@ pub(crate) fn note_unregistered(rt: &mut Rt, text: &str, state: V) {
 /// Renames the states kept under an [`UNREGISTERED`] name to their block's registered name, for
 /// every block registered since. A state with that name already made keeps its place in the table.
 pub(crate) fn adopt_names(rt: &mut Rt) {
+    adopt(rt, None);
+}
+
+/// [`adopt_names`] for the one block `b`, registered just now as `name`: its states have its
+/// name before anything can ask for one of them by it (a state asked for by a registered name
+/// that the block's own states did not have yet was a second object of the same state).
+pub(crate) fn adopt_block(rt: &mut Rt, b: V, name: &str) {
+    adopt(rt, Some((b, name)));
+}
+
+fn adopt(rt: &mut Rt, only: Option<(V, &str)>) {
     let Some(&all) = rt.interned.get("compat:unregistered-states") else { return };
     let pairs = match rt.heap.get(all.r() as usize).map(|o| &o.data) {
         Some(Data::List(v)) if !v.is_empty() => v.clone(),
@@ -2593,7 +2735,12 @@ pub(crate) fn adopt_names(rt: &mut Rt) {
             Some(Data::List(v)) if v.len() == 2 => (v[0], v[1]),
             _ => continue,
         };
-        let Some(name) = rt.registered_name(b, "block").map(str::to_owned) else {
+        let name = match only {
+            Some((block, name)) if block == b => Some(name.to_owned()),
+            Some(_) => None,
+            None => rt.registered_name(b, "block").map(str::to_owned),
+        };
+        let Some(name) = name else {
             waiting.push(pair);
             continue;
         };
@@ -2603,9 +2750,13 @@ pub(crate) fn adopt_names(rt: &mut Rt) {
         if rt.interned.get(&format!("state/{old}")) == Some(&state) {
             rt.interned.remove(&format!("state/{old}"));
         }
-        rt.interned.entry(format!("state/{new}")).or_insert(state);
+        // Spelled in full, as every state of a registered block is ([`spelled`]): the first
+        // state made of a spelling is that state, and the name it was made under reads as it.
+        let full = spelled(rt, b, &new).unwrap_or_else(|| new.clone());
+        let one = *rt.interned.entry(format!("state/{full}")).or_insert(state);
+        rt.interned.entry(format!("state/{new}")).or_insert(one);
         if let Some(o) = rt.heap.get_mut(state.r() as usize) {
-            o.data = Data::Str(new);
+            o.data = Data::Str(full);
         }
     }
     if let Some(Data::List(v)) = rt.heap.get_mut(all.r() as usize).map(|o| &mut o.data) {
@@ -2916,6 +3067,7 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             let (from, to) = (crate::neo::location(rt, a(1)), crate::neo::location(rt, a(2)));
             let to = rt.string(&to);
             rt.interned.insert(format!("alias/{registry}/{from}"), to);
+            rt.interned.insert(crate::neo::ALIASED.into(), V::I(1));
             V::Void
         }
         (o, "get" | "value") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => {
@@ -3832,15 +3984,10 @@ fn class_update_shape(rt: &mut Rt, class: &str, args: &[V]) -> V {
     }
 }
 
-/// The most states [`possible_states`] spells out; a definition with more (vanilla's largest,
-/// redstone wire, has 1296) keeps its default state alone.
-const MAX_STATES: usize = 1 << 16;
-
-/// Block `b`'s states in `StateDefinition.getPossibleStates()`'s order: every combination of its
-/// properties' values, the property first by name varying slowest, each property's values in its
-/// own order. A vanilla block, whose definition the game keeps, answers its default state.
-pub(crate) fn possible_states(rt: &mut Rt, b: V) -> Vec<V> {
-    let name = block_name(rt, b);
+/// Mod block `b`'s state properties as its states spell them: each by name with its values,
+/// in the order of the names (the game's order). What [`possible_states`] makes its states of
+/// and [`spelled`] completes a state with.
+fn state_props(rt: &mut Rt, b: V) -> Vec<(String, Vec<String>)> {
     let list = match rt.heap.get(b.r() as usize).map(|o| &o.data) {
         Some(Data::Fields(_)) => rt.get_field(b, "$state-props"),
         _ => V::NULL,
@@ -3854,6 +4001,63 @@ pub(crate) fn possible_states(rt: &mut Rt, b: V) -> Vec<V> {
         }
     }
     props.sort_by(|x, y| x.0.cmp(&y.0));
+    props
+}
+
+/// The state of registered mod block `b` that `text` names, with every property spelled: one
+/// the text leaves out has the value of the block's default state (the one its constructor
+/// registered, else the property's first value, as `StateDefinition.any()` has it). None for a
+/// block without properties.
+///
+/// A state is one object however it is named ([`crate::api_common::state`]): the bare name
+/// `defaultBlockState()` reads as, `any().setValue(...)` and the state a game spells in full
+/// are the state `getPossibleStates()` lists. A mod keeps what it knows of a state on that
+/// object (FramedBlocks its cache, through a mixin's field), or in a map by it, and found
+/// nothing where the same state went by another name.
+pub(crate) fn spelled(rt: &mut Rt, b: V, text: &str) -> Option<String> {
+    let props = state_props(rt, b);
+    if props.is_empty() {
+        return None;
+    }
+    let (block, given) = crate::host::split_state(text);
+    let registered = rt
+        .str_of(rt.get_field(b, "$default"))
+        .unwrap_or("")
+        .to_owned();
+    let registered: Vec<(&str, &str)> = registered
+        .split(',')
+        .filter_map(|kv| kv.split_once('='))
+        .collect();
+    let mut all: Vec<(&str, &str)> = Vec::with_capacity(props.len());
+    fn said<'a>(from: &[(&str, &'a str)], name: &str) -> Option<&'a str> {
+        from.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+    }
+    for (name, values) in &props {
+        let value = said(&given, name)
+            .or_else(|| said(&registered, name).filter(|v| values.iter().any(|x| x == v)))
+            .unwrap_or(values[0].as_str());
+        all.push((name, value));
+    }
+    // (What the text says of a property the definition doesn't have stays said.)
+    all.extend(
+        given
+            .iter()
+            .filter(|(k, _)| !props.iter().any(|(n, _)| n == k))
+            .copied(),
+    );
+    Some(crate::host::join_state(block, all))
+}
+
+/// The most states [`possible_states`] spells out; a definition with more (vanilla's largest,
+/// redstone wire, has 1296) keeps its default state alone.
+const MAX_STATES: usize = 1 << 16;
+
+/// Block `b`'s states in `StateDefinition.getPossibleStates()`'s order: every combination of its
+/// properties' values, the property first by name varying slowest, each property's values in its
+/// own order. A vanilla block, whose definition the game keeps, answers its default state.
+pub(crate) fn possible_states(rt: &mut Rt, b: V) -> Vec<V> {
+    let name = block_name(rt, b);
+    let props = state_props(rt, b);
     let count = props.iter().try_fold(1usize, |n, (_, v)| n.checked_mul(v.len()).filter(|&n| n <= MAX_STATES));
     if props.is_empty() || count.is_none() {
         let default = match rt.str_of(rt.get_field(b, "$default")).map(str::to_owned) {
@@ -5293,6 +5497,38 @@ mod tests {
         let (thrown, depth) = std::thread::Builder::new().stack_size(256 << 20).spawn(run).unwrap().join().unwrap();
         assert_eq!(thrown, "java/lang/StackOverflowError");
         assert_eq!(depth, 0);
+    }
+
+    /// The mods' code calling itself without end through its own methods alone, as JourneyMap's
+    /// minimap does when it is first made inside a world: no API call nests in another, but
+    /// one is made at every turn, and the one made too deep on the thread's stack throws
+    /// `StackOverflowError`. The thread's stack holds, and the error unwinds the turns.
+    #[test]
+    fn code_that_calls_itself_without_end_gets_a_stack_overflow_error() {
+        fn turn(rt: &mut Rt, depth: u32) -> u32 {
+            call(rt, "java/lang/Math.abs.(I)I", &[V::I(-1)]);
+            if rt.thrown.is_some() {
+                return depth;
+            }
+            std::hint::black_box(turn(rt, depth + 1))
+        }
+        let run = || {
+            let mut rt = Rt::new();
+            let depth = turn(&mut rt, 0);
+            let thrown = rt.thrown.take().map(|e| rt.class_of(e).to_owned());
+            // Back at the top, the API answers again.
+            let answer = call(&mut rt, "java/lang/Math.abs.(I)I", &[V::I(-7)]);
+            (depth, thrown, answer, rt.thrown.is_none())
+        };
+        let (depth, thrown, answer, clear) = std::thread::Builder::new()
+            .stack_size(4 << 20)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .expect("the thread's stack held");
+        assert_eq!(thrown.as_deref(), Some("java/lang/StackOverflowError"));
+        assert!(depth > 1000, "{depth}");
+        assert_eq!((answer, clear), (V::I(7), true));
     }
 
     /// `new RuntimeException(cause)` as Java makes it (Max Henkel's corelib wraps every

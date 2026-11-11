@@ -4004,6 +4004,68 @@ mod tests {
         assert!(reed.contains("\"template\": \"minecraft:glass\""), "{reed}");
     }
 
+    /// A registered block's state is one object however it is named: by the block's bare
+    /// name, as `defaultBlockState()` gives it, spelled in part or in full, or reached by
+    /// setting a property. FramedBlocks keeps a cache on each state (a mixin's field) and
+    /// fills it over `getPossibleStates()`: the state a block entity is made with has it.
+    #[test]
+    fn a_state_is_one_object_however_it_is_named() {
+        let mut rt = Rt::new();
+        let p = props(&mut rt);
+        let b = rt.new_object("test/Camp");
+        api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/CampfireBlock.<init>.(Lnet/minecraft/world/level/block/state/BlockBehaviour$Properties;)V",
+            &[b, p],
+        );
+        const DEFAULT: &str = "net/minecraft/world/level/block/Block.defaultBlockState.()Lnet/minecraft/world/level/block/state/BlockState;";
+        let early = api::call(&mut rt, DEFAULT, &[b]);
+        rt.registered
+            .insert(("block".into(), "test:camp".into()), b);
+        api::adopt_names(&mut rt);
+        // The default state, by the block's bare name and as the block gives it, is the one
+        // its definition lists, spelled in full; so is the one the constructor held.
+        let default = api::call(&mut rt, DEFAULT, &[b]);
+        let full = "test:camp[facing=north,lit=true,signal_fire=false,waterlogged=false]";
+        assert_eq!(rt.str_of(default), Some(full));
+        assert_eq!(api::state(&mut rt, "test:camp"), default);
+        assert_eq!(api::state(&mut rt, full), default);
+        assert_eq!(early, default);
+        let definition = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/Block.getStateDefinition.()Lnet/minecraft/world/level/block/state/StateDefinition;",
+            &[b],
+        );
+        let listed = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/StateDefinition.getPossibleStates.()Lcom/google/common/collect/ImmutableList;",
+            &[definition],
+        );
+        let listed = jutil::elements(&rt, listed);
+        assert_eq!(listed.len(), 4 * 2 * 2 * 2);
+        assert!(listed.contains(&default));
+        // A state reached by setting one property of the default is the listed one too, and
+        // what is kept on it (a mixin's field) is found on it by any of its names.
+        let lit = api::get_static(
+            &mut rt,
+            "net/minecraft/world/level/block/state/properties/BlockStateProperties.LIT",
+        );
+        let unlit = api::call(
+            &mut rt,
+            "net/minecraft/world/level/block/state/BlockState.setValue.(Lnet/minecraft/world/level/block/state/properties/Property;Ljava/lang/Comparable;)Ljava/lang/Object;",
+            &[default, lit, V::I(0)],
+        );
+        assert_eq!(
+            rt.str_of(unlit),
+            Some("test:camp[facing=north,lit=false,signal_fire=false,waterlogged=false]")
+        );
+        assert!(listed.contains(&unlit) && unlit != default);
+        assert_eq!(api::state(&mut rt, "test:camp[lit=false]"), unlit);
+        rt.put_field(unlit, "mod$cache", V::I(7));
+        let again = api::state(&mut rt, "test:camp[lit=false,waterlogged=false]");
+        assert_eq!(rt.get_field(again, "mod$cache"), V::I(7));
+    }
+
     /// A mod block of one of Minecraft's classes has the states that class declares and the
     /// default its constructors register, as the game's own code has them: a redstone wall
     /// torch faces north, lit; a coral fan starts in water; an end rod points up; a sign

@@ -74,6 +74,7 @@ const ELEMENT_ROTATION: &str = "net/minecraft/client/renderer/block/model/BlockE
 const NATIVE_IMAGE: &str = "com/mojang/blaze3d/platform/NativeImage";
 const IMAGE_FORMAT: &str = "com/mojang/blaze3d/platform/NativeImage$Format";
 const IOUTILS: &str = "org/apache/commons/io/IOUtils";
+const STB_RESIZE: &str = "org/lwjgl/stb/STBImageResize";
 const INPUT_STREAM: &str = "java/io/InputStream";
 const BYTES_IN: &str = "java/io/ByteArrayInputStream";
 const BUFFERED_IN: &str = "java/io/BufferedInputStream";
@@ -129,6 +130,7 @@ pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | NATIVE_IMAGE
             | IMAGE_FORMAT
             | IOUTILS
+            | STB_RESIZE
     ) || stream_class(owner)
         || reader_class(owner)
         || (matches!(owner, MINECRAFT | SERVER) && name == "getResourceManager")
@@ -197,10 +199,11 @@ fn content_dirs(root: &str, namespace: &str) -> &'static [PathBuf] {
         .map_or(&[], Vec::as_slice)
 }
 
-/// The mods' content folders ([`content_dirs`]), by the namespaces each has files for.
-fn content_by_namespace() -> &'static ByNamespace {
-    static DIRS: std::sync::OnceLock<ByNamespace> = std::sync::OnceLock::new();
-    DIRS.get_or_init(|| {
+/// The mods' content folders, in the game's order: the ones it was started with (`--dev-mod`),
+/// then those installed in its folder (`horizon-mods/`).
+pub(crate) fn content_folders() -> &'static [PathBuf] {
+    static FOLDERS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    FOLDERS.get_or_init(|| {
         let mut folders = Vec::new();
         let mut args = std::env::args_os();
         while let Some(arg) = args.next() {
@@ -215,8 +218,14 @@ fn content_by_namespace() -> &'static ByNamespace {
             installed.sort();
             folders.extend(installed);
         }
-        by_namespace(&folders)
+        folders
     })
+}
+
+/// The mods' content folders ([`content_dirs`]), by the namespaces each has files for.
+fn content_by_namespace() -> &'static ByNamespace {
+    static DIRS: std::sync::OnceLock<ByNamespace> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| by_namespace(content_folders()))
 }
 
 /// The content folders that may hold resource file `path` (`assets/<namespace>/...`).
@@ -375,6 +384,69 @@ fn resource(rt: &mut Rt, path: &str) -> V {
     let p = rt.string(path);
     rt.put_field(r, "$path", p);
     r
+}
+
+/// Which copy of its file a resource of a stack is ([`stack`]): the folder it lies in, or
+/// [`THE_GAMES`].
+const FROM: &str = "$from";
+const THE_GAMES: &str = "compat:the-game's";
+
+/// The stack of resource file `path`: its copies, one for each pack that has one, the lowest
+/// first, as `ResourceManager.getResourceStack` gives them for a loader that adds each pack's
+/// file to the last (slots, books, a mod's own tags). The packs are the mods' own folders,
+/// in their order; below them the game's copy where it is none of theirs (Minecraft's own
+/// file, which theirs add to). With one copy or none, the file as any reader finds it.
+fn stack(rt: &mut Rt, path: &str) -> Vec<V> {
+    let copies = if safe(path) {
+        let games = rt.host().and_then(|h| h.resource(path));
+        stack_copies(
+            fallback_dirs().iter().chain(content_dirs_of(path)),
+            path,
+            games.as_deref(),
+        )
+    } else {
+        Vec::new()
+    };
+    if copies.is_empty() {
+        return if exists(rt, path) {
+            vec![resource(rt, path)]
+        } else {
+            Vec::new()
+        };
+    }
+    copies
+        .into_iter()
+        .map(|from| {
+            let r = resource(rt, path);
+            let from = rt.string(&from);
+            rt.put_field(r, FROM, from);
+            r
+        })
+        .collect()
+}
+
+/// The copies a [`stack`] of `path` is made of ([`FROM`] of each), given the folders that may
+/// hold the file and the game's own copy of it. None when fewer than two folders hold it:
+/// the file is then the one any reader finds.
+fn stack_copies<'a>(
+    folders: impl Iterator<Item = &'a PathBuf>,
+    path: &str,
+    games: Option<&[u8]>,
+) -> Vec<String> {
+    let holding: Vec<&PathBuf> = folders.filter(|d| d.join(path).is_file()).collect();
+    if holding.len() < 2 {
+        return Vec::new();
+    }
+    let mut copies = Vec::new();
+    if games.is_some_and(|own| {
+        !holding
+            .iter()
+            .any(|d| std::fs::read(d.join(path)).is_ok_and(|b| b == own))
+    }) {
+        copies.push(THE_GAMES.to_owned());
+    }
+    copies.extend(holding.iter().filter_map(|d| d.to_str().map(str::to_owned)));
+    copies
 }
 
 fn exists(rt: &mut Rt, path: &str) -> bool {
@@ -618,6 +690,24 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (PROFILER | INACTIVE_PROFILER, _) => profiler_call(rt, name, desc),
         (BLOCK_MODEL, _) => return block_model_call(rt, name, args),
         (NATIVE_IMAGE, _) => return image_call(rt, name, desc, args),
+        // `nstbir_resize_uint8(input, w, h, stride, output, w, h, stride, channels)` on two
+        // images' pixels: the library's own resize ([`crate::stb_resize`]), 1 when it is done.
+        // A mod reaches it by reflection too (JourneyMap, which then has an `Integer` of it).
+        (STB_RESIZE, "nstbir_resize_uint8") if args.len() == 9 => {
+            let done = stb_resize(
+                rt,
+                a(0).j(),
+                (a(1).i(), a(2).i()),
+                a(4).j(),
+                (a(5).i(), a(6).i()),
+            );
+            let done = V::I(i32::from(done));
+            if desc.ends_with(")I") {
+                done
+            } else {
+                crate::jlang::box_as(rt, done, 'I')
+            }
+        }
         // An image's format: how many of a pixel's channels it holds, and which
         // (`RGBA`, `RGB`, `LUMINANCE_ALPHA`, `LUMINANCE`, in that order).
         (IMAGE_FORMAT, _) => {
@@ -642,11 +732,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 /// The stream resource `r` opens: its file's, or what the supplier a mod made it with gives.
 fn resource_stream(rt: &mut Rt, r: V) -> V {
     let path = rt.get_field(r, "$path");
+    // One copy of a stack's: that pack's file.
+    let from = rt.str_of(rt.get_field(r, FROM)).map(str::to_owned);
     match rt.str_of(path).map(str::to_owned) {
-        Some(path) => match held(rt, &path) {
-            Some(bytes) => input_stream(rt, bytes),
-            None => crate::jlang::throw_with(rt, "java/io/FileNotFoundException", &path),
-        },
+        Some(path) => {
+            let bytes = match from.as_deref() {
+                Some(THE_GAMES) => rt.host().and_then(|h| h.resource(&path)),
+                Some(folder) => std::fs::read(Path::new(folder).join(&path)).ok(),
+                None => held(rt, &path),
+            };
+            match bytes {
+                Some(bytes) => input_stream(rt, bytes),
+                None => crate::jlang::throw_with(rt, "java/io/FileNotFoundException", &path),
+            }
+        }
         None => {
             let supplier = rt.get_field(r, "streamSupplier");
             rt.call_functional("net/minecraft/server/packs/resources/IoSupplier.get.()Ljava/lang/Object;", supplier, &[])
@@ -690,10 +789,10 @@ fn manager_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
                 }
             }
         }
-        // The stack of a location's files, one pack's each: here the one file the root has.
+        // The stack of a location's files, one pack's each ([`stack`]).
         "getResourceStack" => {
             let path = path_of(rt, &root, a(1));
-            let items = if exists(rt, &path) { vec![resource(rt, &path)] } else { Vec::new() };
+            let items = stack(rt, &path);
             crate::jutil::new_list(rt, items)
         }
         // The files under folder `a(1)` whose location the filter takes, by location, sorted.
@@ -739,8 +838,12 @@ fn list(rt: &mut Rt, root: &str, folder: &str, stacks: bool, keep: &mut dyn FnMu
         if !keep(rt, loc) {
             continue;
         }
-        let r = resource(rt, &path);
-        let value = if stacks { crate::jutil::new_list(rt, vec![r]) } else { r };
+        let value = if stacks {
+            let copies = stack(rt, &path);
+            crate::jutil::new_list(rt, copies)
+        } else {
+            resource(rt, &path)
+        };
         crate::jutil::table_put(rt, map, loc, value);
     }
     map
@@ -1406,6 +1509,34 @@ pub(crate) fn decode_png(bytes: &[u8]) -> Option<(usize, Vec<u8>)> {
     Some((info.width as usize, rgba))
 }
 
+/// The image whose pixels `address` is (`NativeImage.pixels`, read as the field: [`image_call`]'s
+/// `$pixels`), while it is open.
+fn image_at(rt: &Rt, address: i64) -> Option<V> {
+    let image = V::R(u32::try_from(address ^ (1 << 32)).ok()?);
+    let open = rt.class_of(image) == NATIVE_IMAGE && rt.get_field(image, "$closed").i() == 0;
+    open.then_some(image)
+}
+
+/// The image at `from`, taken as `size` pixels, scaled into the image at `to` as `to_size`
+/// pixels; whether it was. An image's pixels are four bytes each here whatever its format, so
+/// all four are scaled.
+fn stb_resize(rt: &mut Rt, from: i64, size: (i32, i32), to: i64, to_size: (i32, i32)) -> bool {
+    let (Some(source), Some(target)) = (image_at(rt, from), image_at(rt, to)) else {
+        return false;
+    };
+    let (width, input) = match rt.heap.get(source.r() as usize).map(|o| &o.data) {
+        Some(Data::Bytes(b, w)) => (*w, b.clone()),
+        _ => return false,
+    };
+    match rt.heap.get_mut(target.r() as usize).map(|o| &mut o.data) {
+        Some(Data::Bytes(output, to_width)) => {
+            let to_stride = *to_width * 4;
+            crate::stb_resize::resize(&input, size, width * 4, output, to_size, to_stride, 4)
+        }
+        _ => false,
+    }
+}
+
 /// An image of `width` pixels a row, its RGBA bytes held as a stream's are ([`Data::Bytes`]).
 fn image(rt: &mut Rt, width: usize, rgba: Vec<u8>) -> V {
     rt.alloc(NATIVE_IMAGE, Data::Bytes(rgba, width))
@@ -1572,6 +1703,38 @@ fn image_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
                     mixed(alpha, b[at + 3]),
                 ];
                 b[at..at + 4].copy_from_slice(&out);
+            }
+            V::Void
+        }
+        // `resizeSubRectTo(x, y, width, height, target)`: that part of the image, scaled to the
+        // whole of the target, as vanilla has the library do it.
+        "resizeSubRectTo" => {
+            let (w, h) = image_size(rt, a(0));
+            let (x, y, wide, high) = (a(1).i(), a(2).i(), a(3).i(), a(4).i());
+            let (tw, th) = image_size(rt, a(5));
+            let inside = x >= 0
+                && y >= 0
+                && wide > 0
+                && high > 0
+                && (x + wide) as usize <= w
+                && (y + high) as usize <= h;
+            let from = match rt.heap.get(a(0).r() as usize).map(|o| &o.data) {
+                Some(Data::Bytes(b, _)) if inside => {
+                    b[(y as usize * w + x as usize) * 4..].to_vec()
+                }
+                _ => return Some(V::Void),
+            };
+            if let Some(Data::Bytes(b, _)) = rt.heap.get_mut(a(5).r() as usize).map(|o| &mut o.data)
+            {
+                crate::stb_resize::resize(
+                    &from,
+                    (wide, high),
+                    w * 4,
+                    b,
+                    (tw as i32, th as i32),
+                    0,
+                    4,
+                );
             }
             V::Void
         }
@@ -1985,6 +2148,164 @@ mod tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
+    /// A mod scales an image with the library's own resize, given the two images' pixels
+    /// (`STBImageResize.nstbir_resize_uint8`, which JourneyMap finds by reflection and whose
+    /// answer it takes for whether its minimap can be made), and vanilla's `resizeSubRectTo`
+    /// scales a part of one so.
+    #[test]
+    fn an_image_is_scaled_into_another_by_the_librarys_resize() {
+        const IMAGE: &str = "com/mojang/blaze3d/platform/NativeImage";
+        let c = |rt: &mut Rt, name: &str, args: &[V]| {
+            let key = rt.static_key(&format!("{IMAGE}.{name}"));
+            crate::api::call(rt, key, args)
+        };
+        crate::install();
+        let mut rt = Rt::new();
+        let make = |rt: &mut Rt, w: i32, h: i32| {
+            let image = rt.new_object(IMAGE);
+            c(rt, "<init>.(IIZ)V", &[image, V::I(w), V::I(h), V::I(0)]);
+            image
+        };
+        let (small, large, part) = (
+            make(&mut rt, 2, 2),
+            make(&mut rt, 4, 4),
+            make(&mut rt, 2, 4),
+        );
+        // Red, green, blue and white, opaque (a pixel is ABGR).
+        let colours = [0xff00_00ffu32, 0xff00_ff00, 0xffff_0000, 0xffff_ffff];
+        for (i, colour) in colours.iter().enumerate() {
+            c(
+                &mut rt,
+                "setPixelRGBA.(III)V",
+                &[
+                    small,
+                    V::I(i as i32 % 2),
+                    V::I(i as i32 / 2),
+                    V::I(*colour as i32),
+                ],
+            );
+        }
+        let address = |rt: &mut Rt, image: V| c(rt, "$pixels.()J", &[image]);
+        let (from, to) = (address(&mut rt, small), address(&mut rt, large));
+        let sizes = [V::I(2), V::I(2), V::I(0)];
+        let args = [
+            &[from][..],
+            &sizes,
+            &[to, V::I(4), V::I(4), V::I(0), V::I(4)],
+        ]
+        .concat();
+        let done = crate::api::call(
+            &mut rt,
+            "org/lwjgl/stb/STBImageResize.nstbir_resize_uint8.(JIIIJIIII)I",
+            &args,
+        );
+        assert_eq!(done, V::I(1));
+        let bytes = |rt: &Rt, image: V| match rt.heap.get(image.r() as usize).map(|o| &o.data) {
+            Some(Data::Bytes(b, _)) => b.clone(),
+            _ => Vec::new(),
+        };
+        let mut expected = vec![0u8; 4 * 4 * 4];
+        assert!(crate::stb_resize::resize(
+            &bytes(&rt, small),
+            (2, 2),
+            0,
+            &mut expected,
+            (4, 4),
+            0,
+            4
+        ));
+        assert_eq!(bytes(&rt, large), expected);
+        // Its corners are the small one's colours, and it is opaque throughout.
+        let pixel = |rt: &mut Rt, image: V, x: i32, y: i32| {
+            c(rt, "getPixelRGBA.(II)I", &[image, V::I(x), V::I(y)]).i() as u32
+        };
+        assert_eq!(
+            (pixel(&mut rt, large, 0, 0), pixel(&mut rt, large, 3, 3)),
+            (colours[0], colours[3])
+        );
+        assert!(expected.chunks_exact(4).all(|p| p[3] == 255));
+        // Found by reflection, it answers with an `Integer`, as the JVM boxes what it returns.
+        let class = crate::jlang::class_object(&mut rt, "org/lwjgl/stb/STBImageResize");
+        let name = rt.string("nstbir_resize_uint8");
+        let (long, int) = (
+            crate::jlang::class_object(&mut rt, "long"),
+            crate::jlang::class_object(&mut rt, "int"),
+        );
+        let kinds = [long, int, int, int, long, int, int, int, int];
+        let params = rt.alloc("[Ljava/lang/Class;", Data::Array(kinds.to_vec()));
+        let method = crate::api::call(
+            &mut rt,
+            "java/lang/Class.getDeclaredMethod.(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+            &[class, name, params],
+        );
+        let boxed: Vec<V> = args
+            .iter()
+            .map(|v| match v {
+                V::J(_) => crate::jlang::box_as(&mut rt, *v, 'J'),
+                v => crate::jlang::box_as(&mut rt, *v, 'I'),
+            })
+            .collect();
+        let given = rt.alloc("[Ljava/lang/Object;", Data::Array(boxed));
+        let answer = crate::api::call(
+            &mut rt,
+            "java/lang/reflect/Method.invoke.(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+            &[method, V::NULL, given],
+        );
+        assert_eq!(
+            crate::api::call(&mut rt, "java/lang/Number.intValue.()I", &[answer]),
+            V::I(1)
+        );
+        // A closed image has no pixels to scale into.
+        let closed = make(&mut rt, 4, 4);
+        let gone = address(&mut rt, closed);
+        c(&mut rt, "close.()V", &[closed]);
+        let args = [
+            &[from][..],
+            &sizes,
+            &[gone, V::I(4), V::I(4), V::I(0), V::I(4)],
+        ]
+        .concat();
+        assert_eq!(
+            crate::api::call(
+                &mut rt,
+                "org/lwjgl/stb/STBImageResize.nstbir_resize_uint8.(JIIIJIIII)I",
+                &args
+            ),
+            V::I(0)
+        );
+        // The lower row of the small image, scaled over an image two wide and four high: each
+        // row is that row as the library filters a row kept at its width (a little of each
+        // pixel's neighbour in it).
+        c(
+            &mut rt,
+            "resizeSubRectTo.(IIIILcom/mojang/blaze3d/platform/NativeImage;)V",
+            &[small, V::I(0), V::I(1), V::I(2), V::I(1), part],
+        );
+        let mut expected = vec![0u8; 2 * 4 * 4];
+        assert!(crate::stb_resize::resize(
+            &bytes(&rt, small)[8..],
+            (2, 1),
+            0,
+            &mut expected,
+            (2, 4),
+            0,
+            4
+        ));
+        assert_eq!(bytes(&rt, part), expected);
+        for y in 0..4 {
+            assert_eq!(
+                (pixel(&mut rt, part, 0, y), pixel(&mut rt, part, 1, y)),
+                (0xffff_0e0e, 0xffff_f1f1),
+                "row {y}"
+            );
+        }
+        assert!(
+            rt.unmapped.is_empty() && rt.thrown.is_none(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
     /// A reader's lines and chars; `listResources` finds the files under a folder that its filter
     /// takes, by location, in every namespace.
     /// Content folders are found by the namespaces they have files for, so a mod's own resource
@@ -2013,6 +2334,40 @@ mod tests {
         assert_eq!(of("assets", "belts"), [belts]);
         assert_eq!(of("data", "gears"), [gears]);
         assert!(of("data", "belts").is_empty() && of("assets", "minecraft").is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A stack has a copy for each pack that has the file, in the packs' order, and below
+    /// them the game's own where that is none of theirs; a file one pack has is no stack of
+    /// copies, but the file any reader finds.
+    #[test]
+    fn a_stack_has_each_packs_copy_of_a_file() {
+        let dir = std::env::temp_dir().join(format!("hz-stack-{}", std::process::id()));
+        let (rings, belts, plain) = (dir.join("rings"), dir.join("belts"), dir.join("plain"));
+        let slot = "data/c/slots/ring.json";
+        for (folder, text) in [(&rings, "{\"size\":1}"), (&belts, "{\"size\":2}")] {
+            std::fs::create_dir_all(folder.join("data/c/slots")).unwrap();
+            std::fs::write(folder.join(slot), text).unwrap();
+        }
+        std::fs::create_dir_all(plain.join("data/c/slots")).unwrap();
+        std::fs::write(plain.join("data/c/slots/belt.json"), "{}").unwrap();
+        let all = [plain.clone(), rings.clone(), belts.clone()];
+        let text = |p: &PathBuf| p.to_str().unwrap().to_owned();
+        assert_eq!(
+            stack_copies(all.iter(), slot, None),
+            [text(&rings), text(&belts)]
+        );
+        // The game's merged copy is one of theirs, or it is Minecraft's own below them.
+        assert_eq!(
+            stack_copies(all.iter(), slot, Some(b"{\"size\":2}")),
+            [text(&rings), text(&belts)]
+        );
+        assert_eq!(
+            stack_copies(all.iter(), slot, Some(b"{\"size\":0}")),
+            [THE_GAMES.to_owned(), text(&rings), text(&belts)]
+        );
+        assert!(stack_copies(all.iter(), "data/c/slots/belt.json", None).is_empty());
+        assert!(stack_copies(all.iter(), "data/c/slots/none.json", None).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -805,10 +805,28 @@ public class Fixture {
                 return info.codePointAt(8) + info.indexOf('y') * 7 + info.indexOf("\u0000\u0001") * 100000;
             case 4:
                 return info.hashCode();
-            default:
+            case 5:
                 return info.substring(1, 3).length() + (info.contains("\u0000\u0004") ? 10 : 0)
                     + info.getBytes(java.nio.charset.StandardCharsets.UTF_8).length * 100
                     + new String(info.toCharArray(), 7, 4).length() * 10000;
+            default: {
+                // A scanner that reads until the string ends under it, and one over any text.
+                int seen = 0;
+                String word = "caf\u00e9 au lait";
+                CharSequence any = word;
+                try {
+                    for (int i = 0; ; i++) seen += word.charAt(i) == 'a' ? 1 : 0;
+                } catch (StringIndexOutOfBoundsException e) {
+                    seen += 10 * e.getMessage().length();
+                }
+                try {
+                    seen += any.charAt(3) + any.length() * 1000 + (word.isEmpty() ? 1 : 0) + ("".isEmpty() ? 100000 : 0);
+                    seen += any.charAt(-1);
+                } catch (IndexOutOfBoundsException e) {
+                    seen += 1000000;
+                }
+                return seen;
+            }
         }
     }
 }

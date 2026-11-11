@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 137] = [
+const COMPAT: [(&str, &str); 140] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
@@ -127,6 +127,8 @@ const COMPAT: [(&str, &str); 137] = [
     ("entities.rs", include_str!("../../horizon-compat/src/entities.rs")),
     ("tanks.rs", include_str!("../../horizon-compat/src/tanks.rs")),
     ("tasks.rs", include_str!("../../horizon-compat/src/tasks.rs")),
+    ("zips.rs", include_str!("../../horizon-compat/src/zips.rs")),
+    ("guava_io.rs", include_str!("../../horizon-compat/src/guava_io.rs")),
     ("energy.rs", include_str!("../../horizon-compat/src/energy.rs")),
     ("enum_ext.rs", include_str!("../../horizon-compat/src/enum_ext.rs")),
     ("data_maps.rs", include_str!("../../horizon-compat/src/data_maps.rs")),
@@ -168,6 +170,7 @@ const COMPAT: [(&str, &str); 137] = [
     ("gamerules.rs", include_str!("../../horizon-compat/src/gamerules.rs")),
     ("faces.rs", include_str!("../../horizon-compat/src/faces.rs")),
     ("shapes.rs", include_str!("../../horizon-compat/src/shapes.rs")),
+    ("stb_resize.rs", include_str!("../../horizon-compat/src/stb_resize.rs")),
     ("streams.rs", include_str!("../../horizon-compat/src/streams.rs")),
     ("entity_commands.rs", include_str!("../../horizon-compat/src/entity_commands.rs")),
     ("entity_hits.rs", include_str!("../../horizon-compat/src/entity_hits.rs")),
@@ -5875,6 +5878,11 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
         // A split engine's runtimes take the mapping from its crate.
         if name == "lib.rs" && runtime.is_none() {
             text = text.replace("let mut rt = Rt::new();", "let mut rt = new_runtime();");
+        }
+        // A tool's engine links the core alone: the mapping's profile of the hooks is not its
+        // to keep.
+        if name == "lib.rs" && runtime.is_some() {
+            text = text.replace("horizon_compat::neo::profiled(rt, hook, f)", "f(rt)");
         }
         if name == "lib.rs" {
             text.push_str(&format!(

@@ -291,10 +291,21 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 
 /// Copies a carry-over's data into a translated content mod: the mod's own data (recipes, loot
 /// tables, tags, worldgen, advancements) but its block and item declarations (`data/<id>/horizon/`,
-/// which the translated code makes), and its additions to vanilla's and the convention (`c`) tags.
-/// A file the content mod has stays; other namespaces stay out (the translated manifest claims none).
+/// which the translated code makes), and its additions to the tags of any other namespace:
+/// vanilla's, the convention (`c`) tags, and other mods' (a mod puts its rings in Curios' `ring`
+/// tag, its foods in Create's `upright_on_belt`), which a content mod may add to without owning
+/// the namespace. A file the content mod has stays; another namespace's other files stay out
+/// (the translated manifest claims none).
 fn merge_data(carry: &Path, content: &Path, id: &str) {
-    for ns in [id, "minecraft", "c"] {
+    let mut namespaces: Vec<String> = fs::read_dir(carry.join("data"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    namespaces.sort();
+    for ns in &namespaces {
         let from = carry.join("data").join(ns);
         for rel in files_under(&from) {
             let wanted = if ns == id { !rel.starts_with("horizon") } else { rel.starts_with("tags") };
@@ -311,6 +322,25 @@ fn merge_data(carry: &Path, content: &Path, id: &str) {
             let _ = fs::copy(from.join(&rel), &target);
         }
     }
+}
+
+/// The data a translated content mod lacks, merged into `content` from `jar`'s carry-over
+/// ([`merge_data`]): what [`install`] does for each mod it translates, for a bundle made by
+/// hand (`horizon-mod-translator bundle`, whose content mods carry a mod's look and the blocks
+/// its code declares, not its recipes, loot tables, tags or worldgen). How many files came.
+pub fn data(jar: &Path, content: &Path) -> Result<usize, String> {
+    let id = horizon_mod_translator::bundle::mod_id(jar)
+        .ok_or_else(|| format!("{}: no mod id", jar.display()))?;
+    let own = std::env::temp_dir().join(format!("horizon-port-data-{}-{id}", std::process::id()));
+    let _ = fs::remove_dir_all(&own);
+    let carried = check::check(jar, &own).map(|_| own.join("carry"));
+    let had = files_under(&content.join("data")).len();
+    if let Ok(carry) = &carried {
+        merge_data(carry, content, &id);
+    }
+    let _ = fs::remove_dir_all(&own);
+    carried?;
+    Ok(files_under(&content.join("data")).len() - had)
 }
 
 /// Copies the loadable carries into `<game>/horizon-mods/<id>/`.
@@ -613,6 +643,36 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// A bundle made by hand gets its jar's data with one command: the recipes and the tag
+    /// the jar carries come into the content mod, beside the blocks its code declares.
+    #[test]
+    fn a_bundles_content_mod_gets_its_jars_data() {
+        let root = std::env::temp_dir().join(format!("port-install-data-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("content/data/rubies/horizon/block")).unwrap();
+        fs::write(
+            root.join("content/data/rubies/horizon/block/ruby_block.json"),
+            "code",
+        )
+        .unwrap();
+        let path = root.join("rubies-1.0.jar");
+        content_jar(&path);
+        let came = data(&path, &root.join("content")).unwrap();
+        assert_eq!(came, 2);
+        let has = |rel: &str| root.join("content").join(rel).is_file();
+        assert!(
+            has("data/rubies/recipe/ruby_block.json") && has("data/minecraft/tags/item/gems.json")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("content/data/rubies/horizon/block/ruby_block.json"))
+                .unwrap(),
+            "code"
+        );
+        // (Again adds nothing: what is there stays.)
+        assert_eq!(data(&path, &root.join("content")).unwrap(), 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn a_translated_content_mod_takes_the_carried_data_but_keeps_its_own_blocks() {
         let root = std::env::temp_dir().join(format!("port-install-merge-{}", std::process::id()));
@@ -631,6 +691,7 @@ mod tests {
         put("carry/data/c/tags/item/gems/ruby.json", "carried");
         put("carry/data/minecraft/recipe/stone.json", "carried");
         put("carry/data/quark/tags/item/gems.json", "carried");
+        put("carry/data/quark/recipe/gem_block.json", "carried");
         put("content/data/rubies/horizon/block/ruby_block.json", "code");
         put("content/data/rubies/recipe/ruby.json", "own");
         merge_data(&root.join("carry"), &root.join("content"), "rubies");
@@ -644,9 +705,14 @@ mod tests {
         assert_eq!(read("data/rubies/recipe/ruby.json").as_deref(), Some("own"));
         assert_eq!(read("data/rubies/horizon/block/ruby_block.json").as_deref(), Some("code"));
         assert_eq!(read("data/rubies/horizon/block/ruby_ore.json"), None);
-        // Vanilla's files and other mods' namespaces stay out.
+        // What it adds to another mod's tags comes along too; vanilla's and other mods' other
+        // files stay out.
+        assert_eq!(
+            read("data/quark/tags/item/gems.json").as_deref(),
+            Some("carried")
+        );
         assert_eq!(read("data/minecraft/recipe/stone.json"), None);
-        assert_eq!(read("data/quark/tags/item/gems.json"), None);
+        assert_eq!(read("data/quark/recipe/gem_block.json"), None);
         fs::remove_dir_all(&root).unwrap();
     }
 

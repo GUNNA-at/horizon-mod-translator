@@ -70,9 +70,22 @@ fn put(rt: &mut Rt, w: V, text: &str) {
     }
     let sink = rt.get_field(w, "$sink");
     if sink.r() == 0 {
-        let all = rt.str_of(rt.get_field(w, "$text")).unwrap_or("").to_owned() + text;
-        let all = rt.alloc("java/lang/String", crate::Data::Str(all));
-        rt.put_field(w, "$text", all);
+        // The writer's own text, which nothing else holds, added to where it lies: a new
+        // string of it all for each piece written made a megabyte of JSON written in small
+        // pieces gigabytes of copies, each one garbage at the next.
+        let held = rt.get_field(w, "$text");
+        match rt
+            .heap
+            .get_mut(held.r() as usize)
+            .filter(|_| held.r() != 0)
+            .map(|o| &mut o.data)
+        {
+            Some(crate::Data::Str(all)) => all.push_str(text),
+            _ => {
+                let all = rt.alloc("java/lang/String", crate::Data::Str(text.to_owned()));
+                rt.put_field(w, "$text", all);
+            }
+        }
     } else if rt.get_field(w, "$bytes").i() != 0 {
         let bytes = crate::files::byte_array(rt, text.as_bytes());
         crate::api::call(rt, "java/io/OutputStream.write.([B)V", &[sink, bytes]);
@@ -234,6 +247,31 @@ mod tests {
         c(&mut rt, "java/io/StringWriter.write.(I)V", &[sw, V::I('9' as i32)]);
         let kept = c(&mut rt, "java/io/StringWriter.toString.()Ljava/lang/String;", &[sw]);
         assert_eq!(rt.str_of(kept), Some("speed=9"));
+        // What it gave is a string of its own: more written after is not in it, and a long
+        // text written in small pieces is all there.
+        let buffer = c(
+            &mut rt,
+            "java/io/StringWriter.getBuffer.()Ljava/lang/StringBuffer;",
+            &[sw],
+        );
+        for _ in 0..20_000 {
+            c(
+                &mut rt,
+                "java/io/StringWriter.write.(I)V",
+                &[sw, V::I('!' as i32)],
+            );
+        }
+        assert_eq!(rt.str_of(kept), Some("speed=9"));
+        assert_eq!(
+            c(&mut rt, "java/lang/StringBuffer.length.()I", &[buffer]),
+            V::I(7)
+        );
+        let longer = c(
+            &mut rt,
+            "java/io/StringWriter.toString.()Ljava/lang/String;",
+            &[sw],
+        );
+        assert_eq!(rt.str_of(longer).map(str::len), Some(20_007));
         c(&mut rt, "java/io/ByteArrayOutputStream.<init>.()V", &[bytes]);
         c(&mut rt, "java/io/OutputStreamWriter.<init>.(Ljava/io/OutputStream;)V", &[osw, bytes]);
         c(&mut rt, "java/io/OutputStreamWriter.write.(Ljava/lang/String;)V", &[osw, on]);

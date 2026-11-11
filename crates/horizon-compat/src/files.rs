@@ -209,10 +209,17 @@ pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Where `text` is on disk.
+/// Where `text` is on disk. A mod's own jar is made there the first time it is looked for
+/// ([`crate::zips::mod_jar`]).
 pub(crate) fn on_disk(rt: &Rt, text: &str) -> PathBuf {
     let p = Path::new(text);
-    if p.is_absolute() { p.to_owned() } else { game_dir(rt).join(p) }
+    let path = if p.is_absolute() {
+        p.to_owned()
+    } else {
+        game_dir(rt).join(p)
+    };
+    crate::zips::mod_jar(&path);
+    path
 }
 
 /// `a.resolve(b)`: `b` when it is absolute or `a` is empty, `a` when `b` is empty.
@@ -479,7 +486,7 @@ fn path_method(rt: &mut Rt, name: &str, p: &str, args: &[V]) -> Option<V> {
 }
 
 /// `File`'s methods, on the file `f` (its text).
-fn file_method(rt: &mut Rt, name: &str, f: &str, args: &[V]) -> Option<V> {
+fn file_method(rt: &mut Rt, name: &str, desc: &str, f: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let disk = on_disk(rt, f);
     Some(match name {
@@ -526,9 +533,37 @@ fn file_method(rt: &mut Rt, name: &str, f: &str, args: &[V]) -> Option<V> {
             let to = text(rt, a(1))?;
             V::I(std::fs::rename(&disk, on_disk(rt, &to)).is_ok() as i32)
         }
+        // The folder's entries, or those its filter takes: a `FilenameFilter` is asked of the
+        // folder and each name, a `FileFilter` of each file. (Unasked, JourneyMap read a
+        // folder among its themes' files as a theme.)
         "list" | "listFiles" => match entries(&disk) {
             Ok(names) if disk.is_dir() => {
-                let items: Vec<V> = names.iter().map(|n| if name == "list" { rt.string(n) } else { new_file(rt, &resolve(f, n)) }).collect();
+                let filter = a(1);
+                let by_name = desc.starts_with("(Ljava/io/FilenameFilter;)");
+                let mut items: Vec<V> = Vec::with_capacity(names.len());
+                for n in &names {
+                    if filter.r() != 0 {
+                        let taken = if by_name {
+                            let entry = rt.string(n);
+                            rt.call_functional("java/io/FilenameFilter.accept.(Ljava/io/File;Ljava/lang/String;)Z", filter, &[a(0), entry])
+                        } else {
+                            let file = new_file(rt, &resolve(f, n));
+                            rt.call_functional(
+                                "java/io/FileFilter.accept.(Ljava/io/File;)Z",
+                                filter,
+                                &[file],
+                            )
+                        };
+                        if taken.i() == 0 {
+                            continue;
+                        }
+                    }
+                    items.push(if name == "list" {
+                        rt.string(n)
+                    } else {
+                        new_file(rt, &resolve(f, n))
+                    });
+                }
                 let arr = rt.new_array(items.len() as i32, V::NULL);
                 for (i, v) in items.into_iter().enumerate() {
                     rt.array_set(arr, i as i32, v);
@@ -817,7 +852,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         FILE => {
             let f = text(rt, a(0))?;
-            file_method(rt, name, &f, args)
+            file_method(rt, name, desc, &f, args)
         }
         FILE_TIME => match name {
             "toMillis" => Some(rt.get_field(a(0), "$millis")),

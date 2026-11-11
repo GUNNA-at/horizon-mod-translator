@@ -2230,6 +2230,67 @@ const ACCEPT: &str = "java/util/function/Consumer.accept.(Ljava/lang/Object;)V";
 const BI_APPLY: &str = "java/util/function/BiFunction.apply.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
 const BI_ACCEPT: &str = "java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V";
 
+/// Guava's `Strings.lenientFormat`: each `%s` of `template` is the next argument's text, and
+/// the arguments left over follow in brackets.
+fn lenient_format(template: &str, args: &[String]) -> String {
+    let mut out = String::with_capacity(template.len() + 16 * args.len());
+    let (mut rest, mut used) = (template, 0);
+    while used < args.len() {
+        let Some(at) = rest.find("%s") else { break };
+        out.push_str(&rest[..at]);
+        out.push_str(&args[used]);
+        used += 1;
+        rest = &rest[at + 2..];
+    }
+    out.push_str(rest);
+    if used < args.len() {
+        out.push_str(" [");
+        out.push_str(&args[used..].join(", "));
+        out.push(']');
+    }
+    out
+}
+
+/// The message of one of Guava's `Preconditions` checks whose descriptor is `desc`: `given` is
+/// what follows the thing checked. One object is the message itself; a template takes the
+/// rest as its arguments (an array of them, or up to four values of their own kinds). None
+/// for a check with no message.
+fn check_message(rt: &mut Rt, desc: &str, given: &[V]) -> Option<String> {
+    let kinds = crate::jlang::kinds(desc);
+    let kinds = kinds.get(1..).unwrap_or(&[]);
+    let (&first, rest) = given.split_first()?;
+    let text_of = |rt: &mut Rt, v: V, kind: char| match kind {
+        'L' | '[' => {
+            let s = crate::api::call(
+                rt,
+                "java/lang/String.valueOf.(Ljava/lang/Object;)Ljava/lang/String;",
+                &[v],
+            );
+            rt.str_of(s).unwrap_or("null").to_owned()
+        }
+        kind => rt.to_java_string(v, kind),
+    };
+    let template = desc
+        .split(')')
+        .next()
+        .is_some_and(|p| p.contains("Ljava/lang/String;"));
+    if !template {
+        return Some(text_of(rt, first, 'L'));
+    }
+    let template = rt.str_of(first).unwrap_or("null").to_owned();
+    let args: Vec<String> = if desc.contains("[Ljava/lang/Object;") {
+        let all = elements(rt, rest.first().copied().unwrap_or_default());
+        all.into_iter().map(|v| text_of(rt, v, 'L')).collect()
+    } else {
+        let mut out = Vec::new();
+        for (v, kind) in rest.iter().zip(kinds.get(1..).unwrap_or(&[])) {
+            out.push(text_of(rt, *v, *kind));
+        }
+        out
+    };
+    Some(lenient_format(&template, &args))
+}
+
 const FUTURE: &str = "java/util/concurrent/CompletableFuture";
 
 /// A future that failed with `thrown`, as one whose work or stage threw it.
@@ -2279,18 +2340,22 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
                 return Some(crate::tasks::later(rt, a(0), kind, V::Void));
             };
             // An executor of the mods' own or the game's: it is handed the work to run when it
-            // chooses (the client's runs it here and now, on its own thread). One that nothing
-            // maps can't have taken it: the work runs here, as on a direct executor.
+            // chooses (the client's runs it here and now, on its own thread). What it has not
+            // run by then is the pools' to run with theirs: an executor nothing maps took
+            // nothing, and one of a mod's that keeps its work for later finds it done. But
+            // for the client's while the mods load, which keeps it for when its resources
+            // are there.
             let future = crate::tasks::waiting(rt, a(0), kind, V::Void);
             let task = crate::functions::task(rt, future);
-            let misses = rt.hook_misses;
             rt.call_functional(
                 "java/util/concurrent/Executor.execute.(Ljava/lang/Runnable;)V",
                 executor,
                 &[task],
             );
-            if rt.hook_misses != misses {
-                crate::tasks::force(rt, future);
+            if crate::tasks::waits(rt, future)
+                && rt.class_of(executor) != "net/minecraft/client/Minecraft"
+            {
+                crate::tasks::queue(rt, future);
             }
             return Some(future);
         }
@@ -2806,7 +2871,66 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
                 rt.alloc(class, Data::List(Vec::new()))
             }
         }
-        ("com/google/common/base/Preconditions", "checkNotNull") => a(0),
+        // Guava's checks throw what Guava's do: a state or an argument that is not what the
+        // mod's code requires ends that code there, as on a JVM, with the message it wrote.
+        // (`checkNotNull(o)` alone lets a null pass, as `Objects.requireNonNull(o)` does.)
+        ("com/google/common/base/Preconditions", "checkNotNull") => {
+            if a(0).is_null() && args.len() > 1 {
+                let message = check_message(rt, desc, &args[1..]).unwrap_or_default();
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/NullPointerException",
+                    &message,
+                ));
+            }
+            a(0)
+        }
+        ("com/google/common/base/Preconditions", "checkArgument" | "checkState") => {
+            if a(0).i() == 0 {
+                let class = if name == "checkState" {
+                    "java/lang/IllegalStateException"
+                } else {
+                    "java/lang/IllegalArgumentException"
+                };
+                match check_message(rt, desc, &args[1..]) {
+                    Some(message) => {
+                        crate::jlang::throw_with(rt, class, &message);
+                    }
+                    None => rt.thrown = Some(rt.new_object(class)),
+                }
+            }
+            V::Void
+        }
+        // An index in a list of `size` (`checkElementIndex`) or between its elements, the end
+        // too (`checkPositionIndex`); `checkPositionIndexes(start, end, size)` a range in it.
+        ("com/google/common/base/Preconditions", "checkElementIndex" | "checkPositionIndex") => {
+            let (index, size) = (a(0).i(), a(1).i());
+            let within =
+                index >= 0 && (index < size || (name == "checkPositionIndex" && index == size));
+            if !within {
+                let message = format!("index ({index}) must be less than size ({size})");
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IndexOutOfBoundsException",
+                    &message,
+                ));
+            }
+            V::I(index)
+        }
+        ("com/google/common/base/Preconditions", "checkPositionIndexes") => {
+            let (start, end, size) = (a(0).i(), a(1).i(), a(2).i());
+            if start < 0 || end < start || end > size {
+                let message = format!(
+                    "end index ({end}) must not be less than start index ({start}) or greater than size ({size})"
+                );
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IndexOutOfBoundsException",
+                    &message,
+                ));
+            }
+            V::Void
+        }
         ("com/google/common/base/Preconditions", _) => V::Void,
         ("java/util/Collections", "emptyList" | "emptySet" | "emptyMap") => match name {
             "emptyMap" => rt.alloc("java/util/HashMap", Data::Table(Table::default())),
@@ -3083,8 +3207,44 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             }
             a(0)
         }
-        ("java/util/Objects", "requireNonNull" | "requireNonNullElse") => {
-            if a(0).r() == 0 && name == "requireNonNullElse" { a(1) } else { a(0) }
+        // `requireNonNull(o, message)`: the mod's own check, which throws for a null as Java's
+        // does (FramedBlocks tells a state's cache asked for "too early" so, where a null
+        // handed on failed far from there). Without a message a null passes: javac writes
+        // that call wherever Java itself would throw for one (a method reference's receiver,
+        // an inner class's outer object), and here a null is as often what the runtime has no
+        // answer for; it is found at its first use.
+        ("java/util/Objects", "requireNonNull") => {
+            if a(0).is_null() && args.len() > 1 {
+                let message = if desc
+                    .starts_with("(Ljava/lang/Object;Ljava/util/function/Supplier;)")
+                    && !a(1).is_null()
+                {
+                    let made = rt.call_functional(SUPPLY, a(1), &[]);
+                    if rt.thrown.is_some() {
+                        return Some(V::NULL);
+                    }
+                    made
+                } else {
+                    a(1)
+                };
+                let thrown = rt.new_object("java/lang/NullPointerException");
+                if rt.str_of(message).is_some() {
+                    rt.put_field(thrown, "message", message);
+                }
+                rt.thrown = Some(thrown);
+                return Some(V::NULL);
+            }
+            a(0)
+        }
+        // (A number the runtime keeps unboxed is no null.)
+        ("java/util/Objects", "requireNonNullElse") => {
+            if !a(0).is_null() {
+                a(0)
+            } else if a(1).is_null() {
+                crate::jlang::throw_with(rt, "java/lang/NullPointerException", "defaultObj")
+            } else {
+                a(1)
+            }
         }
         // Guava's `Objects.equal(a, b)` and `Objects.hashCode(Object...)` are `Objects.equals`
         // and `Objects.hash`.
@@ -4340,6 +4500,16 @@ pub(crate) fn plain_list_for_each(rt: &mut Rt, args: &[V]) -> Option<V> {
     list_for_each(rt, this, args.get(1).copied().unwrap_or_default())
 }
 
+/// A key the map at `m` doesn't hold, where the map is `Item.BY_BLOCK` and the key one of the
+/// game's own blocks (a plain `Block` named by its id): the game's block items are learnt as they
+/// are asked for ([`crate::creative::game_block_item`]). None for any other map or key.
+fn by_block_miss(rt: &mut Rt, m: V, k: V) -> Option<V> {
+    if k.r() == 0 || rt.class_of(k) != "net/minecraft/world/level/block/Block" {
+        return None;
+    }
+    crate::creative::game_block_item(rt, m, k)
+}
+
 fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -4359,7 +4529,7 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         "defaultReturnValue" => missing(rt, this, desc),
         "get" | "getInt" | "getLong" | "getFloat" | "getDouble" | "getBoolean" | "getByte" | "getShort" | "getChar" => {
-            let v = table_get(rt, this, a(1));
+            let v = table_get(rt, this, a(1)).or_else(|| by_block_miss(rt, this, a(1)));
             found(rt, v)
         }
         "removeInt" | "removeLong" | "removeFloat" | "removeDouble" | "removeBoolean" => {
@@ -4378,7 +4548,9 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             table_put(rt, this, a(1), new);
             old
         }
-        "getOrDefault" => table_get(rt, this, a(1)).unwrap_or(a(2)),
+        "getOrDefault" => table_get(rt, this, a(1))
+            .or_else(|| by_block_miss(rt, this, a(1)))
+            .unwrap_or(a(2)),
         // A `BiMap`'s other way round: the table kept with it ([`inverse_of`]), made now for one
         // that had none (an immutable one, which was a map until asked).
         "inverse" if args.len() == 1 => match inverse_of(rt, this) {
@@ -4402,7 +4574,11 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             };
             found(rt, had)
         }
-        "containsKey" => V::I(table_get(rt, this, a(1)).is_some() as i32),
+        "containsKey" => V::I(
+            table_get(rt, this, a(1))
+                .or_else(|| by_block_miss(rt, this, a(1)))
+                .is_some() as i32,
+        ),
         // A `BiMap`'s values are its inverse's keys.
         "containsValue" => match inverse_of(rt, this) {
             Some(inverse) => V::I(get_in(rt, inverse, a(1)).is_some() as i32),
@@ -5927,6 +6103,103 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// A mod's own checks end its code as on a JVM: Guava's with the exception and the
+    /// message Guava makes, `requireNonNull` with a message for a null. A check that holds
+    /// answers what Java's does, and a number kept unboxed is no null.
+    #[test]
+    fn a_mods_own_checks_throw_as_javas() {
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let thrown = |rt: &mut Rt| {
+            let e = rt.thrown.take().expect("the check throws");
+            rt.unwinding.clear();
+            let message = rt.get_field(e, "message");
+            (rt.class_of(e), rt.str_of(message).map(str::to_owned))
+        };
+        let template = rt.string("%s of %s gears");
+        c(
+            &mut rt,
+            "com/google/common/base/Preconditions.checkArgument.(ZLjava/lang/String;II)V",
+            &[V::I(1), template, V::I(3), V::I(8)],
+        );
+        assert!(rt.thrown.is_none());
+        c(
+            &mut rt,
+            "com/google/common/base/Preconditions.checkArgument.(ZLjava/lang/String;II)V",
+            &[V::I(0), template, V::I(3), V::I(8)],
+        );
+        assert_eq!(
+            thrown(&mut rt),
+            (
+                "java/lang/IllegalArgumentException",
+                Some("3 of 8 gears".to_owned())
+            )
+        );
+        let (three, word) = (
+            crate::jlang::box_as(&mut rt, V::I(3), 'I'),
+            rt.string("spare"),
+        );
+        let more = rt.alloc("[Ljava/lang/Object;", Data::Array(vec![three, three, word]));
+        c(
+            &mut rt,
+            "com/google/common/base/Preconditions.checkState.(ZLjava/lang/String;[Ljava/lang/Object;)V",
+            &[V::I(0), template, more],
+        );
+        assert_eq!(
+            thrown(&mut rt),
+            (
+                "java/lang/IllegalStateException",
+                Some("3 of 3 gears [spare]".to_owned())
+            )
+        );
+        c(
+            &mut rt,
+            "com/google/common/base/Preconditions.checkState.(Z)V",
+            &[V::I(0)],
+        );
+        assert_eq!(thrown(&mut rt), ("java/lang/IllegalStateException", None));
+        let early = rt.string("called too early");
+        let require = "java/util/Objects.requireNonNull.(Ljava/lang/Object;Ljava/lang/String;)Ljava/lang/Object;";
+        assert_eq!(c(&mut rt, require, &[word, early]), word);
+        c(&mut rt, require, &[V::NULL, early]);
+        assert_eq!(
+            thrown(&mut rt),
+            (
+                "java/lang/NullPointerException",
+                Some("called too early".to_owned())
+            )
+        );
+        // Without a message a null passes, as where javac wrote the call.
+        assert!(
+            c(
+                &mut rt,
+                "java/util/Objects.requireNonNull.(Ljava/lang/Object;)Ljava/lang/Object;",
+                &[V::NULL]
+            )
+            .is_null()
+        );
+        assert!(rt.thrown.is_none());
+        let or_else = "java/util/Objects.requireNonNullElse.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;";
+        assert_eq!(c(&mut rt, or_else, &[V::I(0), word]), V::I(0));
+        assert_eq!(c(&mut rt, or_else, &[V::NULL, word]), word);
+        assert_eq!(
+            c(
+                &mut rt,
+                "com/google/common/base/Preconditions.checkElementIndex.(II)I",
+                &[V::I(2), V::I(3)]
+            ),
+            V::I(2)
+        );
+        c(
+            &mut rt,
+            "com/google/common/base/Preconditions.checkElementIndex.(II)I",
+            &[V::I(3), V::I(3)],
+        );
+        assert_eq!(thrown(&mut rt).0, "java/lang/IndexOutOfBoundsException");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// `LongAdder`: what was added, summed; `sumThenReset` gives the sum and starts again.

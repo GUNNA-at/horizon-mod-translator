@@ -64,7 +64,19 @@ pub(crate) fn read(rt: &mut Rt, registry: &str) {
     if !rt.interned.contains_key(ANY) {
         return;
     }
-    let Some(&codec) = rt.interned.get(&format!("{CODEC}{registry}")) else { return };
+    // (Every lookup in any registry comes through here: the key is written where the last
+    // one was, not made anew.)
+    thread_local! {
+        static KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    let codec = KEY.with(|key| {
+        let mut key = key.borrow_mut();
+        key.clear();
+        key.push_str(CODEC);
+        key.push_str(registry);
+        rt.interned.get(key.as_str()).copied()
+    });
+    let Some(codec) = codec else { return };
     let done = format!("{READ}{registry}");
     if rt.interned.contains_key(&done) || rt.host().is_none() {
         return;

@@ -170,7 +170,7 @@ result comes from a scene set up by command, read back from the world's data and
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
   played both mods in one world.
 
-Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in about 40 minutes (a quarter of an hour after a change to the mapping alone), and it shows a world: at its latest launch (the 22nd) the game was ready 368 seconds after it started, with all but 2 of the mods constructed, 28,818 blocks and items declared, and the server ticking twenty times a second with 7% of its time in the mods' code. Create's rotation works in it: a creative motor set beside a shaft turns it, and a mechanical press beside a motor is powered. Not everything in it works: 23 of the mods' handlers ended with an error at that launch (the 17th had 1,306) and what they would have set up is missing, the press does not press yet, the window's own thread is slow (one mod took a second of every tick at that launch), and the game's memory peaks at 28 GB while the world opens, from one cause that is being tracked down.
+Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (365 mods) translates and builds into one game, in about 40 minutes (a quarter of an hour after a change to the mapping alone), and it plays: at its latest launch (the 28th) the game was ready 401 seconds after it started, with all but one of the mods constructed, the content of 320 mods in it with their data (675,537 block states, 29,115 items, 28,581 recipe files), and the server ticking twenty times a second with 30% of its time in the mods' code. Create works in it past rotation: a mechanical press over a depot, turned by a creative motor, pressed an iron ingot into an iron sheet, a recipe found in the mod's data and run by the mod's own machine. Not everything in it works: 461 of the mods' handlers ended with an error at that launch, most of them one library's armour layer on the mobs it draws (340) and one mod's colour asked for too early (87), and what they would have done is missing; the window's own thread is slow (drawing the mods' mobs takes 42 ms of every frame, so the game draws 11 frames a second offscreen); and the game's memory peaks at 19 GB while it loads (28 GB until its cause, one array made from a misread string, was found).
 
 ## Try it
 
@@ -204,15 +204,21 @@ cargo run --release -p horizon-mod-translator -- coverage path/to/mod.jar
 # 2. Translate a mod, and its addons as one engine, into a bundle.
 cargo run --release -p horizon-mod-translator -- bundle create.jar out/ --with addon.jar
 
-# 3. Apply the bundle to a copy of Horizon's tree and build the game.
+# 3. Give the bundle's content mods their jars' data: recipes, loot tables, tags, worldgen.
+#    (The bundle carries a mod's look and the blocks its code declares, not its data.)
+cargo run --release -p horizon-port-pack -- data create.jar out/content
+cargo run --release -p horizon-port-pack -- data addon.jar out/content-addon
+
+# 4. Apply the bundle to a copy of Horizon's tree and build the game.
 #    horizon-mixins lives in its own repository (GUNNA-at/horizon-mixins).
 horizon-mixins apply --workspace <copy of this tree> \
   --mods <folder with out/, without out/content> --out stage
 (cd stage && CARGO_INCREMENTAL=0 cargo build --profile fast -p horizon-client)
 
-# 4. Play. The mod's blocks, items and recipes load from out/content.
+# 5. Play. The mod's blocks, items and recipes load from out/content.
 horizon-ctl launch --game stage/target/fast/horizon-client --world T --creative \
-  --resources <prepared resources> --dev-mod out/content --game-dir <scratch folder>
+  --resources <prepared resources> --dev-mod out/content --dev-mod out/content-addon \
+  --game-dir <scratch folder>
 ```
 
 Create alone, with the libraries it bundles, becomes about 1.4 million lines of Rust. Build it without

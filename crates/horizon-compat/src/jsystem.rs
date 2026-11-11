@@ -9,6 +9,57 @@ const DATE: &str = "java/util/Date";
 const URL: &str = "java/net/URL";
 /// A `URI` is kept as a `URL` is: its text.
 const URI: &str = "java/net/URI";
+const URL_DECODER: &str = "java/net/URLDecoder";
+const URL_ENCODER: &str = "java/net/URLEncoder";
+
+/// `URLDecoder.decode`: `+` is a space, `%xx` a byte of the text's UTF-8; a `%` without two
+/// hex digits after it is the error Java makes of it.
+fn form_decoded(text: &str) -> Result<String, String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' => {
+                let hex = bytes
+                    .get(i + 1..i + 3)
+                    .and_then(|h| std::str::from_utf8(h).ok());
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(byte) => out.push(byte),
+                    None => {
+                        return Err(match hex {
+                            Some(h) => format!(
+                                "URLDecoder: Illegal hex characters in escape (%) pattern - Error at index 0 in: \"{h}\""
+                            ),
+                            None => "URLDecoder: Incomplete trailing escape (%) pattern".to_owned(),
+                        });
+                    }
+                }
+                i += 2;
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// `URLEncoder.encode`: letters, digits and `.-*_` as they are, a space as `+`, every other
+/// byte of the text's UTF-8 as `%XX`.
+fn form_encoded(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for b in text.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' | b'*' | b'_' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
 const RESPONSE: &str = "java/net/http/HttpResponse";
 const IO_EXCEPTION: &str = "java/io/IOException";
 const OFFLINE: &str = "a mod has no network here";
@@ -33,6 +84,8 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
         || matches!(
             owner,
             URL | URI
+                | URL_DECODER
+                | URL_ENCODER
                 | "java/net/URLConnection"
                 | "java/net/HttpURLConnection"
                 | "javax/net/ssl/HttpsURLConnection"
@@ -1335,6 +1388,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return sockets(rt, name, desc, args);
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // `URLDecoder.decode(text, charset)` and `URLEncoder.encode(text, charset)`: a form's
+    // coding, in UTF-8 whatever charset is named (what mods name).
+    if owner == URL_DECODER && name == "decode" {
+        let text = crate::jlang::text(rt, a(0));
+        return Some(match form_decoded(&text) {
+            Ok(decoded) => rt.string(&decoded),
+            Err(why) => crate::jlang::throw_with(rt, "java/lang/IllegalArgumentException", &why),
+        });
+    }
+    if owner == URL_ENCODER && name == "encode" {
+        let text = crate::jlang::text(rt, a(0));
+        return Some(rt.string(&form_encoded(&text)));
+    }
     let offline = |rt: &mut Rt| crate::jlang::throw_with(rt, IO_EXCEPTION, OFFLINE);
     if owner == URI
         && let Some(v) = uri_call(rt, name, desc, args)

@@ -145,6 +145,12 @@ const REGISTRY_BUILDER: &str = "net/neoforged/neoforge/registries/RegistryBuilde
 const NEW_REGISTRY_EVENT: &str = "net/neoforged/neoforge/registries/NewRegistryEvent";
 const DATAPACK_REGISTRY_EVENT: &str = "net/neoforged/neoforge/registries/DataPackRegistryEvent$NewRegistry";
 const BAKE: &str = "net/neoforged/neoforge/registries/callback/BakeCallback.onBake.(Lnet/minecraft/core/Registry;)V";
+const ADD: &str = "net/neoforged/neoforge/registries/callback/AddCallback.onAdd.(Lnet/minecraft/core/Registry;ILnet/minecraft/resources/ResourceKey;Ljava/lang/Object;)V";
+const ADD_CALLBACK: &str = "net/neoforged/neoforge/registries/callback/AddCallback";
+const BAKE_CALLBACK: &str = "net/neoforged/neoforge/registries/callback/BakeCallback";
+const MODIFY_REGISTRIES_EVENT: &str = "net/neoforged/neoforge/registries/ModifyRegistriesEvent";
+/// Set once a registry has an `AddCallback`; each registry's are under `<this>/<registry>`.
+const ADD_CALLBACKS: &str = "compat:add-callbacks";
 
 /// The last parameter type of a method descriptor (`(La;Lnet/x/Event;)V` → `net/x/Event`).
 fn last_param(desc: &str) -> Option<&str> {
@@ -601,6 +607,24 @@ pub fn fire_registrations(rt: &mut Rt) {
     post(rt, NEW_REGISTRY_EVENT, ev);
     let ev = rt.new_object(DATAPACK_REGISTRY_EVENT);
     post(rt, DATAPACK_REGISTRY_EVENT, ev);
+    // With every registry made, NeoForge lets the mods add callbacks to them
+    // (`ModifyRegistriesEvent`). In the pack one library listens, Puzzles Lib, for its "registry
+    // entry added" event, and what is built on that (Diagonal Fences, Walls and Windows; Easy
+    // Anvils, Easy Magic, Visual Workbench) makes a twin of each block of a kind and has the
+    // block's item place the twin, whose look the mod then builds out of vanilla's unbaked
+    // models. The runtime has no such models to give, so a twin would be a block nothing
+    // draws, placed by every fence's item: the event is not posted until it has
+    // (`HORIZON_COMPAT_MODIFY_REGISTRIES=1` posts it, to see how far they come). A callback a
+    // mod adds itself (`Registry.addCallback`, a builder's `onAdd`) is told of every entry.
+    if modify_registries() {
+        let ev = rt.new_object(MODIFY_REGISTRIES_EVENT);
+        post(rt, MODIFY_REGISTRIES_EVENT, ev);
+    }
+    for extra in rt.custom_registries.clone() {
+        if !names.contains(&extra) {
+            names.push(extra);
+        }
+    }
     for registry in names {
         let ev = rt.new_object(REGISTER_EVENT);
         let key = rt.string(&registry);
@@ -635,9 +659,11 @@ pub fn fire_registrations(rt: &mut Rt) {
     crate::spawning::fire(rt);
     // The registries are frozen: each mod registry's bake callbacks run, once, on the full registry
     // (Create sorts its fan processing types and arm interaction points here).
+    // (The pairs stay in their list while they run: it is what holds them.)
     let all = bake_callbacks(rt);
-    let bakes = std::mem::take(list_mut(rt, all));
-    for pair in bakes {
+    let mut next = 0;
+    while let Some(&pair) = list_mut(rt, all).get(next) {
+        next += 1;
         let (registry, callback) = match rt.heap.get(pair.r() as usize).map(|o| &o.data) {
             Some(Data::List(v)) if v.len() == 2 => (v[0], v[1]),
             _ => continue,
@@ -645,6 +671,7 @@ pub fn fire_registrations(rt: &mut Rt) {
         rt.call_functional(BAKE, callback, &[registry]);
         rt.report_thrown("BakeCallback.onBake");
     }
+    list_mut(rt, all).clear();
     // NeoForge's "Config loading" step; then the client is made, and its hooks ask the mods for
     // what they draw with ([`fire_client_init`]: `Minecraft`'s constructor, before its first
     // resource load); then that load's first step, "Common setup" and "Sided setup", and the
@@ -689,6 +716,25 @@ pub(crate) fn loading(rt: &Rt) -> bool {
     rt.interned.contains_key(LOADING)
 }
 
+/// Whether `ModifyRegistriesEvent` is posted ([`fire_registrations`]): asked for by the
+/// environment, once.
+fn modify_registries() -> bool {
+    static ASKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ASKED.get_or_init(|| std::env::var_os("HORIZON_COMPAT_MODIFY_REGISTRIES").is_some_and(|v| v == "1"))
+}
+
+/// Runs `f`, a step of the loading that comes after the mods' registration here (the
+/// client's first resource load, which a JVM's client does before its title screen), as
+/// loading ([`loading`]).
+pub(crate) fn as_loading<R>(rt: &mut Rt, f: impl FnOnce(&mut Rt) -> R) -> R {
+    let was = rt.interned.insert(LOADING.into(), V::I(1));
+    let r = f(rt);
+    if was.is_none() {
+        rt.interned.remove(LOADING);
+    }
+    r
+}
+
 fn is_registry(owner: &str) -> bool {
     matches!(
         owner,
@@ -715,7 +761,7 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
     // Vanilla's potions and effects know their own ids, and its blocks and items are their names
     // (`api::block`, `api_common::item`); a mod's are registrations.
     rt.registered_name(obj, registry)
-        .or_else(|| matches!(registry, "potion" | "mob_effect").then(|| rt.str_of(rt.get_field(obj, "$id"))).flatten())
+        .or_else(|| matches!(registry, "potion" | "mob_effect" | "data_component_type").then(|| rt.str_of(rt.get_field(obj, "$id"))).flatten())
         .or_else(|| {
             let named = matches!(registry, "block" | "item") && rt.class_of(obj) != "java/lang/String";
             named.then(|| rt.str_of(obj)).flatten().filter(|n| n.contains(':') && !n.starts_with(crate::api::UNREGISTERED))
@@ -832,19 +878,28 @@ fn holder_is(rt: &mut Rt, registry: &str, id: &str, desc: &str, other: V) -> V {
     V::I(is as i32)
 }
 
+/// Set once a mod gave a registry an alias (`addAlias`): a lookup that misses then goes
+/// through them.
+pub(crate) const ALIASED: &str = "compat:registry-aliases";
+
 /// What `registry` holds under `id`: the mod's registrations (a datapack registry's files among
 /// them), vanilla's blocks and items.
 pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
     crate::datapack::read(rt, registry);
-    if let Some(v) = rt.registered.get(&(registry.to_owned(), id.to_owned())) {
-        return *v;
+    // (Asked for every model of a pack by each mod that looks through them: no key is made
+    // for the lookup, and aliases are looked for only where a mod added one.)
+    if let Some(v) = rt.registry_entry(registry, id) {
+        return v;
     }
     // Through its aliases (`addAlias`), a few at most: a cycle names nothing.
     let mut name = id.to_owned();
     for _ in 0..8 {
+        if !rt.interned.contains_key(ALIASED) {
+            break;
+        }
         let Some(to) = rt.interned.get(&format!("alias/{registry}/{name}")).and_then(|t| rt.str_of(*t)).map(str::to_owned) else { break };
-        if let Some(v) = rt.registered.get(&(registry.to_owned(), to.clone())) {
-            return *v;
+        if let Some(v) = rt.registry_entry(registry, &to) {
+            return v;
         }
         name = to;
     }
@@ -888,6 +943,8 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "enchantment" if crate::recipes::valid_location(id) => crate::enchantments::value(rt, id),
         // Damage types are data: the game's, and the mods' own (`damage.rs`).
         "damage_type" if crate::recipes::valid_location(id) => crate::damage::damage_type(rt, id),
+        // Vanilla's component types (`DataComponents.CUSTOM_NAME`'s), one object a name.
+        "data_component_type" if id.starts_with("minecraft:") => crate::components::vanilla_type(rt, id),
         _ => V::NULL,
     }
 }
@@ -993,16 +1050,66 @@ fn make_registry(rt: &mut Rt, builder: V) -> V {
             rt.custom_registries.push(name);
         }
     }
-    let callbacks = match rt.heap.get(rt.get_field(builder, "$bake").r() as usize).map(|o| &o.data) {
-        Some(Data::List(v)) => v.clone(),
-        _ => Vec::new(),
-    };
-    let all = bake_callbacks(rt);
-    for callback in callbacks {
+    for (field, kind) in [
+        ("$bake", Some(BAKE_CALLBACK)),
+        ("$add", Some(ADD_CALLBACK)),
+        ("$callbacks", None),
+    ] {
+        let callbacks = match rt
+            .heap
+            .get(rt.get_field(builder, field).r() as usize)
+            .map(|o| &o.data)
+        {
+            Some(Data::List(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        for callback in callbacks {
+            add_callback(rt, registry, callback, kind);
+        }
+    }
+    registry
+}
+
+/// A registry's callback (`Registry.addCallback(callback)`, a builder's `onAdd`, `onBake`,
+/// `callback`), kept by what it is as NeoForge's `BaseMappedRegistry` keeps them: an `AddCallback`
+/// hears each entry registered from then on, a `BakeCallback` the registry once it is frozen.
+/// `kind` names the one a builder's method takes; None asks the callback. (A `ClearCallback` never
+/// runs: nothing clears a registry here.)
+fn add_callback(rt: &mut Rt, registry: V, callback: V, kind: Option<&str>) {
+    if callback.r() == 0 {
+        return;
+    }
+    let is =
+        |rt: &Rt, class: &str| kind.map_or_else(|| rt.instance_of(callback, class), |k| k == class);
+    if is(rt, ADD_CALLBACK) {
+        let name = rt
+            .str_of(registry)
+            .unwrap_or("")
+            .trim_start_matches("minecraft:")
+            .to_owned();
+        let list = rt.intern(format!("{ADD_CALLBACKS}/{name}"), |rt| {
+            rt.alloc("java/util/ArrayList", Data::List(Vec::new()))
+        });
+        let pair = rt.alloc("java/util/List", Data::List(vec![registry, callback]));
+        list_mut(rt, list).push(pair);
+        rt.interned.insert(ADD_CALLBACKS.into(), V::I(1));
+    }
+    if is(rt, BAKE_CALLBACK) {
+        let all = bake_callbacks(rt);
         let pair = rt.alloc("java/util/List", Data::List(vec![registry, callback]));
         list_mut(rt, all).push(pair);
     }
-    registry
+}
+
+/// A builder's callbacks of one kind (`$bake`, `$add`) or of any (`$callbacks`), until its
+/// registry is made.
+fn builder_callback(rt: &mut Rt, builder: V, field: &'static str, callback: V) {
+    let mut list = rt.get_field(builder, field);
+    if list.r() == 0 {
+        list = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
+        rt.put_field(builder, field, list);
+    }
+    list_mut(rt, list).push(callback);
 }
 
 fn register(rt: &mut Rt, registry: &str, name: &str, obj: V) {
@@ -1011,6 +1118,36 @@ fn register(rt: &mut Rt, registry: &str, name: &str, obj: V) {
         if registry == "block" {
             crate::api::adopt_names(rt);
         }
+        if rt.interned.contains_key(ADD_CALLBACKS) {
+            entry_added(rt, registry, name, obj);
+        }
+    }
+}
+
+/// Tells `registry`'s `AddCallback`s of the entry just registered (`onAdd(registry, id, key,
+/// value)`), as NeoForge's registries do from `register`. A callback may register more (Puzzles
+/// Lib's event hands its listeners a registrar: a mod adds a block of its own for each fence).
+fn entry_added(rt: &mut Rt, registry: &str, name: &str, obj: V) {
+    let list = format!(
+        "{ADD_CALLBACKS}/{}",
+        registry.trim_start_matches("minecraft:")
+    );
+    let Some(&list) = rt.interned.get(&list) else {
+        return;
+    };
+    let pairs = match rt.heap.get(list.r() as usize).map(|o| &o.data) {
+        Some(Data::List(v)) => v.clone(),
+        _ => return,
+    };
+    let id = raw_id(rt, registry, name);
+    let key = rt.string(&format!("{registry}#{name}"));
+    for pair in pairs {
+        let (of, callback) = match rt.heap.get(pair.r() as usize).map(|o| &o.data) {
+            Some(Data::List(v)) if v.len() == 2 => (v[0], v[1]),
+            _ => continue,
+        };
+        rt.call_functional(ADD, callback, &[of, V::I(id), key, obj]);
+        rt.report_thrown("AddCallback.onAdd");
     }
 }
 
@@ -1080,7 +1217,15 @@ fn resolve_at(rt: &mut Rt, i: usize) {
     if rt.thrown.is_some() {
         rt.report_thrown(&format!("the registration of {registry} {name}"));
     } else if made.r() != 0 {
-        rt.registered.insert((registry, name), made);
+        rt.registered.insert((registry.clone(), name.clone()), made);
+        // (As for an entry registered outright, [`register`]: a block's states take its name,
+        // and the registry's callbacks hear of the entry.)
+        if registry == "block" {
+            crate::api::adopt_block(rt, made, &name);
+        }
+        if rt.interned.contains_key(ADD_CALLBACKS) {
+            entry_added(rt, &registry, &name, made);
+        }
     }
     rt.thrown = outer;
 }
@@ -1322,13 +1467,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(a(0), "$key", a(1));
             V::Void
         }
-        (REGISTRY_BUILDER, "onBake") => {
-            let mut list = rt.get_field(a(0), "$bake");
-            if list.r() == 0 {
-                list = rt.alloc("java/util/ArrayList", Data::List(Vec::new()));
-                rt.put_field(a(0), "$bake", list);
-            }
-            list_mut(rt, list).push(a(1));
+        (REGISTRY_BUILDER, "onBake" | "onAdd" | "callback") => {
+            let field = match name {
+                "onBake" => "$bake",
+                "onAdd" => "$add",
+                _ => "$callbacks",
+            };
+            builder_callback(rt, a(0), field, a(1));
             a(0)
         }
         (REGISTRY_BUILDER, "create") => make_registry(rt, a(0)),
@@ -1343,6 +1488,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         // syncs registries or caps their ids.
         (REGISTRY_BUILDER, _) if desc.ends_with(")Lnet/neoforged/neoforge/registries/RegistryBuilder;") => a(0),
         (NEW_REGISTRY_EVENT, "create") => make_registry(rt, a(1)),
+        // `ModifyRegistriesEvent`: a registry by its key (registries are their names here), or all
+        // of them.
+        (MODIFY_REGISTRIES_EVENT, "getRegistry") => a(1),
+        (MODIFY_REGISTRIES_EVENT, "getRegistries") => {
+            let mut names: Vec<String> = REGISTRIES.iter().map(|r| (*r).to_owned()).collect();
+            names.extend(
+                rt.custom_registries
+                    .iter()
+                    .filter(|c| !REGISTRIES.contains(&c.as_str()))
+                    .cloned(),
+            );
+            let all: Vec<V> = names.iter().map(|n| rt.string(n)).collect();
+            crate::jutil::new_list(rt, all)
+        }
         (NEW_REGISTRY_EVENT, "register") => V::Void,
         // `DataPackRegistryEvent.NewRegistry.dataPackRegistry(key, codec[, networkCodec[, builder]])`:
         // a registry whose entries are data files, read with `codec` (`datapack`).
@@ -1835,6 +1994,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     }
                 }
                 "key" => rt.string(&reg),
+                // `addCallback(callback)`, `addCallback(Class, callback)`.
+                "addCallback" => {
+                    let callback = args.last().copied().unwrap_or(V::NULL);
+                    add_callback(rt, a(0), callback, None);
+                    V::Void
+                }
                 // The registry owns its holders (`Holder.Reference.createStandAlone(owner, key)`).
                 // As its lookup (`asLookup()`): registries are their names here.
                 "holderOwner" | "asLookup" => a(0),
@@ -1843,6 +2008,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let (from, to) = (name_in(rt, a(1)), name_in(rt, a(2)));
                     let t = rt.string(&to);
                     rt.interned.insert(format!("alias/{reg}/{from}"), t);
+                    rt.interned.insert(ALIASED.into(), V::I(1));
                     V::Void
                 }
                 // An intrusive holder (Create's `ContraptionType.holder`): made with its value before
@@ -1928,6 +2094,14 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 "getRegisteredName" => rt.string(&id),
                 "is" => holder_is(rt, &reg, &id, desc, a(1)),
+                // Its owner is its registry (the `owner` field, read as it is), and it can be
+                // written among that registry's entries alone (`canSerializeIn(owner)`):
+                // Moonlight finds the registries a holder came from so, to make an empty fluid.
+                "$owner" => rt.get_field(a(0), "$registry"),
+                "canSerializeIn" => {
+                    let own = |r: &str| r.trim_start_matches("minecraft:").to_owned();
+                    V::I(i32::from(rt.str_of(a(1)).is_some_and(|o| own(o) == own(&reg))))
+                }
                 _ => return None,
             }
         }
@@ -1939,6 +2113,8 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "value" | "get") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => rt.get_field(a(0), "value"),
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "isBound") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::I(1),
+        // (A direct holder can be written anywhere.)
+        ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "canSerializeIn") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::I(1),
         // A direct holder has no key (`IHolderExtension.getKey`: `unwrapKey().orElse(null)`).
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "getKey") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::NULL,
         // Vanilla's static registration (`Registry.register(BuiltInRegistries.X, id, value)`).
@@ -4196,6 +4372,108 @@ mod tests {
         assert_eq!(call(&mut rt, "net/neoforged/neoforge/registries/RegisterEvent.getRegistry.()Lnet/minecraft/core/Registry;", &[ev]), Some(registry));
     }
 
+    /// Callbacks added to a registry once it is made (`Registry.addCallback`): AE2 learns its key
+    /// types when its registry is baked, Puzzles Lib tells its listeners of each entry as it is
+    /// added (the mods that make a block of theirs for each fence).
+    #[test]
+    fn a_registry_tells_its_callbacks_of_each_entry_and_of_the_freeze() {
+        fn heard(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let seen = rt.captured(args[0])[0];
+            match id {
+                // `AddCallback.onAdd(registry, id, key, value)`.
+                1 => list_mut(rt, seen).extend_from_slice(&args[1..]),
+                // `BakeCallback.onBake(registry)`.
+                2 => list_mut(rt, seen).push(args[1]),
+                // A `DeferredRegister`'s supplier: the entry it makes.
+                _ => return Some(seen),
+            }
+            Some(V::Void)
+        }
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(heard);
+        let loc = rt.string("t:key_type");
+        let key = call(&mut rt, "net/minecraft/resources/ResourceKey.createRegistryKey.(Lnet/minecraft/resources/ResourceLocation;)Lnet/minecraft/resources/ResourceKey;", &[loc]).unwrap();
+        let builder = rt.new_object(REGISTRY_BUILDER);
+        call(
+            &mut rt,
+            "net/neoforged/neoforge/registries/RegistryBuilder.<init>.(Lnet/minecraft/resources/ResourceKey;)V",
+            &[builder, key],
+        );
+        let event = rt.new_object(NEW_REGISTRY_EVENT);
+        let registry = call(&mut rt, "net/neoforged/neoforge/registries/NewRegistryEvent.create.(Lnet/neoforged/neoforge/registries/RegistryBuilder;)Lnet/minecraft/core/Registry;", &[event, builder]).unwrap();
+        let event = rt.new_object(MODIFY_REGISTRIES_EVENT);
+        assert_eq!(
+            call(
+                &mut rt,
+                "net/neoforged/neoforge/registries/ModifyRegistriesEvent.getRegistry.(Lnet/minecraft/resources/ResourceKey;)Lnet/minecraft/core/Registry;",
+                &[event, key]
+            ),
+            Some(registry)
+        );
+        let early = rt.new_object("t/Early");
+        let register = |rt: &mut Rt, name: &str, v: V| {
+            let id = rt.string(name);
+            call(
+                rt,
+                "net/minecraft/core/Registry.register.(Lnet/minecraft/core/Registry;Lnet/minecraft/resources/ResourceLocation;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[registry, id, v],
+            );
+        };
+        register(&mut rt, "t:early", early);
+        let (added, baked) = (
+            rt.alloc("java/util/ArrayList", Data::List(Vec::new())),
+            rt.alloc("java/util/ArrayList", Data::List(Vec::new())),
+        );
+        let (on_add, on_bake) = (
+            rt.lambda_id(ADD_CALLBACK, 1, vec![added]),
+            rt.lambda_id(BAKE_CALLBACK, 2, vec![baked]),
+        );
+        call(
+            &mut rt,
+            "net/minecraft/core/Registry.addCallback.(Lnet/neoforged/neoforge/registries/callback/RegistryCallback;)V",
+            &[registry, on_add],
+        );
+        let class = crate::jlang::class_object(&mut rt, BAKE_CALLBACK);
+        call(
+            &mut rt,
+            "net/minecraft/core/Registry.addCallback.(Ljava/lang/Class;Lnet/neoforged/neoforge/registries/callback/RegistryCallback;)V",
+            &[registry, class, on_bake],
+        );
+        // An entry registered before the callback came is not told of; one after is, with the
+        // registry, its raw id, its key and itself.
+        let items = rt.new_object("t/Items");
+        register(&mut rt, "t:items", items);
+        let heard = list_mut(&mut rt, added).clone();
+        assert_eq!(heard.len(), 4, "{heard:?}");
+        assert_eq!((heard[0], heard[3]), (registry, items));
+        let id = call(
+            &mut rt,
+            "net/minecraft/core/Registry.getId.(Ljava/lang/Object;)I",
+            &[registry, items],
+        )
+        .unwrap();
+        assert_eq!(heard[1], id);
+        // (A registry made by key is named by its path here.)
+        assert_eq!(rt.str_of(heard[2]), Some("key_type#t:items"));
+        assert!(
+            list_mut(&mut rt, baked).is_empty(),
+            "baked before the registries froze"
+        );
+        // An entry a `DeferredRegister` holds until its registry's turn is told of as well.
+        let fluids = rt.new_object("t/Fluids");
+        let supplier = rt.lambda_id("java/util/function/Supplier", 3, vec![fluids]);
+        rt.suppliers
+            .push(("key_type".into(), "t:fluids".into(), supplier));
+        fire_registrations(&mut rt);
+        assert_eq!(*list_mut(&mut rt, baked), [registry]);
+        let heard = list_mut(&mut rt, added).clone();
+        assert_eq!(heard.len(), 8, "{heard:?}");
+        assert_eq!(
+            (heard[4], rt.str_of(heard[6]), heard[7]),
+            (registry, Some("key_type#t:fluids"), fluids)
+        );
+    }
+
     /// Registries number and default as 1.21.1's (`DefaultedMappedRegistry`): the item registry's
     /// default is air, numbered 0; an entry keeps its number and is found by it; what the
     /// registry doesn't hold is named and numbered as air (`getKeyOrNull`: null), and an unknown
@@ -4278,6 +4556,31 @@ mod tests {
         assert_eq!(c(&mut rt, REGISTRY_BY_ID, &[shapes, V::I(7)]), cube);
         assert_eq!(c(&mut rt, REGISTRY_ID, &[colours, thing]), V::I(-1));
         assert_eq!(c(&mut rt, REGISTRY_BY_ID, &[colours, V::I(0)]), V::NULL);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A registry's holder is owned by its registry and can be written among that registry's
+    /// entries alone; a direct holder anywhere. Moonlight asks a holder so which registries it
+    /// came from (its `owner` field first, then `canSerializeIn` of a level's registries) when
+    /// it makes an empty fluid, as a tank being made does.
+    #[test]
+    fn a_registrys_holder_is_owned_by_its_registry() {
+        const WRAP: &str = "net/minecraft/core/Registry.wrapAsHolder.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;";
+        const OWNER: &str = "net/minecraft/core/Registry.holderOwner.()Lnet/minecraft/core/HolderOwner;";
+        const CAN: &str = "net/minecraft/core/Holder.canSerializeIn.(Lnet/minecraft/core/HolderOwner;)Z";
+        let mut rt = Rt::new();
+        crate::install();
+        let c = |rt: &mut Rt, k: &'static str, args: &[V]| crate::api::call(rt, k, args);
+        let items = crate::api::get_static(&mut rt, "net/minecraft/core/registries/BuiltInRegistries.ITEM");
+        let blocks = crate::api::get_static(&mut rt, "net/minecraft/core/registries/BuiltInRegistries.BLOCK");
+        let stone = crate::api::get_static(&mut rt, "net/minecraft/world/item/Items.STONE");
+        let holder = c(&mut rt, WRAP, &[items, stone]);
+        let (of_items, of_blocks) = (c(&mut rt, OWNER, &[items]), c(&mut rt, OWNER, &[blocks]));
+        assert_eq!(c(&mut rt, "net/minecraft/core/Holder$Reference.$owner.()Lnet/minecraft/core/HolderOwner;", &[holder]), of_items);
+        assert_eq!(c(&mut rt, CAN, &[holder, of_items]), V::I(1));
+        assert_eq!(c(&mut rt, CAN, &[holder, of_blocks]), V::I(0));
+        let direct = c(&mut rt, "net/minecraft/core/Holder.direct.(Ljava/lang/Object;)Lnet/minecraft/core/Holder;", &[stone]);
+        assert_eq!(c(&mut rt, CAN, &[direct, of_blocks]), V::I(1));
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

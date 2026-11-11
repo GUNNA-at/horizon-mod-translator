@@ -11009,6 +11009,146 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     and `uuid` field, `hasPermissions` with nobody to ask (no operator, where it was a call
     nothing maps), and `Minecraft.submit(Supplier)` gives the future of the supplier's
     value.
+- [x] 2026-11-11 Part 191: what launches 24 to 28 showed: the pack's data, a mod's own jar, a stack that holds, one state one object, the library's resize; the press presses.
+  - Launch 24 (Part 190: 979 s, 109 crates, 2,035,950,048 bytes; the strings changed 106 code
+    crates) is ready after 306 s. A thread's heap is 1.2 GB where it was 16.5: the array is
+    gone. Then the window's thread overflowed its stack as before.
+  - Part 190 took the pool for the cause of that, and was wrong. The frames name another
+    `updateTiles` than the one read then: it updates the grid itself for a full update, with
+    no pool between. On a JVM JourneyMap's minimap is first made as its themes load, before
+    any world, where its constructor returns at once for want of a player; the grid's size
+    asks for the minimap only later, when there is one. Here the minimap was never made
+    there, so it was first made in the world, drew its grid, and asked for itself. (What a
+    pool is given still waits, as on a JVM: the fixture holds it.) Why it was never made took
+    three launches to read, each stopped at the next thing the mod could not do:
+    - its themes: the mod copies them out of its own jar, and neither `URLDecoder.decode`
+      nor `ZipFile` was answered (launch 24);
+    - its settings: Log4j's `Strings.isEmpty` unanswered read as "not empty" for a null, so
+      every default the mod left out counted as given and no config was valid;
+      `File.listFiles(filter)` ignored its filter and a folder was read as a theme; and the
+      exception that told of it was lost in the mod's own handler, which prints a trace into
+      a `PrintStream` over bytes, a constructor nothing answered (launch 25);
+    - its images: the minimap's mask and rim are scaled to its size with
+      `STBImageResize.nstbir_resize_uint8`, found by reflection, and "STB resize failed"
+      ended the constructor (launch 26, the first where the trace could be read).
+  - A translated mod's jar is not on the disk: its code is in the game and its files are a
+    content mod's. It is now made where FML would have it (`mods/<id>.jar`) the first time a
+    file is looked for there, of the content mod's `assets` and `data`, with a manifest that
+    says its version. `ZipFile`, `JarFile`, `ZipInputStream`, `ZipOutputStream`, `ZipEntry`,
+    `Manifest` and `Attributes` read and write zips (`zips.rs`); Guava's file sinks and
+    sources (`guava_io.rs`), `URLDecoder` and `URLEncoder` are answered. JourneyMap then
+    writes the same warnings about its jar's entries as its log in the real instance has.
+  - The library's resize is the library's: `stb_resize.rs` is `stbir_resize_uint8` as the
+    `stb_image_resize` LWJGL 3.3 carries does it (Catmull-Rom where an axis grows, Mitchell
+    where it shrinks or stays, edges repeated, single precision, its own rule for which
+    pixels a filter reaches). Twelve images scaled by the install's own LWJGL 3.3.3 (grown,
+    shrunk, both at once, kept at their size, of one pixel, of 1, 3 and 4 channels, up to
+    64 by 64) come out byte for byte; eleven are the test. `NativeImage.resizeSubRectTo`
+    uses it too. An image's `pixels` address names the image, so the call finds both.
+  - The mods' code calling itself without end no longer ends the game. An API call made
+    within a megabyte of the thread's stack's end throws `StackOverflowError`, as a JVM does
+    there, and the mod's own `catch (Throwable)` has it. (API calls nested 512 deep already
+    did; this cycle nested none.) Launch 25 held: no crash. But the mod tried again at
+    every frame, each try as deep as the stack, and the window's thread did nothing else:
+    1.66 million errors, a log of 1.1 GB, no tour. `packwatch.sh` now ends a launch whose
+    log passes 400 MB.
+  - The pack ran without its mods' data. The translator's content mod has a mod's look and
+    the blocks its code declares; its recipes, loot tables, tags and worldgen come from the
+    jar's carry-over, which `horizon-port-pack install` merges in, and the scratch pack
+    skipped that step since the first whole-pack launch. The game had vanilla's 1,669
+    recipes and nothing else: no pressing recipe for the press, "Loaded 0 curio slots".
+    `packdata.sh` does the merge for the scratch pack: 367 jars carried over in 18 s, 80,298
+    data files into 220 content folders (28,581 recipes, 17,099 loot tables, 14,001
+    advancements, 7,981 tag files, 4,986 structures, 3,221 worldgen files). A round's
+    restage makes the content folders again, so launch 25 ran without them once more:
+    `packround.sh` now merges after every build. The merge takes a mod's additions to
+    other mods' tags (its rings in Curios' `ring`), where it took vanilla's and `c` only.
+    And a bundle made by hand gets its jar's data with one command:
+    `horizon-port-pack data <jar> <content mod>` (Create's jar: 4,030 files, 1,884 recipes).
+  - A registered block's state is one object however it is named: by the block's bare name,
+    as `defaultBlockState()` gives it, spelled in part or in full, reached by `setValue`,
+    listed by `getPossibleStates()`. A mod keeps what it knows of a state on that object
+    (FramedBlocks its cache, through a mixin's field) and found nothing where the same state
+    went by another name: 108 block entities failed with "getCache() called too early" in
+    launch 25. A state is spelled in full when it is made, a shorter text reads as it, and a
+    block's states take its registered name the moment it is registered, not when its
+    registry is done (a state asked for by that name in between was a second object: 18
+    still failed in launch 26). Checked on the mods alone: every default state is among the
+    listed ones, FramedBlocks' 236 blocks and Create's 643.
+  - A registry's callbacks. `Registry.addCallback(callback)` and a builder's `onAdd`,
+    `onBake`, `callback` are kept by what they are: an `AddCallback` hears each entry
+    registered from then on (one a `DeferredRegister` holds too), a `BakeCallback` the
+    registry once it is frozen. AE2 learns its key types at the bake: 117 of its block
+    entities failed with "AE2 isn't initialized yet" in launch 25, none in 26. A registry
+    made in `NewRegistryEvent` gets its `RegisterEvent`.
+    `ModifyRegistriesEvent` is not posted. One library in the pack listens, Puzzles Lib, for
+    its "registry entry added" event, and what is built on that (Diagonal Fences, Walls and
+    Windows; Easy Anvils, Easy Magic, Visual Workbench) makes a twin of each block of a kind,
+    has the block's item place the twin, and builds the twin's look out of vanilla's unbaked
+    models, which the runtime does not have. Posted (launch 26, and
+    `HORIZON_COMPAT_MODIFY_REGISTRIES=1`), the twins are blocks nothing draws: 113 of them
+    for Macaw's 180 fences, each with 512 states, and the mod's model step failed once for
+    every state (333,336 times in the pack, until the runaway limit stopped it after 24 s).
+    The pack has 675,537 block states of the 1,048,576 a world can hold.
+  - `Item.BY_BLOCK` is one map, as vanilla's: a block's item (`asItem()`) is what it holds.
+    The registered block items add themselves (`BlockItem.registerBlocks`, which a mod's
+    class overrides to name more blocks: FramedBlocks' item of a block and its wall
+    variant, whose ghost renderer refused a block without a `BlockItem`); the mods read it
+    and put into it (Create's schematicannon asks what a block costs, Puzzles Lib and
+    Moonlight give a block another block's item); the game's block items are learnt as they
+    are asked for.
+  - A block entity enters its level through its own `setLevel`, as vanilla's chunk has it
+    (Amendments' cauldron makes its tank there, and its colour was asked of a tank that was
+    not there). A registry's holder says which registry owns it (the
+    `owner` field, `canSerializeIn`): Moonlight finds the registries a holder came from so.
+  - What a mod's own checks say is thrown as Java throws it: `Objects.requireNonNull(o,
+    message)` (the plain form still lets a null pass: javac writes it wherever Java itself
+    would throw, and here a null is as often what the runtime has no answer for), Guava's
+    `Preconditions.checkNotNull` with a message, `checkArgument`, `checkState`,
+    `checkElementIndex`, `checkPositionIndex(es)`, with Guava's own message format. The
+    failures above were found by these: a null handed on fails far from its cause.
+  - NeoForge's own payloads have their types and channels, as the install's jar has them
+    (`minecraft:register`, `c:register`, `neoforge:network`...): the Fabric API, through
+    Connector, announces its channels with one and refuses a payload whose `type()` is null.
+    `DataComponentType.STREAM_CODEC` sends a component type by its registry's name.
+  - Faster where the samples pointed: `String.charAt`, `isEmpty`, `startsWith`, `indexOf`,
+    `substring` on the text where it lies (each call copied the string and its UTF-16);
+    `StringBuilder.append` and `StringWriter` in place (a text built piece by piece took the
+    square of its length); a registry lookup without a key made for it, aliases looked for
+    only where a mod added one. `charAt` past the end throws, as Java's.
+  - Small: `Level.toLevel`, `PrintStream` over a stream or a file, `printStackTrace` into
+    one, a resource's copy in each pack (`getResourceStack`), the client's first reload
+    counted as loading (no player yet, whatever the game has open by then), `pool` work an
+    executor of a mod's own did not run, queued. A tool's engine (`bundle --runtime`) no
+    longer calls the mapping's hook profile, which it does not link.
+  - The launches. 25 (641 s, 11 crates, 2,035,901,600 bytes): the stack held and the mod
+    tried again at every frame, as above; no tour. 26 (673 s, 12 crates, 2,035,984,768
+    bytes): the same storm, its cause readable at last; AE2's 117 failures gone,
+    FramedBlocks' 108 down to 18. 27 (713 s, 13 crates, 2,036,083,328 bytes): no storm, a
+    log of 48,546 lines where 26's had 3.7 million, ready after 283 s, FramedBlocks' failures
+    gone. And no mod's block in the world: "Unknown block type 'create:shaft'".
+  - The game had refused every content mod, in launch 26 already. With the data merged in,
+    Create Big Cannons' `data/createbigcannons/block_armor/tags/concrete.json` (the armour it
+    gives a tag's blocks) was taken for a tag, any file under a folder named `tags` being
+    one, and a tag without `values` failed the whole build of the content root. A tag is now
+    a file under `data/<namespace>/tags/`, and one the game can't read is left out with a
+    warning, as vanilla leaves a tag list it can't read out of a data pack (a registry's own
+    files, a biome modifier or worldgen, stay an error as before: `mod_content.rs`).
+  - Launch 28 (697 s, 11 crates, 2,036,083,200 bytes) has the pack whole: content from 320
+    mods, 675,537 block states and 29,115 items, resources loaded in 288 s (205 s without
+    the data), ready after 401 s. A mechanical press over a depot, turned by a creative
+    motor, pressed the iron ingot dropped on the depot into `create:iron_sheet`: the first
+    recipe of a mod's found in its data and run by its machine in the pack. The server ticks
+    twenty times a second with 30% of its time in the mods' code (the levels' ticks 3.2 s of
+    20, the spawn census 1.2 s).
+  - What launch 28 leaves. 461 uncaught errors, of three kinds new with the mods' mobs in the
+    world: 340 are GeckoLib's armour layer asking a humanoid model for a part the runtime's
+    model does not have, 24 a Living Things owl's variant drawn from an empty list; 87 are
+    Amendments' cauldron colour, asked while the game learns the blocks, with no registries
+    yet (a soft fluid's holder has no value). The window's thread spends 78% of its time in
+    the mods' code: drawing the level's mod entities takes 42 ms a frame (11 frames a second,
+    offscreen), the client's tick 11 ms. The game's footprint had peaked at 19.3 GB by 300 s,
+    while it loads.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

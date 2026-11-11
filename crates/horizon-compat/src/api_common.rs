@@ -930,6 +930,17 @@ pub fn state(rt: &mut Rt, text: &str) -> V {
     if let Some(v) = rt.interned.get(&key) {
         return *v;
     }
+    // A registered mod block's state is the one object of its full spelling, whatever of it
+    // the text leaves out ([`crate::api::spelled`]); the text reads as that state from now on.
+    let block = crate::host::state_block(text);
+    if let Some(b) = rt.registry_entry("block", block)
+        && let Some(full) = crate::api::spelled(rt, b, text)
+        && full != text
+    {
+        let v = state(rt, &full);
+        rt.interned.insert(key, v);
+        return v;
+    }
     let v = rt.alloc("net/minecraft/world/level/block/state/BlockState", Data::Str(text.to_owned()));
     rt.interned.insert(key, v);
     if text.starts_with(crate::api::UNREGISTERED) {
@@ -2510,6 +2521,43 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // Log4j's configuration: levels are set where its loggers write, which here is the game's log.
         ("org/apache/logging/log4j/core/config/Configurator", n) if n.starts_with("set") || n == "initialize" || n == "reconfigure" => V::Void,
         ("org/apache/logging/log4j/Level", "toString" | "name") => rt.get_field(a(0), "$name"),
+        // Log4j's `Strings`: what is empty (null too) or blank, and a text trimmed to null.
+        // (Unanswered, "is it empty?" read as no for a null: JourneyMap took every missing
+        // default of its settings for one given, and none of its configs were valid.)
+        (
+            "org/apache/logging/log4j/util/Strings",
+            "isEmpty" | "isNotEmpty" | "isBlank" | "isNotBlank",
+        ) => {
+            let held = rt
+                .str_of(a(0))
+                .map(str::to_owned)
+                .or_else(|| (!a(0).is_null()).then(|| crate::jlang::text(rt, a(0))));
+            let lacking = match (&held, name) {
+                (None, _) => true,
+                (Some(s), "isEmpty" | "isNotEmpty") => s.is_empty(),
+                (Some(s), _) => s.chars().all(char::is_whitespace),
+            };
+            V::I(i32::from(lacking == matches!(name, "isEmpty" | "isBlank")))
+        }
+        ("org/apache/logging/log4j/util/Strings", "trimToNull") => {
+            match rt.str_of(a(0)).map(|s| s.trim().to_owned()) {
+                Some(trimmed) if !trimmed.is_empty() => rt.string(&trimmed),
+                _ => V::NULL,
+            }
+        }
+        // `Level.toLevel(name[, otherwise])`: the level of that name whatever its case, else
+        // the one given, or `DEBUG` as Log4j answers for none.
+        ("org/apache/logging/log4j/Level", "toLevel" | "getLevel" | "valueOf") => {
+            let wanted = rt.str_of(a(0)).unwrap_or("").trim().to_ascii_uppercase();
+            match plain_enum(rt, "org/apache/logging/log4j/Level", &wanted) {
+                Some(level) => level,
+                None if name == "toLevel" && args.len() > 1 => a(1),
+                None if name == "toLevel" => {
+                    plain_enum(rt, "org/apache/logging/log4j/Level", "DEBUG")?
+                }
+                None => V::NULL,
+            }
+        }
         // An SLF4J marker, by name.
         ("org/slf4j/MarkerFactory", "getMarker" | "getDetachedMarker") => {
             let m = rt.new_object("org/slf4j/Marker");

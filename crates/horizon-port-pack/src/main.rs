@@ -42,7 +42,7 @@ use std::{
     process::ExitCode,
 };
 
-const USAGE: &str = "usage: horizon-port-pack import <pack> <work> | inventory <work> [--offline] | fetch <work> [--from <folder>] [<mod id>...] | carry <work> [--resources <prepared>] [<mod id>...] | report <work> | check <jar> <out> | port <pack> <work> [--from <folder>] [--resources <prepared>] | install <jar|folder|pack> <game dir> [--work <dir>] [--from <folder>] [--resources <prepared>] [--offline] | upgrade-datapack <pack> (<out> | --world <world>)";
+const USAGE: &str = "usage: horizon-port-pack import <pack> <work> | inventory <work> [--offline] | fetch <work> [--from <folder>] [<mod id>...] | carry <work> [--resources <prepared>] [<mod id>...] | report <work> | check <jar> <out> | data <jar> <content mod> | port <pack> <work> [--from <folder>] [--resources <prepared>] | install <jar|folder|pack> <game dir> [--work <dir>] [--from <folder>] [--resources <prepared>] [--offline] | upgrade-datapack <pack> (<out> | --world <world>)";
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -89,6 +89,13 @@ fn main() -> ExitCode {
                 for s in &c.skipped {
                     println!("  skipped: {s}");
                 }
+                Ok(())
+            }
+            // A translated bundle's content mod gets the jar's data (recipes, loot tables,
+            // tags, worldgen), as `install` gives it.
+            Some("data") => {
+                let n = horizon_port_pack::install::data(path(1)?, path(2)?)?;
+                println!("{n} data files -> {}", path(2)?.display());
                 Ok(())
             }
             Some("port") => {

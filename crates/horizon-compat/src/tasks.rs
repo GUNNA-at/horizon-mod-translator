@@ -95,8 +95,22 @@ pub(crate) fn cancel(rt: &mut Rt, future: V) -> bool {
     true
 }
 
-/// Runs the work of `future`, which waits no longer whatever comes of it.
+/// Set on a future while its work runs: a round of the queue begun inside that work (the work
+/// waits for something itself) leaves it where it is, for the call running it to take out.
+const RUNNING: &str = "$taskRunning";
+
+/// Runs the work of `future`, which waits no longer whatever comes of it. The work is a
+/// piece of the mods' code on a clock of its own, as a listener is: one that never ends is
+/// stopped as any other piece is.
 fn run(rt: &mut Rt, future: V) {
+    rt.put_field(future, RUNNING, V::I(1));
+    let outer = crate::api::timed_start();
+    run_timed(rt, future);
+    crate::api::timed_end(outer);
+    rt.put_field(future, RUNNING, V::Void);
+}
+
+fn run_timed(rt: &mut Rt, future: V) {
     let work = rt.get_field(future, TASK);
     rt.put_field(future, TASK, V::Void);
     let value = match rt.get_field(future, KIND).i() {
@@ -149,36 +163,52 @@ pub(crate) fn completion_of(rt: &mut Rt, thrown: V) -> V {
 }
 
 /// One round of the pools' queue: the work waiting in it now, in order. What that work gives
-/// the pools is the next round's. False when nothing waited.
+/// the pools is the next round's. False when none of it ran.
 ///
 /// Each future stays in the queue while its work runs: the queue is what holds it then (a
 /// list of this function's own would hide it from a collection inside the hook, which frees
-/// what the mods' code made and nothing reaches).
+/// what the mods' code made and nothing reaches). So a round begun inside that work passes
+/// over it ([`RUNNING`]).
 fn round(rt: &mut Rt) -> bool {
     let Some(&queue) = rt.interned.get(QUEUE) else {
         return false;
     };
-    let first = |rt: &Rt| match rt.heap.get(queue.r() as usize).map(|o| &o.data) {
-        Some(Data::List(l)) => (l.first().copied(), l.len()),
-        _ => (None, 0),
-    };
-    let (_, waiting) = first(rt);
+    fn list(rt: &Rt, queue: V) -> &[V] {
+        match rt.heap.get(queue.r() as usize).map(|o| &o.data) {
+            Some(Data::List(l)) => l,
+            _ => &[],
+        }
+    }
+    let waiting = list(rt, queue).len();
+    let mut ran = false;
     for _ in 0..waiting {
-        let (Some(future), _) = first(rt) else {
+        let next = list(rt, queue)
+            .iter()
+            .copied()
+            .find(|f| rt.get_field(*f, RUNNING).i() == 0);
+        let Some(future) = next else {
             break;
         };
         // (Forced or cancelled since it was queued: done with.)
         if waits(rt, future) {
+            // The calls nothing maps are counted for this work alone, as for a listener.
+            let misses = (
+                std::mem::take(&mut rt.hook_misses),
+                rt.hook_first_miss.take(),
+            );
+            crate::api::new_piece();
             run(rt, future);
+            (rt.hook_misses, rt.hook_first_miss) = misses;
             rt.report_thrown("work given to a pool");
+            ran = true;
         }
         if let Some(Data::List(l)) = rt.heap.get_mut(queue.r() as usize).map(|o| &mut o.data)
-            && l.first() == Some(&future)
+            && let Some(at) = l.iter().position(|f| *f == future)
         {
-            l.remove(0);
+            l.remove(at);
         }
     }
-    waiting > 0
+    ran
 }
 
 /// The code that gave the pools their work waits for something itself: the pools' threads run
@@ -419,6 +449,40 @@ mod tests {
             |_| V::Void,
         );
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// Work that waits for other work of the pool: that runs inside its wait, and the work
+    /// waiting is still the pool's own when it goes on (a collection that runs meanwhile
+    /// finds it in the queue).
+    #[test]
+    fn work_that_waits_lets_the_rest_of_the_pool_run() {
+        let mut rt = runtime();
+        rt.vcall = Some(vcall);
+        let pool = call(&mut rt, POOL, &[]);
+        let (latch, task) = counting(&mut rt, 1);
+        // The first work waits on the latch the second counts down.
+        let waits_first = crate::functions::bound(
+            &mut rt,
+            "java/util/concurrent/CountDownLatch.await.()V",
+            latch,
+        );
+        let first = call(
+            &mut rt,
+            "java/util/concurrent/ExecutorService.submit.(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;",
+            &[pool, waits_first],
+        );
+        call(&mut rt, EXECUTE, &[pool, task]);
+        at_rest(&mut rt);
+        assert_eq!(call(&mut rt, COUNT, &[latch]), V::J(0));
+        assert!(!waits(&rt, first));
+        assert_eq!(rt.class_of(first), FUTURE);
+        assert_eq!(
+            call(&mut rt, "java/util/concurrent/Future.isDone.()Z", &[first]),
+            V::I(1)
+        );
+        // Nothing is left in the queue.
+        assert!(!round(&mut rt));
+        assert!(rt.thrown.is_none());
     }
 
     /// Work that gives the pool more work: the pool runs that after it, in the order given,

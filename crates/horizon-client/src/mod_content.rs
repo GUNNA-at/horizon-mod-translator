@@ -2387,6 +2387,14 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
 }
 
 /// An atlas definition, `assets/<ns>/atlases/<atlas>.json`.
+/// Whether `file` is a tag's: `data/<namespace>/tags/<registry>/...json`, as vanilla keeps
+/// them. A folder named `tags` deeper in a mod's own data is that mod's (Create Big Cannons'
+/// `block_armor/tags/concrete.json` gives a tag's blocks their armour: no list of values).
+fn is_tag_file(file: &str) -> bool {
+    let third = file.strip_prefix("data/").and_then(|rest| rest.split('/').nth(1));
+    third == Some("tags") && file.ends_with(".json")
+}
+
 fn is_atlas(file: &str) -> bool {
     file.strip_prefix("assets/")
         .and_then(|r| r.split_once('/'))
@@ -2462,11 +2470,24 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
         let mut reader = m.content.reader()?;
         for file in &m.content.files {
             let bytes = reader.read(file)?;
-            let is_tag = file.starts_with("data/") && file.contains("/tags/");
-            if is_tag && file.ends_with(".json") {
-                let doc: J = serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
+            // A tag file the game can't read is left out with a warning, as vanilla leaves a
+            // tag list it can't read out of a data pack: a translated pack's tags are hundreds
+            // of Java mods', and one odd file must not cost every mod its content. (A registry's
+            // own files stay an error, as they are in vanilla: a biome modifier, worldgen.)
+            let left_out = |warnings: &mut Vec<String>, why: String| {
+                warnings.push(format!("mod {}: {file} is left out: {why}", m.id));
+            };
+            if is_tag_file(file) {
+                let doc: J = match serde_json::from_slice(&bytes) {
+                    Ok(doc) => doc,
+                    Err(e) => {
+                        left_out(&mut warnings, e.to_string());
+                        continue;
+                    }
+                };
                 let Some(J::Arr(values)) = doc.get("values") else {
-                    return Err(format!("{}: {file}: no values", m.id).into());
+                    left_out(&mut warnings, "no values".to_owned());
+                    continue;
                 };
                 let replace = doc.get("replace") == Some(&J::Bool(true));
                 let ns = file.split('/').nth(1).unwrap_or_default();

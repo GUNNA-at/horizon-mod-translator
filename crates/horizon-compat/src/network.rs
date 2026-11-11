@@ -228,6 +228,23 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
                 make(rt, COMPOSITE, vec![ctor, dimension, of_dimension, pos, of_pos])
             }));
         }
+        // NeoForge's own payloads: the channel each is sent on, and its type.
+        (o, "ID" | "TYPE") if neo_payload_channel(o).is_some() => {
+            let channel = neo_payload_channel(o)?;
+            return Some(if field == "ID" {
+                rt.string(channel)
+            } else {
+                neo_payload_type(rt, channel)
+            });
+        }
+        // A component type travels as an entry of its registry (`ByteBufCodecs.registry`, which
+        // vanilla wraps for it): MineColonies sends the types its compatibility data names.
+        ("net/minecraft/core/component/DataComponentType", "STREAM_CODEC") => {
+            return Some(rt.intern("compat:stream/component_type".into(), |rt| {
+                let registry = rt.string("data_component_type");
+                make(rt, REGISTRY, vec![registry])
+            }));
+        }
         // The block states' id map: block states travel by their text.
         ("net/minecraft/world/level/block/Block", "BLOCK_STATE_REGISTRY") => {
             return Some(rt.intern("compat:block-state-ids".into(), |rt| rt.new_object("net/minecraft/core/IdMapper")));
@@ -594,6 +611,10 @@ fn entry_name(rt: &Rt, registry: &str, v: V) -> String {
     match registry {
         "fluid" => crate::fluids::name_of(rt, v),
         "item" | "block" => crate::api_common::item_like_name(rt, v),
+        // (Vanilla's component types know their names.)
+        "data_component_type" if rt.str_of(rt.get_field(v, "$id")).is_some() => {
+            text(rt, rt.get_field(v, "$id"))
+        }
         _ => text(rt, v),
     }
 }
@@ -1188,8 +1209,38 @@ pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
             | SERVER_COMMON_LISTENER
     ) || (owner == REGISTER_PAYLOADS && name == "registrar")
         || (matches!(owner, SERVER_PLAYER | LOCAL_PLAYER) && name == "$connection")
-        || (owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload" && name == "createType")
+        || (owner == "net/minecraft/network/protocol/common/custom/CustomPacketPayload"
+            && matches!(name, "createType" | "type"))
+        || (owner.starts_with(NEO_PAYLOADS) && name == "type")
         || (owner == "net/minecraft/resources/ResourceKey" && name == "streamCodec")
+}
+
+/// NeoForge's own payloads.
+const NEO_PAYLOADS: &str = "net/neoforged/neoforge/network/payload/";
+
+/// The channel one of NeoForge's own payloads is sent on (its `ID`, as NeoForge 21.1 has them):
+/// vanilla's channel announcements, the common ones and NeoForge's own negotiation.
+fn neo_payload_channel(class: &str) -> Option<&'static str> {
+    Some(match class.strip_prefix(NEO_PAYLOADS)? {
+        "MinecraftRegisterPayload" => "minecraft:register",
+        "MinecraftUnregisterPayload" => "minecraft:unregister",
+        "CommonRegisterPayload" => "c:register",
+        "CommonVersionPayload" => "c:version",
+        "ModdedNetworkQueryPayload" => "neoforge:register",
+        "ModdedNetworkPayload" => "neoforge:network",
+        "ModdedNetworkSetupFailedPayload" => "neoforge:modded_network_setup_failed",
+        _ => return None,
+    })
+}
+
+/// The type of the payload sent on `channel` (a payload class's `TYPE`): one object.
+fn neo_payload_type(rt: &mut Rt, channel: &'static str) -> V {
+    rt.intern(format!("compat:payload-type/{channel}"), |rt| {
+        let t = rt.new_object(PAYLOAD_TYPE);
+        let id = rt.string(channel);
+        rt.put_field(t, "$id", id);
+        t
+    })
 }
 
 const CLIENT_LISTENER: &str = "net/minecraft/client/multiplayer/ClientPacketListener";
@@ -1508,6 +1559,16 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             _ => return None,
         }),
+        // `payload.type()` of one of NeoForge's own payloads (a mod's class answers for its own):
+        // the Fabric API announces its channels to the server with `minecraft:register` and asks
+        // the payload for its type first.
+        o if name == "type"
+            && (o == "net/minecraft/network/protocol/common/custom/CustomPacketPayload"
+                || o.starts_with(NEO_PAYLOADS)) =>
+        {
+            let channel = neo_payload_channel(rt.class_of(a(0)))?;
+            Some(neo_payload_type(rt, channel))
+        }
         "net/minecraft/network/protocol/common/custom/CustomPacketPayload" if name == "createType" => {
             let t = rt.new_object(PAYLOAD_TYPE);
             let id = text(rt, a(0));
@@ -2532,6 +2593,33 @@ mod tests {
         assert_eq!(rt.str_of(back), Some("hé"));
     }
 
+    /// A component type in a packet (`DataComponentType.STREAM_CODEC`): vanilla's and a mod's
+    /// own come back as the type they were, by their registry's names.
+    #[test]
+    fn a_component_type_travels_by_its_registrys_name() {
+        let mut rt = Rt::new();
+        crate::install();
+        let codec = sv(
+            &mut rt,
+            "net/minecraft/core/component/DataComponentType.STREAM_CODEC",
+        );
+        let name = sv(
+            &mut rt,
+            "net/minecraft/core/component/DataComponents.CUSTOM_NAME",
+        );
+        let own = rt.new_object("net/minecraft/core/component/DataComponentType");
+        rt.registered
+            .insert(("data_component_type".into(), "t:charge".into()), own);
+        for ty in [name, own] {
+            assert_eq!(round_trip(&mut rt, codec, ty).1, ty);
+        }
+        assert!(
+            rt.unmapped.is_empty() && rt.thrown.is_none(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
     /// A stream codec of the game's not modelled here (`DyeColor.STREAM_CODEC`) sends what its
     /// class's codec writes and reads it back; JOML's vectors go as their floats.
     #[test]
@@ -3008,6 +3096,46 @@ mod tests {
         .unwrap();
         let handle = rt.lambda_id("test/Handler", 7, Vec::new());
         call(rt, "net/neoforged/neoforge/network/registration/PayloadRegistrar.playToClient.(Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload$Type;Lnet/minecraft/network/codec/StreamCodec;Lnet/neoforged/neoforge/network/handling/IPayloadHandler;)Lnet/neoforged/neoforge/network/registration/PayloadRegistrar;", &[registrar, ty, codec, handle]);
+    }
+
+    /// NeoForge's own payloads have their types: the Fabric API (through Connector) makes a
+    /// `MinecraftRegisterPayload` to announce its channels and refuses a payload whose `type()`
+    /// is null ("CustomPayload#getId() cannot return null").
+    #[test]
+    fn neoforges_own_payloads_name_their_channels() {
+        fn rt_key(key: &str) -> &'static str {
+            Box::leak(key.to_owned().into_boxed_str())
+        }
+        const TYPE: &str = "net/minecraft/network/protocol/common/custom/CustomPacketPayload.type.()Lnet/minecraft/network/protocol/common/custom/CustomPacketPayload$Type;";
+        crate::install();
+        let mut rt = Rt::new();
+        for (class, channel) in [
+            (
+                "net/neoforged/neoforge/network/payload/MinecraftRegisterPayload",
+                "minecraft:register",
+            ),
+            (
+                "net/neoforged/neoforge/network/payload/MinecraftUnregisterPayload",
+                "minecraft:unregister",
+            ),
+        ] {
+            let payload = rt.new_object(class);
+            let ty = crate::api::call(&mut rt, TYPE, &[payload]);
+            // (The class's own statics name the same channel and are that one type.)
+            let named = crate::api::get_static(&mut rt, rt_key(&format!("{class}.ID")));
+            assert_eq!(rt.str_of(named), Some(channel));
+            assert_eq!(
+                crate::api::get_static(&mut rt, rt_key(&format!("{class}.TYPE"))),
+                ty
+            );
+            let id = crate::api::call(
+                &mut rt,
+                "net/minecraft/network/protocol/common/custom/CustomPacketPayload$Type.id.()Lnet/minecraft/resources/ResourceLocation;",
+                &[ty],
+            );
+            assert_eq!(rt.str_of(id), Some(channel));
+        }
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
     /// A client mod sends its payload on its connection (`Minecraft.getConnection().send(new

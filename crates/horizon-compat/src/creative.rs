@@ -74,6 +74,10 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         "net/minecraft/world/flag/FeatureFlags" if matches!(field, "VANILLA_SET" | "DEFAULT_FLAGS") => {
             Some(rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet")))
         }
+        // `Item.BY_BLOCK`, read through any item class (`BlockItem.BY_BLOCK` is `Item`'s).
+        o if field == "BY_BLOCK" && o.starts_with("net/minecraft/world/item/") => {
+            Some(by_block(rt))
+        }
         // The registry of flags (`FeatureFlags.REGISTRY.allFlags()`): every flag is on, so its set
         // is that one set.
         "net/minecraft/world/flag/FeatureFlags" if field == "REGISTRY" => {
@@ -130,41 +134,131 @@ pub fn as_item(rt: &mut Rt, v: V) -> V {
     api_as_item(rt, v)
 }
 
-const BLOCK_ITEMS: &str = "compat:block-items";
-const BLOCK_ITEMS_COUNT: &str = "compat:block-items-count";
+/// `Item.BY_BLOCK`: the item each block gives (`Block.asItem()`). One map, as vanilla keeps it,
+/// which the mods read and write too: Create's schematicannon asks it for the item a block costs,
+/// Puzzles Lib and Moonlight give a block of theirs another block's item through it.
+const BY_BLOCK: &str = "compat:by-block";
+/// How many registrations [`BY_BLOCK`] was last brought up to.
+const BY_BLOCK_COUNT: &str = "compat:by-block-count";
+/// Set on a block item once it was told to add itself to [`BY_BLOCK`].
+const MAPPED: &str = "$byBlock";
+const REGISTER_BLOCKS: &str = "registerBlocks.(Ljava/util/Map;Lnet/minecraft/world/item/Item;)V";
+const GET_BLOCK: &str = "getBlock.()Lnet/minecraft/world/level/block/Block;";
 
-/// The block item registered for block object `block` (`new BlockItem(block, properties)`): the one
-/// named as the block when there are several, else the first by name. The registered items are
-/// indexed by their block once, and again after more are registered: `asItem` runs for every
-/// `ItemStack.is(block)` a mod's tick asks (Create's placement helpers, each tick).
-fn block_item(rt: &mut Rt, block: V) -> Option<V> {
-    if block.r() == 0 {
+/// [`BY_BLOCK`], with every block item registered so far in it. Each adds itself once, as the
+/// registry has it do when it is registered (`BlockItem.registerBlocks(map, item)`, which a mod's
+/// class overrides to name more blocks: a wall variant, a double block that has no item of its
+/// own). The registered items are looked through again only after more were registered: `asItem`
+/// runs for every `ItemStack.is(block)` a mod's tick asks (Create's placement helpers, each tick).
+pub(crate) fn by_block(rt: &mut Rt) -> V {
+    let map = match rt.interned.get(BY_BLOCK) {
+        Some(&m) => m,
+        None => {
+            let m = rt.alloc("java/util/HashMap", Data::Table(Default::default()));
+            rt.interned.insert(BY_BLOCK.into(), m);
+            m
+        }
+    };
+    let count = rt.registered.len() as i32;
+    if rt
+        .interned
+        .get(BY_BLOCK_COUNT)
+        .is_some_and(|c| c.i() == count)
+    {
+        return map;
+    }
+    rt.interned.insert(BY_BLOCK_COUNT.into(), V::I(count));
+    let mut new: Vec<(bool, String, V)> = Vec::new();
+    for ((registry, name), &item) in &rt.registered {
+        if registry != "item" {
+            continue;
+        }
+        let block = rt.get_field(item, "$block");
+        if block.r() != 0 && rt.get_field(item, MAPPED).i() == 0 {
+            new.push((
+                rt.registered_name(block, "block") == Some(name.as_str()),
+                name.clone(),
+                item,
+            ));
+        }
+    }
+    // The registry's order is not kept: of the items made for one block, the one named as the
+    // block is added last and so is the block's, else the first by name.
+    new.sort_by(|x, y| x.0.cmp(&y.0).then_with(|| y.1.cmp(&x.1)));
+    // (Marked first: an item's own `registerBlocks` may ask for a block's item.)
+    for (_, _, item) in &new {
+        rt.put_field(*item, MAPPED, V::I(1));
+    }
+    for (_, _, item) in new {
+        let class = rt.class_of(item);
+        match rt.vcall {
+            Some(vc) if rt.overrides.is_some_and(|o| o(class, REGISTER_BLOCKS)) => {
+                vc(
+                    rt,
+                    "net/minecraft/world/item/BlockItem.registerBlocks.(Ljava/util/Map;Lnet/minecraft/world/item/Item;)V",
+                    REGISTER_BLOCKS,
+                    &[item, map, item],
+                );
+                rt.report_thrown("BlockItem.registerBlocks");
+            }
+            _ => register_blocks(rt, item, map, item),
+        }
+    }
+    map
+}
+
+/// A block item's block: `getBlock()`, the mod's own where its class has one.
+fn block_of(rt: &mut Rt, item: V) -> V {
+    let class = rt.class_of(item);
+    match rt.vcall {
+        Some(vc) if rt.overrides.is_some_and(|o| o(class, GET_BLOCK)) => vc(
+            rt,
+            "net/minecraft/world/item/BlockItem.getBlock.()Lnet/minecraft/world/level/block/Block;",
+            GET_BLOCK,
+            &[item],
+        ),
+        _ => rt.get_field(item, "$block"),
+    }
+}
+
+/// `BlockItem.registerBlocks(map, item)`: `map.put(getBlock(), item)`. An item named as its block
+/// stays that block's item when another made for the same block comes later.
+fn register_blocks(rt: &mut Rt, this: V, map: V, item: V) {
+    let block = block_of(rt, this);
+    if block.r() == 0 || map.r() == 0 {
+        return;
+    }
+    let named_as = |rt: &Rt, i: V| {
+        rt.registered_name(i, "item")
+            .is_some_and(|n| rt.registered_name(block, "block") == Some(n))
+    };
+    if let Some(had) = crate::jutil::table_get(rt, map, block)
+        && had != item
+        && named_as(rt, had)
+        && !named_as(rt, item)
+    {
+        return;
+    }
+    crate::jutil::table_put(rt, map, block, item);
+}
+
+/// What [`BY_BLOCK`] gives for one of the game's own blocks it doesn't hold yet: the game's item
+/// of the block's name, where that item places a block. The map learns the game's block items as
+/// they are asked for, the game's blocks being made here only as a mod names them.
+pub(crate) fn game_block_item(rt: &mut Rt, map: V, block: V) -> Option<V> {
+    if rt.interned.get(BY_BLOCK) != Some(&map) {
         return None;
     }
-    let count = rt.registered.len() as i32;
-    if rt.interned.get(BLOCK_ITEMS_COUNT).is_none_or(|c| c.i() != count) {
-        let items: Vec<(String, V)> = rt.registered.iter().filter(|((r, _), _)| r == "item").map(|((_, n), i)| (n.clone(), *i)).collect();
-        let mut best: std::collections::HashMap<u32, ((bool, String), V)> = Default::default();
-        for (name, item) in items {
-            let b = rt.get_field(item, "$block");
-            if b.r() == 0 {
-                continue;
-            }
-            let rank = (rt.registered_name(b, "block") != Some(name.as_str()), name);
-            if best.get(&b.r()).is_none_or(|(r, _)| rank < *r) {
-                best.insert(b.r(), (rank, item));
-            }
-        }
-        let map = best.into_iter().map(|(b, (_, item))| (b.to_string(), item)).collect();
-        let index = rt.alloc("compat:BlockItems", Data::Map(map));
-        rt.interned.insert(BLOCK_ITEMS.into(), index);
-        rt.interned.insert(BLOCK_ITEMS_COUNT.into(), V::I(count));
+    let name = rt
+        .str_of(block)
+        .filter(|n| n.starts_with("minecraft:"))?
+        .to_owned();
+    if !rt.host().is_some_and(|h| h.item_is_block(&name)) {
+        return None;
     }
-    let index = rt.interned.get(BLOCK_ITEMS).copied()?;
-    match rt.heap.get(index.r() as usize).map(|o| &o.data) {
-        Some(Data::Map(m)) => m.get(&block.r().to_string()).copied(),
-        _ => None,
-    }
+    let item = crate::api_common::item(rt, &name);
+    crate::jutil::table_put(rt, map, block, item);
+    Some(item)
 }
 
 /// The API's `asItem()`: an item is its own; a block's is the block item registered for it
@@ -179,16 +273,20 @@ pub fn api_as_item(rt: &mut Rt, v: V) -> V {
     if rt.is_a(class, "net/minecraft/world/item/Item") {
         return v;
     }
+    // The item the block has in `Item.BY_BLOCK`: the block item made for it (`new BlockItem(block,
+    // properties)`), by any name, or what a mod put there.
+    if v.r() != 0 {
+        let map = by_block(rt);
+        if let Some(i) = crate::jutil::table_get(rt, map, v) {
+            return i;
+        }
+    }
     let block = match rt.str_of(v) {
         Some(n) => n.to_owned(),
         None => rt.registered_name(v, "block").map(str::to_owned).unwrap_or_default(),
     };
     if block.is_empty() {
         return crate::api_common::item(rt, "minecraft:air");
-    }
-    // The block item made for this block (`new BlockItem(block, properties)`), by any name.
-    if let Some(i) = block_item(rt, v) {
-        return i;
     }
     match rt.registered.get(&("item".to_owned(), block.clone())) {
         Some(&i) => i,
@@ -204,6 +302,8 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         owner,
         TAB | BUILDER | OUTPUT | CONTENTS_EVENT | PARAMETERS | "net/minecraft/world/flag/FeatureFlagSet" | "net/minecraft/world/flag/FeatureFlagRegistry" | "net/minecraft/world/item/BlockItem"
     ) || name == "asItem"
+        || (matches!(name, "registerBlocks" | "removeFromBlockToItemMap")
+            && owner.starts_with("net/minecraft/world/item/"))
         || (name == "enabledFeatures" && desc == FLAGS && owner.starts_with("net/minecraft/"))
 }
 
@@ -341,6 +441,25 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.intern("compat:feature-flags".into(), |rt| rt.new_object("net/minecraft/world/flag/FeatureFlagSet"))
         }
         (_, "asItem") if desc == "()Lnet/minecraft/world/item/Item;" => api_as_item(rt, a(0)),
+        // `BlockItem.registerBlocks(map, item)` and its undoing, as a mod's own class reaches them
+        // (`super.registerBlocks(map, item)`).
+        (o, "registerBlocks")
+            if o.starts_with("net/minecraft/world/item/")
+                && desc == "(Ljava/util/Map;Lnet/minecraft/world/item/Item;)V" =>
+        {
+            register_blocks(rt, a(0), a(1), a(2));
+            V::Void
+        }
+        (o, "removeFromBlockToItemMap")
+            if o.starts_with("net/minecraft/world/item/")
+                && desc == "(Ljava/util/Map;Lnet/minecraft/world/item/Item;)V" =>
+        {
+            let block = block_of(rt, a(0));
+            if block.r() != 0 {
+                crate::jutil::table_remove(rt, a(1), block);
+            }
+            V::Void
+        }
         ("net/minecraft/world/item/BlockItem", "getBlock") => match rt.str_of(a(0)).map(str::to_owned) {
             Some(n) => api::block(rt, &n),
             None => rt.get_field(a(0), "$block"),
@@ -472,6 +591,142 @@ mod tests {
         c(&mut rt, "net/minecraft/world/item/CreativeModeTab$Output.acceptAll.(Ljava/util/Collection;)V", &[modifier, stacks]);
         let got: Vec<String> = crate::jutil::elements(&rt, list).into_iter().filter_map(|v| rt.str_of(v).map(str::to_owned)).collect();
         assert_eq!(got, ["t:gear PARENT_AND_SEARCH_TABS", "t:gear SEARCH_TAB_ONLY", "t:gear PARENT_AND_SEARCH_TABS"]);
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// `Item.BY_BLOCK` is one map: a block's item (`asItem()`) is what it holds for the block.
+    /// The registered block items add themselves, a mod's own class naming more blocks than its
+    /// own (FramedBlocks' item of a block and its wall variant; its ghost renderer wants a
+    /// `BlockItem` from each); the mods read it and put into it (Puzzles Lib gives a diagonal
+    /// fence its fence's item); and it knows the game's block items as they are asked for
+    /// (Create's schematicannon asks what a block costs).
+    #[test]
+    fn a_blocks_item_is_the_one_the_block_item_map_holds() {
+        const AS_ITEM: &str =
+            "net/minecraft/world/level/block/Block.asItem.()Lnet/minecraft/world/item/Item;";
+        const GET: &str = "java/util/Map.get.(Ljava/lang/Object;)Ljava/lang/Object;";
+        fn overrides(class: &str, method: &str) -> bool {
+            class == "t/StandingAndWallItem" && method == REGISTER_BLOCKS
+        }
+        // `super.registerBlocks(map, item); map.put(wallBlock, item);`
+        fn vcall(rt: &mut Rt, key: &'static str, short: &'static str, args: &[V]) -> V {
+            if short != REGISTER_BLOCKS {
+                return c(rt, key, args);
+            }
+            c(
+                rt,
+                "net/minecraft/world/item/BlockItem.registerBlocks.(Ljava/util/Map;Lnet/minecraft/world/item/Item;)V",
+                args,
+            );
+            let wall = rt.get_field(args[0], "wallBlock");
+            c(
+                rt,
+                "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[args[1], wall, args[2]],
+            )
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.overrides = Some(overrides);
+        rt.vcall = Some(vcall);
+        rt.supers.insert(
+            "t/StandingAndWallItem",
+            "net/minecraft/world/item/BlockItem",
+        );
+        let block = |rt: &mut Rt, name: &str| {
+            let b = rt.new_object("t/Block");
+            rt.registered.insert(("block".into(), name.into()), b);
+            b
+        };
+        let (torch, wall_torch, crop, diagonal) = (
+            block(&mut rt, "t:torch"),
+            block(&mut rt, "t:wall_torch"),
+            block(&mut rt, "t:crop"),
+            block(&mut rt, "t:diagonal"),
+        );
+        let item = |rt: &mut Rt, class: &'static str, name: &str, of: V| {
+            let i = rt.new_object(class);
+            rt.put_field(i, "$block", of);
+            rt.registered.insert(("item".into(), name.into()), i);
+            i
+        };
+        let torch_item = item(&mut rt, "t/StandingAndWallItem", "t:torch", torch);
+        rt.put_field(torch_item, "wallBlock", wall_torch);
+        // Two items made for one block: the one named as the block is the block's.
+        let seeds = item(
+            &mut rt,
+            "net/minecraft/world/item/BlockItem",
+            "t:a_seeds",
+            crop,
+        );
+        let crop_item = item(
+            &mut rt,
+            "net/minecraft/world/item/BlockItem",
+            "t:crop",
+            crop,
+        );
+        assert_eq!(c(&mut rt, AS_ITEM, &[torch]), torch_item);
+        assert_eq!(
+            c(&mut rt, AS_ITEM, &[wall_torch]),
+            torch_item,
+            "the item's own registerBlocks names its wall block"
+        );
+        assert_eq!(c(&mut rt, AS_ITEM, &[crop]), crop_item);
+        // A block with no item gives air, until a mod gives it one through the map.
+        let air = crate::api_common::item(&mut rt, "minecraft:air");
+        assert_eq!(c(&mut rt, AS_ITEM, &[diagonal]), air);
+        let map = api::get_static(&mut rt, "net/minecraft/world/item/Item.BY_BLOCK");
+        assert_eq!(
+            api::get_static(&mut rt, "net/minecraft/world/item/BlockItem.BY_BLOCK"),
+            map
+        );
+        assert_eq!(c(&mut rt, GET, &[map, crop]), crop_item);
+        c(
+            &mut rt,
+            "java/util/Map.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[map, diagonal, seeds],
+        );
+        assert_eq!(c(&mut rt, AS_ITEM, &[diagonal]), seeds);
+        // An item registered later joins the map; one taken out of it no longer is its block's.
+        let lamp = block(&mut rt, "t:lamp");
+        let lamp_item = item(
+            &mut rt,
+            "net/minecraft/world/item/BlockItem",
+            "t:lamp",
+            lamp,
+        );
+        assert_eq!(c(&mut rt, AS_ITEM, &[lamp]), lamp_item);
+        assert_eq!(c(&mut rt, GET, &[map, lamp]), lamp_item);
+        c(
+            &mut rt,
+            "net/minecraft/world/item/BlockItem.removeFromBlockToItemMap.(Ljava/util/Map;Lnet/minecraft/world/item/Item;)V",
+            &[lamp_item, map, lamp_item],
+        );
+        assert_eq!(
+            c(
+                &mut rt,
+                "java/util/Map.containsKey.(Ljava/lang/Object;)Z",
+                &[map, lamp]
+            ),
+            V::I(0)
+        );
+        // The game's own blocks: the item of the block's name where that item places a block.
+        let mut host = crate::host::MemoryHost {
+            block_items: vec!["minecraft:stone".into()],
+            ..Default::default()
+        };
+        rt.with_host(&mut host, |rt| {
+            let (stone, water) = (api::block(rt, "minecraft:stone"), api::block(rt, "minecraft:water"));
+            let map = api::get_static(rt, "net/minecraft/world/item/Item.BY_BLOCK");
+            let stone_item = crate::api_common::item(rt, "minecraft:stone");
+            assert_eq!(c(rt, "java/util/Map.containsKey.(Ljava/lang/Object;)Z", &[map, stone]), V::I(1));
+            assert_eq!(c(rt, GET, &[map, stone]), stone_item);
+            let air = crate::api_common::item(rt, "minecraft:air");
+            assert_eq!(c(rt, "java/util/Map.getOrDefault.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", &[map, water, air]), air);
+            // Another map knows nothing of the game's blocks.
+            let other = c(rt, "com/google/common/collect/Maps.newHashMap.()Ljava/util/HashMap;", &[]);
+            assert_eq!(c(rt, GET, &[other, stone]), V::NULL);
+        });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 
