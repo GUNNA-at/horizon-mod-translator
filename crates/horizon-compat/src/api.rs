@@ -3661,6 +3661,12 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     let held = call(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[a(1)]);
                     V::I((held.r() != 0 && block_name(rt, held) == b) as i32)
                 }
+                // `getTags()`: the block's tags.
+                "getTags" => {
+                    let b = b.to_owned();
+                    let tags = crate::tag_files::tags_of(rt, "block", &b);
+                    rt.alloc("java/util/stream/Stream", Data::Stream(tags))
+                }
                 // A block tag, as the game's loaded tags hold it (`BlockTags.LEAVES`, a mod's own).
                 "is" if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
                     let registry = rt.str_of(rt.get_field(a(1), "$registry")).unwrap_or("").to_owned();

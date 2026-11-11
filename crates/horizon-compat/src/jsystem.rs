@@ -91,9 +91,14 @@ pub(crate) fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
                 | "javax/net/ssl/HttpsURLConnection"
                 | LATCH
                 | "java/util/concurrent/Semaphore"
+                | PRIVILEGED
         )
         || socket(owner)
 }
+
+/// `AccessController`, whose `doPrivileged` is the action run: there is no security manager
+/// whose checks it would lift.
+const PRIVILEGED: &str = "java/security/AccessController";
 
 /// The sockets and channels a mod would reach the network or listen on it with.
 fn socket(owner: &str) -> bool {
@@ -1388,6 +1393,19 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         return sockets(rt, name, desc, args);
     }
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    // `AccessController.doPrivileged(action[, context])`: what the action's `run()` gives (an
+    // exception of a `PrivilegedExceptionAction` is the caller's to catch, as it is thrown).
+    if owner == PRIVILEGED {
+        if name != "doPrivileged" {
+            return None;
+        }
+        let run = if desc.starts_with("(Ljava/security/PrivilegedExceptionAction;") {
+            "java/security/PrivilegedExceptionAction.run.()Ljava/lang/Object;"
+        } else {
+            "java/security/PrivilegedAction.run.()Ljava/lang/Object;"
+        };
+        return Some(rt.call_functional(run, a(0), &[]));
+    }
     // `URLDecoder.decode(text, charset)` and `URLEncoder.encode(text, charset)`: a form's
     // coding, in UTF-8 whatever charset is named (what mods name).
     if owner == URL_DECODER && name == "decode" {

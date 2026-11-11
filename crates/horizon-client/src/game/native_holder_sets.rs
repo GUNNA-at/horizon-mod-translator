@@ -27,6 +27,10 @@ impl Listed<'_> {
             Value::Array(entries) => self.joined(registry, entries),
             Value::Object(object) => {
                 let kind = object.get("type")?.as_str()?;
+                // Horizon's own question through the same door: the tags that hold an entry.
+                if kind == "horizon:tags_of" {
+                    return self.tags_of(registry, &qualified(object.get("id")?.as_str()?));
+                }
                 match kind.strip_prefix("neoforge:").unwrap_or(kind) {
                     "any" => self.all(registry),
                     "or" => self.joined(registry, object.get("values")?.as_array()?),
@@ -95,6 +99,25 @@ impl Listed<'_> {
         }
     }
 
+    /// The loaded tags of `registry` that hold its entry `id`, by name (`Holder.tags()`). None
+    /// for a registry whose tags the caller does not have.
+    fn tags_of(&self, registry: &str, id: &str) -> Option<Vec<String>> {
+        let tags = match registry {
+            "item" => &self.items.item_tags,
+            "block" => &self.items.block_tags,
+            "fluid" => &self.items.fluid_tags,
+            "entity_type" => self.entity_tags?,
+            _ => return None,
+        };
+        let mut held: Vec<String> = tags
+            .iter()
+            .filter(|(_, members)| members.contains(id))
+            .map(|(tag, _)| tag.clone())
+            .collect();
+        held.sort();
+        Some(held)
+    }
+
     /// Every entry of `registry`: the items and the blocks in their registries' order, another
     /// registry's as the caller lists them.
     fn all(&self, registry: &str) -> Option<Vec<String>> {
@@ -132,9 +155,11 @@ impl Game<'_> {
     /// `entity_type`..., with `minecraft:` or without), each once, in order. The set is its
     /// JSON: an id (itself), `#` and a tag (the loaded tag's members), a list of those, or
     /// NeoForge's `{"type": "neoforge:any"}` (every entry of the registry), `neoforge:or` and
-    /// `neoforge:and` (over `values`) and `neoforge:not` (over `value`). None for a set the
-    /// game cannot list: a registry it keeps no list of, a tag it does not have, another kind
-    /// of object. API @API:holder_sets@.
+    /// `neoforge:and` (over `values`) and `neoforge:not` (over `value`). And one question of
+    /// Horizon's own in that form, `{"type": "horizon:tags_of", "id": ...}`: the names of the
+    /// loaded tags that hold that entry (`Holder.tags()`). None for a set the game cannot
+    /// list: a registry it keeps no list of, a tag it does not have, another kind of object.
+    /// API @API:holder_sets@.
     pub(super) fn native_holder_set(&self, registry: &str, set: &Value) -> Option<Vec<String>> {
         let others = |registry: &str| match registry {
             // The entity types the commands know, then the mods' mobs they do not name.

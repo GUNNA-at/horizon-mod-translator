@@ -1896,6 +1896,22 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.registered.get(&k).copied().unwrap_or(V::NULL)
         }
         (o, "getId") if o.starts_with("net/neoforged/neoforge/registries/Deferred") => rt.get_field(a(0), "$id"),
+        // `DeferredHolder.tags()`: the tags that hold its entry.
+        (o, "tags")
+            if o.starts_with("net/neoforged/neoforge/registries/Deferred")
+                && rt.get_field(a(0), "$id").r() != 0 =>
+        {
+            let reg = rt
+                .str_of(rt.get_field(a(0), "$registry"))
+                .unwrap_or("")
+                .to_owned();
+            let id = rt
+                .str_of(rt.get_field(a(0), "$id"))
+                .unwrap_or("")
+                .to_owned();
+            let tags = crate::tag_files::tags_of(rt, &reg, &id);
+            rt.alloc("java/util/stream/Stream", Data::Stream(tags))
+        }
         // `DeferredHolder.is(...)`: its key's, as a registry's holder answers.
         (o, "is") if o.starts_with("net/neoforged/neoforge/registries/Deferred") && rt.get_field(a(0), "$id").r() != 0 => {
             let reg = rt.str_of(rt.get_field(a(0), "$registry")).unwrap_or("").to_owned();
@@ -2191,6 +2207,11 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 }
                 "getRegisteredName" => rt.string(&id),
                 "is" => holder_is(rt, &reg, &id, desc, a(1)),
+                // The tags that hold it, as the game's loaded tags have them.
+                "tags" => {
+                    let tags = crate::tag_files::tags_of(rt, &reg, &id);
+                    rt.alloc("java/util/stream/Stream", Data::Stream(tags))
+                }
                 // Its owner is its registry (the `owner` field, read as it is), and it can be
                 // written among that registry's entries alone (`canSerializeIn(owner)`):
                 // Moonlight finds the registries a holder came from so, to make an empty fluid.
@@ -2210,6 +2231,12 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "value" | "get") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => rt.get_field(a(0), "value"),
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "isBound") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::I(1),
+        // (A direct holder is in no tag.)
+        ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "tags")
+            if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" =>
+        {
+            rt.alloc("java/util/stream/Stream", Data::Stream(Vec::new()))
+        }
         // (A direct holder can be written anywhere.)
         ("net/minecraft/core/Holder" | "net/minecraft/core/Holder$Direct", "canSerializeIn") if rt.class_of(a(0)) == "net/minecraft/core/Holder$Direct" => V::I(1),
         // A direct holder has no key (`IHolderExtension.getKey`: `unwrapKey().orElse(null)`).
@@ -3908,6 +3935,19 @@ mod tests {
                 let set = serde_json::from_str::<serde_json::Value>(set).ok()?;
                 let any =
                     set.get("type").and_then(serde_json::Value::as_str) == Some("neoforge:any");
+                // (Horizon's own question in a holder set's form: the tags that hold an entry.)
+                if set.get("type").and_then(serde_json::Value::as_str) == Some("horizon:tags_of") {
+                    let stick = registry == "item"
+                        && set.get("id").and_then(serde_json::Value::as_str)
+                            == Some("minecraft:stick");
+                    return Some(if stick {
+                        ["c:rods/wooden", "minecraft:sticks"]
+                            .map(str::to_owned)
+                            .to_vec()
+                    } else {
+                        Vec::new()
+                    });
+                }
                 match registry {
                     "item" if any => Some(
                         [
@@ -3972,6 +4012,17 @@ mod tests {
                 crate::jutil::elements(rt, held).len()
             };
             assert_eq!((members(rt, "minecraft:logs"), members(rt, "minecraft:nothing")), (2, 0));
+            // And the other way round: the tags that hold an entry, of a stack and of a holder.
+            let tags = |rt: &mut Rt, key: &'static str, of: V| -> Vec<String> {
+                let tags = crate::api::call(rt, key, &[of]);
+                crate::jutil::elements(rt, tags).into_iter().filter_map(|t| rt.str_of(rt.get_field(t, "$location")).map(str::to_owned)).collect()
+            };
+            let (stick, apple) = (crate::api_common::stack(rt, "minecraft:stick", 1), crate::api_common::stack(rt, "minecraft:apple", 1));
+            let holder = registry_holder(rt, "item", "minecraft:stick", V::NULL);
+            const STACK_TAGS: &str = "net/minecraft/world/item/ItemStack.getTags.()Ljava/util/stream/Stream;";
+            assert_eq!(tags(rt, STACK_TAGS, stick), ["c:rods/wooden", "minecraft:sticks"]);
+            assert_eq!(tags(rt, "net/minecraft/core/Holder.tags.()Ljava/util/stream/Stream;", holder), ["c:rods/wooden", "minecraft:sticks"]);
+            assert!(tags(rt, STACK_TAGS, apple).is_empty());
         });
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }

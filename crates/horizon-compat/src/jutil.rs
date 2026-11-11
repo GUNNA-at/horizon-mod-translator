@@ -1245,6 +1245,7 @@ const INT_STREAM: &str = "java/util/stream/IntStream";
 const LONG_STREAM: &str = "java/util/stream/LongStream";
 const DOUBLE_STREAM: &str = "java/util/stream/DoubleStream";
 const STREAM_BUILDER: &str = "java/util/stream/Stream$Builder";
+const ORDERING: &str = "com/google/common/collect/Ordering";
 const LIST_ITERATOR: &str = "java/util/ListIterator";
 const SIMPLE_ENTRY: &str = "java/util/AbstractMap$SimpleEntry";
 const SIMPLE_IMMUTABLE_ENTRY: &str = "java/util/AbstractMap$SimpleImmutableEntry";
@@ -1398,7 +1399,7 @@ fn guava_strings(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -
     let with = |rt: &mut Rt, from: V, field: &'static str, v: V| {
         let class = if owner == SPLITTER { SPLITTER } else { JOINER };
         let o = rt.new_object(class);
-        for f in ["$sep", "$trim", "$omit", "$skip", "$null"] {
+        for f in ["$sep", "$trim", "$omit", "$skip", "$null", "$limit"] {
             let old = rt.get_field(from, f);
             rt.put_field(o, f, old);
         }
@@ -1412,18 +1413,44 @@ fn guava_strings(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -
             with(rt, V::NULL, "$sep", sep)
         }
         (SPLITTER, "trimResults") => with(rt, a(0), "$trim", V::I(1)),
+        // `limit(n)`: no more than `n` pieces, the last one the rest of the text unsplit.
+        (SPLITTER, "limit") => with(rt, a(0), "$limit", V::I(a(1).i())),
         (SPLITTER, "omitEmptyStrings") => with(rt, a(0), "$omit", V::I(1)),
         (SPLITTER, "split" | "splitToList") => {
             let this = a(0);
             let text = rt.to_java_string(a(1), 'L');
             let sep = rt.to_java_string(rt.get_field(this, "$sep"), 'L');
             let (trim, omit) = (rt.get_field(this, "$trim").i() != 0, rt.get_field(this, "$omit").i() != 0);
-            let pieces: Vec<String> = if sep.is_empty() { text.chars().map(String::from).collect() } else { text.split(sep.as_str()).map(str::to_owned).collect() };
+            let limit = usize::try_from(rt.get_field(this, "$limit").i()).unwrap_or(0);
             let mut out = Vec::new();
-            for p in pieces {
-                let p = if trim { p.trim().to_owned() } else { p };
-                if !(omit && p.is_empty()) {
-                    out.push(rt.string(&p));
+            let mut rest = text.as_str();
+            loop {
+                let (piece, after) = if sep.is_empty() {
+                    match rest.char_indices().nth(1) {
+                        Some((at, _)) => (&rest[..at], Some(&rest[at..])),
+                        None => (rest, None),
+                    }
+                } else {
+                    match rest.split_once(sep.as_str()) {
+                        Some((piece, after)) => (piece, Some(after)),
+                        None => (rest, None),
+                    }
+                };
+                let piece = if trim { piece.trim() } else { piece };
+                // (A piece the splitter omits is not counted towards its limit.)
+                if !(omit && piece.is_empty()) {
+                    // The last piece a limit allows runs from where it starts to the text's
+                    // end, unsplit.
+                    if limit != 0 && out.len() + 1 == limit {
+                        let last = if trim { rest.trim() } else { rest };
+                        out.push(rt.string(last));
+                        break;
+                    }
+                    out.push(rt.string(piece));
+                }
+                match after {
+                    Some(after) => rest = after,
+                    None => break,
                 }
             }
             new_list(rt, out)
@@ -3400,6 +3427,164 @@ fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opti
             V::Void
         }
         ("java/util/Collections", "emptyIterator" | "emptyListIterator") => new_iter(rt, Vec::new()),
+        // Guava's `Ordering`: a comparator with more to it. One made of a comparator is that
+        // comparator; the natural one, and those made of another (reversed, nulls at an end,
+        // by a function's result, a second one after it), are Java's own of the same kind.
+        (ORDERING, "from") => a(0),
+        (ORDERING, "natural") => {
+            comparator_call(rt, "naturalOrder", "()Ljava/util/Comparator;", &[])?
+        }
+        (ORDERING, "reverse") => comparator_call(rt, "reversed", "()Ljava/util/Comparator;", args)?,
+        (ORDERING, "nullsFirst" | "nullsLast") => comparator_call(
+            rt,
+            name,
+            "(Ljava/util/Comparator;)Ljava/util/Comparator;",
+            args,
+        )?,
+        (ORDERING, "compound") => comparator_call(
+            rt,
+            "thenComparing",
+            "(Ljava/util/Comparator;)Ljava/util/Comparator;",
+            args,
+        )?,
+        (ORDERING, "onResultOf") => comparator_call(
+            rt,
+            "comparing",
+            "(Ljava/util/function/Function;Ljava/util/Comparator;)Ljava/util/Comparator;",
+            &[a(1), a(0)],
+        )?,
+        (ORDERING, "compare") => V::I(compare(rt, a(0), a(1), a(2))),
+        // `sortedCopy(elements)` and `immutableSortedCopy`: a stable sort by it.
+        (ORDERING, "sortedCopy" | "immutableSortedCopy") => {
+            let items = elements(rt, a(1));
+            let copy = new_list(rt, items);
+            sort(rt, copy, a(0));
+            copy
+        }
+        // `min(a, b)` and `max(a, b)` (the first of two that compare equal), or of a
+        // collection's elements.
+        (ORDERING, "min" | "max") => {
+            let items = if args.len() == 2 {
+                elements(rt, a(1))
+            } else {
+                args[1..].to_vec()
+            };
+            let Some((&first, rest)) = items.split_first() else {
+                rt.throw_new("java/util/NoSuchElementException");
+                return Some(V::NULL);
+            };
+            let mut best = first;
+            for &e in rest {
+                let c = compare(rt, a(0), e, best);
+                if (name == "min" && c < 0) || (name == "max" && c > 0) {
+                    best = e;
+                }
+            }
+            best
+        }
+        // `Collections.min(c)` and `max(c)`: the least or the greatest by the elements' own
+        // order, or by a comparator's; none of an empty collection.
+        ("java/util/Collections", "min" | "max") => {
+            let items = elements(rt, a(0));
+            let Some((&first, rest)) = items.split_first() else {
+                rt.throw_new("java/util/NoSuchElementException");
+                return Some(V::NULL);
+            };
+            let mut best = first;
+            for &e in rest {
+                let c = compare(rt, a(1), e, best);
+                if (name == "min" && c < 0) || (name == "max" && c > 0) {
+                    best = e;
+                }
+            }
+            best
+        }
+        ("java/util/Collections", "disjoint") => {
+            let (these, those) = (elements(rt, a(0)), elements(rt, a(1)));
+            let mut shared = false;
+            for &x in &these {
+                if those.iter().any(|&y| x == y || equals(rt, x, y)) {
+                    shared = true;
+                    break;
+                }
+            }
+            V::I(!shared as i32)
+        }
+        // Guava's `Iterables.concat(a, b...)` (or of an iterable of them): one after another.
+        ("com/google/common/collect/Iterables", "concat") => {
+            let parts = if args.len() == 1 {
+                elements(rt, a(0))
+            } else {
+                args.to_vec()
+            };
+            let mut out = Vec::new();
+            for part in parts {
+                out.extend(elements(rt, part));
+            }
+            new_list(rt, out)
+        }
+        // `Streams.stream(iterable)` (a collection, an iterator or an optional's value) and
+        // `Streams.concat(streams...)`.
+        ("com/google/common/collect/Streams", "stream") => {
+            let items = if rt.class_of(a(0)) == OPTIONAL {
+                let held = crate::api_common::call(
+                    rt,
+                    OPTIONAL,
+                    "orElse",
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    &[a(0), V::NULL],
+                )
+                .unwrap_or(V::NULL);
+                if held.is_null() {
+                    Vec::new()
+                } else {
+                    vec![held]
+                }
+            } else {
+                elements(rt, a(0))
+            };
+            rt.alloc(STREAM, Data::Stream(items))
+        }
+        ("com/google/common/collect/Streams", "concat") => {
+            let mut out = Vec::new();
+            for part in elements(rt, a(0)) {
+                out.extend(elements(rt, part));
+            }
+            rt.alloc(STREAM, Data::Stream(out))
+        }
+        // `ImmutableList.sortedCopyOf([comparator,] elements)`: a sorted copy, stable.
+        ("com/google/common/collect/ImmutableList", "sortedCopyOf") => {
+            let (comparator, from) = if args.len() > 1 {
+                (a(0), a(1))
+            } else {
+                (V::NULL, a(0))
+            };
+            let items = elements(rt, from);
+            let copy = rt.alloc("com/google/common/collect/ImmutableList", Data::List(items));
+            sort(rt, copy, comparator);
+            copy
+        }
+        // `Iterators.filter(iterator, predicate)`: what is left of the iterator that the
+        // predicate (Guava's or Java's: both `test`) takes.
+        ("com/google/common/collect/Iterators", "filter")
+            if !desc.starts_with("(Ljava/util/Iterator;Ljava/lang/Class;") =>
+        {
+            let mut kept = Vec::new();
+            for e in elements(rt, a(0)) {
+                if rt
+                    .call_functional(
+                        "java/util/function/Predicate.test.(Ljava/lang/Object;)Z",
+                        a(1),
+                        &[e],
+                    )
+                    .i()
+                    != 0
+                {
+                    kept.push(e);
+                }
+            }
+            new_iter(rt, kept)
+        }
         // `requireNonNullElseGet(o, supplier)`: `o`, else what the supplier gives, which must not
         // be null either.
         ("java/util/Objects", "requireNonNullElseGet") => {
@@ -5627,6 +5812,39 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             }
             stream(rt, out)
         }
+        // `flatMapToInt(f)` and its kin: each element's stream of numbers, one after another.
+        "flatMapToInt" | "flatMapToLong" | "flatMapToDouble" | "flatMapToObj" => {
+            let mut out = Vec::new();
+            for e in items {
+                let s = rt.call_functional(APPLY, a(1), &[e]);
+                out.extend(elements(rt, s));
+            }
+            let class = match name {
+                "flatMapToInt" => INT_STREAM,
+                "flatMapToLong" => LONG_STREAM,
+                "flatMapToDouble" => DOUBLE_STREAM,
+                _ => STREAM,
+            };
+            rt.alloc(class, Data::Stream(out))
+        }
+        // `mapMulti((element, sink) -> ...)`: whatever the function hands its sink for each
+        // element, in order.
+        "mapMulti" => {
+            // (The sink is a stream's builder: a consumer that keeps what it is given.)
+            let sink = rt.alloc(STREAM_BUILDER, Data::List(Vec::new()));
+            for e in items {
+                rt.call_functional(
+                    "java/util/function/BiConsumer.accept.(Ljava/lang/Object;Ljava/lang/Object;)V",
+                    a(1),
+                    &[e, sink],
+                );
+                if rt.thrown.is_some() {
+                    return Some(V::NULL);
+                }
+            }
+            let out = elements(rt, sink);
+            stream(rt, out)
+        }
         "filter" => {
             let mut out = Vec::new();
             for e in items {
@@ -6036,6 +6254,339 @@ mod tests {
         let linked = made(&mut rt, "java/util/LinkedList", "()V", &[]);
         list_add(&mut rt, linked, a);
         assert!(equals(&mut rt, linked, short));
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// What launch 32 asked of Java's and Guava's collections and found unanswered: the least
+    /// and the greatest of a collection, whether two share an element, Guava's joined
+    /// iterables and streams, a sorted copy, a filtered iterator, a splitter's limit, a
+    /// stream's numbers of each element and what a function hands its sink. Every result is
+    /// what Java 21 and Guava 32.1.2 printed for the same calls.
+    #[test]
+    fn collections_answer_what_the_pack_asked_of_them() {
+        /// 1: a word's characters as a stream of ints; 2: `(n, sink)` hands the sink `n` and
+        /// ten times `n`, unless `n` is 2; 3: whether a number is even; 4: a word's length.
+        /// (The lambda itself comes first among `args`.)
+        fn lambda(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+            let number = |rt: &Rt, v: V| match v {
+                V::I(n) => n,
+                v => rt.get_field(v, "value").i(),
+            };
+            Some(match id {
+                1 => {
+                    let chars = rt
+                        .str_of(args[1])
+                        .unwrap_or("")
+                        .chars()
+                        .map(|c| V::I(c as i32))
+                        .collect();
+                    rt.alloc(INT_STREAM, Data::Stream(chars))
+                }
+                2 => {
+                    let n = number(rt, args[1]);
+                    if n != 2 {
+                        for given in [n, n * 10] {
+                            let given = crate::jlang::box_raw(rt, V::I(given));
+                            crate::api::call(
+                                rt,
+                                "java/util/function/Consumer.accept.(Ljava/lang/Object;)V",
+                                &[args[2], given],
+                            );
+                        }
+                    }
+                    V::Void
+                }
+                3 => V::I(i32::from(number(rt, args[1]) % 2 == 0)),
+                _ => V::I(rt.str_of(args[1]).map_or(0, |w| w.len() as i32)),
+            })
+        }
+        crate::install();
+        let mut rt = Rt::new();
+        rt.lambda_call = Some(lambda);
+        let c = |rt: &mut Rt, key: &str, args: &[V]| {
+            let key = rt.static_key(key);
+            crate::api::call(rt, key, args)
+        };
+        let texts = |rt: &Rt, v: V| -> Vec<String> {
+            elements(rt, v)
+                .into_iter()
+                .map(|e| crate::jlang::text(rt, e))
+                .collect()
+        };
+        let words = |rt: &mut Rt, items: &[&str]| {
+            let items: Vec<V> = items.iter().map(|i| rt.string(i)).collect();
+            new_list(rt, items)
+        };
+        let numbers = |rt: &mut Rt, items: &[i32]| {
+            let items: Vec<V> = items
+                .iter()
+                .map(|&i| crate::jlang::box_raw(rt, V::I(i)))
+                .collect();
+            new_list(rt, items)
+        };
+        let (fruit, more, none) = (
+            words(&mut rt, &["pear", "apple", "plum"]),
+            words(&mut rt, &["fig", "plum"]),
+            words(&mut rt, &[]),
+        );
+        let least = c(
+            &mut rt,
+            "java/util/Collections.min.(Ljava/util/Collection;)Ljava/lang/Object;",
+            &[fruit],
+        );
+        let length = rt.lambda_id("java/util/function/ToIntFunction", 4, vec![]);
+        let by_length = c(
+            &mut rt,
+            "java/util/Comparator.comparingInt.(Ljava/util/function/ToIntFunction;)Ljava/util/Comparator;",
+            &[length],
+        );
+        let longest = c(
+            &mut rt,
+            "java/util/Collections.max.(Ljava/util/Collection;Ljava/util/Comparator;)Ljava/lang/Object;",
+            &[fruit, by_length],
+        );
+        assert_eq!(
+            (rt.str_of(least), rt.str_of(longest)),
+            (Some("apple"), Some("apple"))
+        );
+        c(
+            &mut rt,
+            "java/util/Collections.min.(Ljava/util/Collection;)Ljava/lang/Object;",
+            &[none],
+        );
+        let thrown = rt
+            .thrown
+            .take()
+            .expect("an empty collection has no least element");
+        assert_eq!(rt.class_of(thrown), "java/util/NoSuchElementException");
+        let apart = |rt: &mut Rt, x: V, y: V| {
+            c(
+                rt,
+                "java/util/Collections.disjoint.(Ljava/util/Collection;Ljava/util/Collection;)Z",
+                &[x, y],
+            )
+        };
+        assert_eq!(
+            (apart(&mut rt, fruit, more), apart(&mut rt, fruit, none)),
+            (V::I(0), V::I(1))
+        );
+
+        let joined = c(
+            &mut rt,
+            "com/google/common/collect/Iterables.concat.(Ljava/lang/Iterable;Ljava/lang/Iterable;)Ljava/lang/Iterable;",
+            &[more, fruit],
+        );
+        assert_eq!(texts(&rt, joined), ["fig", "plum", "pear", "apple", "plum"]);
+        let streamed = c(
+            &mut rt,
+            "com/google/common/collect/Streams.stream.(Ljava/lang/Iterable;)Ljava/util/stream/Stream;",
+            &[more],
+        );
+        assert_eq!(texts(&rt, streamed), ["fig", "plum"]);
+        let sorted = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableList.sortedCopyOf.(Ljava/lang/Iterable;)Lcom/google/common/collect/ImmutableList;",
+            &[fruit],
+        );
+        assert_eq!(
+            (texts(&rt, sorted), texts(&rt, fruit)),
+            (
+                vec!["apple".to_owned(), "pear".into(), "plum".into()],
+                vec!["pear".to_owned(), "apple".into(), "plum".into()]
+            )
+        );
+        let backwards = c(
+            &mut rt,
+            "java/util/Comparator.reverseOrder.()Ljava/util/Comparator;",
+            &[],
+        );
+        let sorted = c(
+            &mut rt,
+            "com/google/common/collect/ImmutableList.sortedCopyOf.(Ljava/util/Comparator;Ljava/lang/Iterable;)Lcom/google/common/collect/ImmutableList;",
+            &[backwards, fruit],
+        );
+        assert_eq!(texts(&rt, sorted), ["plum", "pear", "apple"]);
+
+        // A stream's numbers of each element, and what a function hands its sink.
+        let two = words(&mut rt, &["ab", "c"]);
+        let stream = c(
+            &mut rt,
+            "java/util/List.stream.()Ljava/util/stream/Stream;",
+            &[two],
+        );
+        let chars = rt.lambda_id("java/util/function/Function", 1, vec![]);
+        let flat = c(
+            &mut rt,
+            "java/util/stream/Stream.flatMapToInt.(Ljava/util/function/Function;)Ljava/util/stream/IntStream;",
+            &[stream, chars],
+        );
+        assert_eq!(
+            (rt.class_of(flat), elements(&rt, flat)),
+            (INT_STREAM, vec![V::I(97), V::I(98), V::I(99)])
+        );
+        let counted = numbers(&mut rt, &[1, 2, 3]);
+        let stream = c(
+            &mut rt,
+            "java/util/List.stream.()Ljava/util/stream/Stream;",
+            &[counted],
+        );
+        let hands = rt.lambda_id("java/util/function/BiConsumer", 2, vec![]);
+        let handed = c(
+            &mut rt,
+            "java/util/stream/Stream.mapMulti.(Ljava/util/function/BiConsumer;)Ljava/util/stream/Stream;",
+            &[stream, hands],
+        );
+        assert_eq!(texts(&rt, handed), ["1", "10", "3", "30"]);
+        let counted = numbers(&mut rt, &[1, 2, 3, 4]);
+        let walk = c(
+            &mut rt,
+            "java/util/List.iterator.()Ljava/util/Iterator;",
+            &[counted],
+        );
+        let even = rt.lambda_id("com/google/common/base/Predicate", 3, vec![]);
+        let kept = c(
+            &mut rt,
+            "com/google/common/collect/Iterators.filter.(Ljava/util/Iterator;Lcom/google/common/base/Predicate;)Lcom/google/common/collect/UnmodifiableIterator;",
+            &[walk, even],
+        );
+        assert_eq!(texts(&rt, kept), ["2", "4"]);
+
+        // Guava's `Ordering` is a comparator: natural and reversed, nulls last, by a
+        // function's result with a second order after it, the greater of two (the first of
+        // two that compare equal).
+        const ORDER: &str = "com/google/common/collect/Ordering";
+        let order = |rt: &mut Rt, name: &str, desc: &str, args: &[V]| {
+            c(rt, &format!("{ORDER}.{name}.{desc}"), args)
+        };
+        let fruit = words(&mut rt, &["pear", "fig", "apple", "plum"]);
+        let natural = order(
+            &mut rt,
+            "natural",
+            "()Lcom/google/common/collect/Ordering;",
+            &[],
+        );
+        let reversed = order(
+            &mut rt,
+            "reverse",
+            "()Lcom/google/common/collect/Ordering;",
+            &[natural],
+        );
+        let sorted = order(
+            &mut rt,
+            "sortedCopy",
+            "(Ljava/lang/Iterable;)Ljava/util/List;",
+            &[reversed, fruit],
+        );
+        assert_eq!(texts(&rt, sorted), ["plum", "pear", "fig", "apple"]);
+        let nulls_last = order(
+            &mut rt,
+            "nullsLast",
+            "()Lcom/google/common/collect/Ordering;",
+            &[natural],
+        );
+        let (x, y) = (rt.string("b"), rt.string("a"));
+        let holed = new_list(&mut rt, vec![x, V::NULL, y]);
+        let sorted = order(
+            &mut rt,
+            "sortedCopy",
+            "(Ljava/lang/Iterable;)Ljava/util/List;",
+            &[nulls_last, holed],
+        );
+        assert_eq!(elements(&rt, sorted), [y, x, V::NULL]);
+        let length = rt.lambda_id("java/util/function/Function", 4, vec![]);
+        let by_length = order(
+            &mut rt,
+            "onResultOf",
+            "(Lcom/google/common/base/Function;)Lcom/google/common/collect/Ordering;",
+            &[natural, length],
+        );
+        let then = order(
+            &mut rt,
+            "compound",
+            "(Ljava/util/Comparator;)Lcom/google/common/collect/Ordering;",
+            &[by_length, natural],
+        );
+        let sorted = order(
+            &mut rt,
+            "sortedCopy",
+            "(Ljava/lang/Iterable;)Ljava/util/List;",
+            &[then, fruit],
+        );
+        assert_eq!(texts(&rt, sorted), ["fig", "pear", "plum", "apple"]);
+        let (fig, pear, plum) = (rt.string("fig"), rt.string("pear"), rt.string("plum"));
+        assert_eq!(
+            order(
+                &mut rt,
+                "compare",
+                "(Ljava/lang/Object;Ljava/lang/Object;)I",
+                &[by_length, fig, pear]
+            ),
+            V::I(-1)
+        );
+        let longer = order(
+            &mut rt,
+            "max",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[by_length, pear, plum],
+        );
+        let greatest = order(
+            &mut rt,
+            "max",
+            "(Ljava/lang/Iterable;)Ljava/lang/Object;",
+            &[natural, fruit],
+        );
+        assert_eq!((longer, rt.str_of(greatest)), (pear, Some("plum")));
+
+        // A splitter's limit: the last piece is the rest, from where a piece that counts starts.
+        let split = |rt: &mut Rt, sep: &str, limit: i32, omit: bool, trim: bool, text: &str| {
+            let sep = rt.string(sep);
+            let mut splitter = c(
+                rt,
+                "com/google/common/base/Splitter.on.(Ljava/lang/String;)Lcom/google/common/base/Splitter;",
+                &[sep],
+            );
+            splitter = c(
+                rt,
+                "com/google/common/base/Splitter.limit.(I)Lcom/google/common/base/Splitter;",
+                &[splitter, V::I(limit)],
+            );
+            if omit {
+                splitter = c(
+                    rt,
+                    "com/google/common/base/Splitter.omitEmptyStrings.()Lcom/google/common/base/Splitter;",
+                    &[splitter],
+                );
+            }
+            if trim {
+                splitter = c(
+                    rt,
+                    "com/google/common/base/Splitter.trimResults.()Lcom/google/common/base/Splitter;",
+                    &[splitter],
+                );
+            }
+            let text = rt.string(text);
+            let pieces = c(
+                rt,
+                "com/google/common/base/Splitter.splitToList.(Ljava/lang/CharSequence;)Ljava/util/List;",
+                &[splitter, text],
+            );
+            texts(rt, pieces)
+        };
+        assert_eq!(
+            split(&mut rt, ",", 3, false, false, "a,b,c,d"),
+            ["a", "b", "c,d"]
+        );
+        assert_eq!(
+            split(&mut rt, ",", 3, true, false, "a,,,b,,,c,d"),
+            ["a", "b", "c,d"]
+        );
+        assert_eq!(
+            split(&mut rt, ",", 3, false, true, " a , b , c , d "),
+            ["a", "b", "c , d"]
+        );
+        assert_eq!(split(&mut rt, ",", 2, true, false, ",,a,,b,"), ["a", "b,"]);
+        assert_eq!(split(&mut rt, ", ", 1, false, false, "x, y"), ["x, y"]);
+        assert_eq!(split(&mut rt, ",", 5, false, false, "a,b"), ["a", "b"]);
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

@@ -4671,6 +4671,16 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             let components = name == "isSameItem" || stack_empty(rt, x) || crate::components::same_patch(rt, x, y);
             V::I((same && counts && components) as i32)
         }
+        // `getTags()`: the item's tags, as its registry entry tells them (`Holder.tags()`).
+        ("net/minecraft/world/item/ItemStack", "getTags") => {
+            let item = item_like_name(rt, rt.get_field(a(0), "$item"));
+            let tags = if stack_empty(rt, a(0)) {
+                Vec::new()
+            } else {
+                crate::tag_files::tags_of(rt, "item", &item)
+            };
+            rt.alloc("java/util/stream/Stream", Data::Stream(tags))
+        }
         ("net/minecraft/world/item/ItemStack", "is") if desc.starts_with("(Lnet/minecraft/tags/TagKey;") => {
             let item = item_like_name(rt, rt.get_field(a(0), "$item"));
             let tag = rt.str_of(rt.get_field(a(1), "$location")).unwrap_or("").to_owned();

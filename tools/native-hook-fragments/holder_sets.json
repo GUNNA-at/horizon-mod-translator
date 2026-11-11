@@ -1,7 +1,7 @@
 {
   "hooks": [],
   "rust_summary": "holder sets over the game's own registries (`native_holder_set`): a tag's members, every entry of a registry.",
-  "doc_summary": "`native_holder_set(registry, set)` gives the entries a holder set names in one of the game's registries (`block`, `item`, `fluid`, `entity_type`...), in order: an id, `#tag` (the loaded tag's members), a list of them, or NeoForge's `any`, `or`, `and` and `not` objects. A mod lists a block tag's blocks or every item of the game with it; `None` for what the game keeps no list of. Bundles need \"hooks\": @API:holder_sets@.",
+  "doc_summary": "`native_holder_set(registry, set)` gives the entries a holder set names in one of the game's registries (`block`, `item`, `fluid`, `entity_type`...), in order: an id, `#tag` (the loaded tag's members), a list of them, or NeoForge's `any`, `or`, `and` and `not` objects. `{\"type\": \"horizon:tags_of\", \"id\": ...}` asks the other way round: the loaded tags that hold an entry. A mod lists a block tag's blocks, every item of the game or an item's tags with it; `None` for what the game keeps no list of. Bundles need \"hooks\": @API:holder_sets@.",
   "comments": [
     "crates/horizon-client/src/game/native_holder_sets.rs"
   ]

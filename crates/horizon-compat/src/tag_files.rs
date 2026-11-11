@@ -55,6 +55,52 @@ pub(crate) fn members(rt: &mut Rt, registry: &str, tag: &str) -> Option<Vec<Stri
     found
 }
 
+/// The tags of `registry` that hold its entry `id` (`Holder.tags()`), as tag keys: the game's
+/// answer for a registry of its own (asked as a holder set of Horizon's own kind,
+/// `horizon:tags_of`), the files' for a mod's own. None where no game is there to tell of its
+/// registries.
+pub(crate) fn tags_of(rt: &mut Rt, registry: &str, id: &str) -> Vec<V> {
+    let registry = registry.strip_prefix("minecraft:").unwrap_or(registry);
+    let asked = serde_json::json!({"type": "horizon:tags_of", "id": id}).to_string();
+    let names = match rt.host().and_then(|h| h.holder_set(registry, &asked)) {
+        Some(names) => names,
+        None if crate::neo::games_registry(registry) => Vec::new(),
+        None => {
+            let mut held = Vec::new();
+            for tag in names(rt, registry) {
+                if members(rt, registry, &tag).is_some_and(|ids| ids.iter().any(|i| i == id)) {
+                    held.push(tag);
+                }
+            }
+            held
+        }
+    };
+    names
+        .iter()
+        .map(|tag| crate::fluids::tag_key(rt, registry, tag))
+        .collect()
+}
+
+/// The tags of a mod's own `registry` there are files for, by name, sorted.
+fn names(rt: &mut Rt, registry: &str) -> Vec<String> {
+    let folder = crate::datapack::folder(rt, registry);
+    let mut out = Vec::new();
+    for namespace in crate::resources::namespaces(rt, "data") {
+        let prefix = format!("data/{namespace}/tags/{folder}/");
+        for path in crate::resources::paths(rt, &prefix) {
+            if let Some(name) = path
+                .strip_prefix(&prefix)
+                .and_then(|p| p.strip_suffix(".json"))
+            {
+                out.push(format!("{namespace}:{name}"));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// What was read of the tags' files is forgotten: the data was loaded again.
 pub(crate) fn forget(rt: &mut Rt) {
     rt.interned.retain(|k, _| !k.starts_with(KEPT));
