@@ -3109,8 +3109,11 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
             format!("${}", m.name),
             format!("{owner}.${}.(){}", m.name, m.desc),
         );
+        // (Its own state is where the write keeps it: under a name of its own for a field that
+        // hides one above, as an enum's `name` hides `Enum.name`.)
+        let stored = self.instance_key(&m.owner, &m.name);
         Some(format!(
-            "match rt.get_field({o}, {name:?}) {{ V::Void if matches!(rt.get_field({o}, \"$vt\"), V::Void) => match api::game_field(rt, {o}, {name:?}, {own:?}, {key:?}) {{ V::Void => {zero}, v => v }}, V::Void => {zero}, v => v }}"
+            "match rt.get_field({o}, {stored:?}) {{ V::Void if matches!(rt.get_field({o}, \"$vt\"), V::Void) => match api::game_field(rt, {o}, {name:?}, {own:?}, {key:?}) {{ V::Void => {zero}, v => v }}, V::Void => {zero}, v => v }}"
         ))
     }
 
@@ -4013,6 +4016,69 @@ mod field_tests {
         );
         assert!(code.contains("0 <hides> head\\n"), "{code}");
         assert!(code.contains("0 <hides> count\\n"));
+    }
+
+    /// A class of the game's own translated code reads a field of its own that hides one above
+    /// where its constructor wrote it (vanilla's `OctahedralGroup.name` over `Enum.name`: read
+    /// under the plain name, `getSerializedName()` answered null). An object the runtime made
+    /// of the class is still asked by the field's plain name.
+    #[test]
+    fn a_game_classs_hiding_field_is_read_where_it_is_written() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            eprintln!("no JDK: skipped");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("mod-translator-game-hidden-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // (A class of the game's by its package, named here in parts: one this source named
+        // whole would be the runtime's to model, not code to translate.)
+        let folder = ["net", "minecraft", "hztest"].join("/");
+        let package = root.join(&folder);
+        std::fs::create_dir_all(&package).unwrap();
+        let files = [
+            (
+                "Base.java",
+                "package net.minecraft.hztest; public class Base { protected String name = \"base\"; String above() { return name; } }",
+            ),
+            (
+                "Turn.java",
+                "package net.minecraft.hztest; public class Turn extends Base { private final String name; Turn(String n) { name = n; } String own() { return name; } }",
+            ),
+        ];
+        for (path, src) in files {
+            std::fs::write(package.join(path), src).unwrap();
+        }
+        let paths: Vec<_> = files.iter().map(|(p, _)| package.join(p)).collect();
+        assert!(
+            Command::new("javac")
+                .args(["-d", root.to_str().unwrap()])
+                .args(&paths)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let classes: Vec<ClassFile> = ["Base.class", "Turn.class"]
+            .iter()
+            .map(|c| ClassFile::parse(&std::fs::read(package.join(c)).unwrap()).unwrap())
+            .collect();
+        let _ = std::fs::remove_dir_all(&root);
+        let turn = format!("{folder}/Turn");
+        assert!(crate::game_code(&turn));
+        let mut p = super::Program::new(&classes);
+        let code = p.emit();
+        let stored = format!("name@{turn}");
+        assert!(
+            code.contains(&format!("rt.put_field(o, {stored:?}, v)")),
+            "{code}"
+        );
+        let asked = r#"{ V::Void if matches!(rt.get_field(o, "$vt"), V::Void) => match api::game_field(rt, o, "name", "$name""#;
+        assert!(
+            code.contains(&format!("match rt.get_field(o, {stored:?}) {asked}")),
+            "{code}"
+        );
+        // The class above reads its own under the plain name.
+        assert!(code.contains(&format!("match rt.get_field(o, \"name\") {asked}")));
     }
 
     /// A class added between two others takes an id past theirs when the earlier translation's
