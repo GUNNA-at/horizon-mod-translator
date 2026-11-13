@@ -72,40 +72,88 @@ thread_local! {
     static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// How many API calls this thread has answered.
     static CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// When the piece of a mod's code that runs on this thread started ([`timed`]).
-    static PIECE: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+    /// The piece of a mod's code that runs on this thread ([`timed_start`]).
+    static PIECE: std::cell::Cell<Option<Piece>> = const { std::cell::Cell::new(None) };
+}
+
+/// A piece of a mod's code on its clock: when it started, how long it may run, and whether it
+/// has been stopped for running longer.
+#[derive(Clone, Copy)]
+pub(crate) struct Piece {
+    since: std::time::Instant,
+    limit: std::time::Duration,
+    stopped: bool,
 }
 
 /// How long one piece of a mod's code may run while the game loads (a mod's constructor, one
 /// listener hearing one event) before it is stopped: on a JVM none takes a second, and one that
 /// loops here without end (or a hundred times slower than there) would hold every other mod up.
-/// The API call it is in then throws `java.lang.Error`, which unwinds the piece as an exception of
-/// its own would; the game goes on to the next.
+/// The API call it is in then throws [`STOPPED`], which unwinds the piece as an error of its own
+/// would, and so does every call it makes after that, whatever caught the first: the game goes
+/// on to the next.
 const PIECE_TIME: std::time::Duration = std::time::Duration::from_secs(90);
 /// The clock is read once in this many API calls.
 const PIECE_CHECK: u64 = 1 << 20;
+/// What a piece stopped for its time is thrown: the error a JVM throws at code it cannot let go
+/// on, and what the runtime throws at code that calls too deep. Not an `Exception`, so a
+/// `catch (Exception e)` does not swallow it; and of the errors code that catches everything
+/// tells apart, the one it lets go. (It was a plain `Error`: JourneyMap's map task ran past
+/// its time, caught it as a `Throwable`, and looked for its kind in a loop that ends for a
+/// stack overflow, an out of memory, a linkage error or an exception, and for nothing else.
+/// No call of the runtime's is made in that loop, so nothing could stop it again.)
+const STOPPED: &str = "java/lang/StackOverflowError";
 
 /// Starts the clock of a piece of a mod's code ([`PIECE_TIME`]); gives back the one that ran, for
 /// [`timed_end`] when this piece is done.
-pub(crate) fn timed_start() -> Option<std::time::Instant> {
-    PIECE.replace(Some(std::time::Instant::now()))
+pub(crate) fn timed_start() -> Option<Piece> {
+    timed_start_within(PIECE_TIME)
+}
+
+/// [`timed_start`] for a piece that may run `limit` ([`crate::tasks`]: a pool's work in a
+/// running game, which holds the game's thread while it runs).
+pub(crate) fn timed_start_within(limit: std::time::Duration) -> Option<Piece> {
+    PIECE.replace(Some(Piece {
+        since: std::time::Instant::now(),
+        limit,
+        stopped: false,
+    }))
+}
+
+/// The next API call on this thread reads the clock, whatever the count is at.
+#[cfg(test)]
+pub(crate) fn next_call_reads_the_clock() {
+    CALLS.set(PIECE_CHECK - 1);
+}
+
+/// Whether the piece that runs now has been stopped for its time.
+pub(crate) fn timed_out() -> bool {
+    PIECE.get().is_some_and(|piece| piece.stopped)
 }
 
 /// The piece [`timed_start`] began is done: the one around it goes on.
-pub(crate) fn timed_end(outer: Option<std::time::Instant>) {
+pub(crate) fn timed_end(outer: Option<Piece>) {
     PIECE.set(outer);
 }
 
 /// Counts an API call; whether the piece of code it is in has run past its time (read once in
-/// [`PIECE_CHECK`] calls).
+/// [`PIECE_CHECK`] calls, and at every call once it has).
 fn over_time() -> Option<u64> {
     let n = CALLS.get().wrapping_add(1);
     CALLS.set(n);
-    if !n.is_multiple_of(PIECE_CHECK) {
-        return None;
+    let piece = PIECE.get()?;
+    if !piece.stopped {
+        if !n.is_multiple_of(PIECE_CHECK) {
+            return None;
+        }
+        if piece.since.elapsed() < piece.limit {
+            return None;
+        }
+        PIECE.set(Some(Piece {
+            stopped: true,
+            ..piece
+        }));
     }
-    let ran = PIECE.get()?.elapsed();
-    (ran >= PIECE_TIME).then_some(ran.as_secs())
+    Some(piece.since.elapsed().as_secs())
 }
 
 /// A point in the runtime's own code between two pieces of the mods' code it runs one after
@@ -502,7 +550,7 @@ fn call_unobserved(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
     } else if let Some(secs) = over_time().filter(|_| rt.thrown.is_none()) {
         crate::jlang::throw_with(
             rt,
-            "java/lang/Error",
+            STOPPED,
             &format!(
                 "horizon-compat: this part of the mod ran for {secs} s without coming back to the game and was stopped (in {key})"
             ),
@@ -4460,6 +4508,27 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             }
         }
         k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        // The empty collections as fields, older than the methods that give them.
+        "java/util/Collections.EMPTY_LIST" => call(
+            rt,
+            "java/util/Collections.emptyList.()Ljava/util/List;",
+            &[],
+        ),
+        "java/util/Collections.EMPTY_SET" => {
+            call(rt, "java/util/Collections.emptySet.()Ljava/util/Set;", &[])
+        }
+        "java/util/Collections.EMPTY_MAP" => {
+            call(rt, "java/util/Collections.emptyMap.()Ljava/util/Map;", &[])
+        }
+        k if k.starts_with("java/util/logging/Level.") => {
+            match crate::jutil::logging_level(rt, k.rsplit('.').next().unwrap_or("")) {
+                Some(level) => level,
+                None => {
+                    crate::miss(rt, key);
+                    V::NULL
+                }
+            }
+        }
         // `Unsafe.theUnsafe`, which a mod takes by reflection to write a field it may not
         // ([`crate::jlang`]'s `sun.misc.Unsafe`).
         "sun/misc/Unsafe.theUnsafe" => crate::jlang::the_unsafe(rt),
@@ -5848,9 +5917,10 @@ mod tests {
     }
 
     /// One piece of a mod's loading code (a constructor, a listener hearing an event) that has run
-    /// past its time is stopped at an API call: the call throws `Error` instead of answering. A
-    /// piece within its time, and code outside any piece (the game's hooks), go on; the clock is
-    /// read once in [`PIECE_CHECK`] calls, and a piece done gives the clock back to the one around.
+    /// past its time is stopped at an API call: the call throws an error instead of answering, and
+    /// so does every call the piece makes after it. A piece within its time, and code outside any
+    /// piece (the game's hooks), go on; the clock is read once in [`PIECE_CHECK`] calls, and a
+    /// piece done gives the clock back to the one around.
     #[test]
     fn a_piece_of_loading_code_past_its_time_is_stopped() {
         let key = "java/lang/Math.abs.(I)I";
@@ -5868,16 +5938,32 @@ mod tests {
         next_checks();
         assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::I(3));
         // The same piece, started long ago: between checks it goes on, at one it is stopped.
-        PIECE.set(Some(long_ago));
+        PIECE.set(Some(Piece {
+            since: long_ago,
+            limit: PIECE_TIME,
+            stopped: false,
+        }));
         assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::I(3));
+        assert!(!timed_out());
         next_checks();
         assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::Void);
         let e = rt.thrown.take().expect("stopped");
-        assert_eq!(rt.class_of(e), "java/lang/Error");
+        // Not an exception, and of the errors the one that code sorting them lets go.
+        assert_eq!(rt.class_of(e), "java/lang/StackOverflowError");
+        assert!(!rt.instance_of(e, "java/lang/Exception") && rt.instance_of(e, "java/lang/Error"));
         assert!(
             rt.str_of(rt.get_field(e, "message"))
                 .is_some_and(|m| m.contains("was stopped"))
         );
+        // Whatever caught that, the piece's next call is stopped too, with no check waited for.
+        assert!(timed_out());
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::Void);
+        assert!(rt.thrown.take().is_some());
+        // A piece with less time is stopped when that is over.
+        timed_start_within(std::time::Duration::ZERO);
+        next_checks();
+        assert_eq!(call(&mut rt, key, &[V::I(-3)]), V::Void);
+        assert!(rt.thrown.take().is_some());
         // Done: the clock is the outer piece's again (none here).
         timed_end(outer);
         next_checks();

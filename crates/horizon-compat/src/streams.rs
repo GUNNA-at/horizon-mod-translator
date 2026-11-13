@@ -81,9 +81,98 @@ fn out_class(c: &str) -> bool {
     )
 }
 
+const CRC_32: &str = "java/util/zip/CRC32";
+const CRC_32C: &str = "java/util/zip/CRC32C";
+const ADLER_32: &str = "java/util/zip/Adler32";
+const CHECKSUM: &str = "java/util/zip/Checksum";
+/// A checksum's value so far (its object's field).
+const SUM: &str = "$sum";
+
+/// The table of the CRC whose polynomial, bits reversed, is `poly`.
+const fn crc_table(poly: u32) -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            c = if c & 1 != 0 { poly ^ (c >> 1) } else { c >> 1 };
+            bit += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+}
+/// CRC-32 as zip and PNG have it, and CRC-32C (Castagnoli's).
+static CRC_TABLE: [u32; 256] = crc_table(0xEDB8_8320);
+static CRC_C_TABLE: [u32; 256] = crc_table(0x82F6_3B78);
+
+/// The checksum of class `class` after `bytes`, from `sum` before them.
+fn checksum_after(class: &str, sum: u32, bytes: &[u8]) -> u32 {
+    if class == ADLER_32 {
+        let (mut low, mut high) = (sum & 0xffff, sum >> 16);
+        for &byte in bytes {
+            low = (low + u32::from(byte)) % 65521;
+            high = (high + low) % 65521;
+        }
+        return high << 16 | low;
+    }
+    let table = if class == CRC_32C {
+        &CRC_C_TABLE
+    } else {
+        &CRC_TABLE
+    };
+    let mut c = !sum;
+    for &byte in bytes {
+        c = table[((c ^ u32::from(byte)) & 0xff) as usize] ^ (c >> 8);
+    }
+    !c
+}
+
+/// `CRC32`, `CRC32C` and `Adler32`, and each through `Checksum`: the sum of the bytes given
+/// so far.
+fn checksum_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let this = a(0);
+    let class = [CRC_32, CRC_32C, ADLER_32]
+        .into_iter()
+        .find(|c| rt.instance_of(this, c))?;
+    let start = u32::from(class == ADLER_32);
+    let sum = match rt.get_field(this, SUM) {
+        V::J(sum) => sum as u32,
+        _ => start,
+    };
+    let bytes = match (name, desc) {
+        ("<init>", _) | ("reset", _) => {
+            rt.put_field(this, SUM, V::J(i64::from(start)));
+            return Some(V::Void);
+        }
+        ("getValue", _) => return Some(V::J(i64::from(sum))),
+        ("update", "(I)V") => vec![a(1).i() as u8],
+        ("update", "([B)V") => crate::resources::array_bytes(rt, a(1)),
+        ("update", "([BII)V") => {
+            let all = crate::resources::array_bytes(rt, a(1));
+            let (from, len) = (a(2).i(), a(3).i());
+            if from < 0 || len < 0 || from as usize + len as usize > all.len() {
+                rt.throw_new("java/lang/ArrayIndexOutOfBoundsException");
+                return Some(V::Void);
+            }
+            all[from as usize..(from + len) as usize].to_vec()
+        }
+        // (What the buffer has left to read, which is then read.)
+        ("update", "(Ljava/nio/ByteBuffer;)V") => crate::nio::take_left(rt, a(1))?,
+        _ => return None,
+    };
+    let after = checksum_after(class, sum, &bytes);
+    rt.put_field(this, SUM, V::J(i64::from(after)));
+    Some(V::Void)
+}
+
 pub fn claims(owner: &str, name: &str, _desc: &str) -> bool {
     in_class(owner)
         || out_class(owner)
+        || matches!(owner, CRC_32 | CRC_32C | ADLER_32 | CHECKSUM)
         || matches!(owner, DATA_INPUT | DATA_OUTPUT | FLUSHABLE | NBT_IO)
         || (matches!(owner, CLOSEABLE | AUTO_CLOSEABLE) && name == "close")
         || (owner == INPUT_STREAM && name == "nullInputStream")
@@ -1009,6 +1098,9 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     if owner == NBT_IO {
         return nbt_io(rt, name, desc, args);
     }
+    if matches!(owner, CRC_32 | CRC_32C | ADLER_32 | CHECKSUM) {
+        return checksum_call(rt, name, desc, args);
+    }
     match (owner, name) {
         (OUTPUT_STREAM, "nullOutputStream") => return Some(rt.new_object(OUTPUT_STREAM)),
         (INPUT_STREAM, "nullInputStream") => {
@@ -1056,6 +1148,98 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 mod tests {
     use super::*;
     use crate::nbt::Nbt;
+
+    /// The sums are Java 21's (`java.util.zip`'s own, over the same bytes).
+    #[test]
+    fn checksums_add_up_as_javas() {
+        crate::install();
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let made = |rt: &mut Rt, class: &'static str, init: &'static str| {
+            let sum = rt.new_object(class);
+            crate::api::call(rt, init, &[sum]);
+            sum
+        };
+        let hello = crate::resources::byte_array(&mut rt, b"hello");
+        let crc = made(&mut rt, CRC_32, "java/util/zip/CRC32.<init>.()V");
+        c(&mut rt, "java/util/zip/CRC32.update.([B)V", &[crc, hello]);
+        assert_eq!(
+            c(&mut rt, "java/util/zip/CRC32.getValue.()J", &[crc]),
+            V::J(907_060_870)
+        );
+        let four = crate::resources::byte_array(&mut rt, &[1, 2, 3, 4]);
+        c(
+            &mut rt,
+            "java/util/zip/CRC32.update.([BII)V",
+            &[crc, four, V::I(1), V::I(2)],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/zip/CRC32.getValue.()J", &[crc]),
+            V::J(3_096_063_687)
+        );
+        c(
+            &mut rt,
+            "java/util/zip/CRC32.update.(I)V",
+            &[crc, V::I(255)],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/zip/CRC32.getValue.()J", &[crc]),
+            V::J(4_206_419_261)
+        );
+        c(&mut rt, "java/util/zip/CRC32.reset.()V", &[crc]);
+        assert_eq!(
+            c(&mut rt, "java/util/zip/CRC32.getValue.()J", &[crc]),
+            V::J(0)
+        );
+        // A buffer's rest is summed, and read.
+        let buffer = crate::nio::of_bytes(&mut rt, &[104, 101, 108, 108, 111]);
+        c(
+            &mut rt,
+            "java/util/zip/CRC32.update.(Ljava/nio/ByteBuffer;)V",
+            &[crc, buffer],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/zip/CRC32.getValue.()J", &[crc]),
+            V::J(907_060_870)
+        );
+        assert_eq!(
+            c(&mut rt, "java/nio/ByteBuffer.remaining.()I", &[buffer]),
+            V::I(0)
+        );
+        let adler = made(&mut rt, ADLER_32, "java/util/zip/Adler32.<init>.()V");
+        c(
+            &mut rt,
+            "java/util/zip/Adler32.update.([B)V",
+            &[adler, hello],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/zip/Adler32.getValue.()J", &[adler]),
+            V::J(103_547_413)
+        );
+        let castagnoli = made(&mut rt, CRC_32C, "java/util/zip/CRC32C.<init>.()V");
+        c(
+            &mut rt,
+            "java/util/zip/CRC32C.update.([B)V",
+            &[castagnoli, hello],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/zip/CRC32C.getValue.()J", &[castagnoli]),
+            V::J(2_591_144_780)
+        );
+        // Through the interface, as a method handed any checksum asks it.
+        let any = made(&mut rt, CRC_32, "java/util/zip/CRC32.<init>.()V");
+        let nines = crate::resources::byte_array(&mut rt, &[9, 9]);
+        c(
+            &mut rt,
+            "java/util/zip/Checksum.update.([B)V",
+            &[any, nines],
+        );
+        assert_eq!(
+            c(&mut rt, "java/util/zip/Checksum.getValue.()J", &[any]),
+            V::J(3_922_137_362)
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     fn call(rt: &mut Rt, key: &str, args: &[V]) -> V {
         let k = rt.static_key(key);

@@ -165,6 +165,40 @@ fn fallback_dirs() -> &'static [PathBuf] {
     DIRS.get_or_init(|| std::env::var("HORIZON_COMPAT_RESOURCES").map(|v| v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect()).unwrap_or_default())
 }
 
+/// The folder given after `--resources` among a game's arguments.
+fn resources_argument(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<PathBuf> {
+    while let Some(arg) = args.next() {
+        if arg == "--resources" {
+            return args.next().map(PathBuf::from);
+        }
+    }
+    None
+}
+
+/// The game's own resources folder, as it was started with (`--resources <folder>`): where
+/// the game's files are read before there is a game to ask, while the mods load. (The game
+/// answers [`crate::Host::resource`] from the same folder afterwards. A structure library read
+/// vanilla's structure sets out of "the game's jar" as it was constructed: sixteen files that
+/// were nowhere, and its config of them was empty.)
+fn game_resources() -> Option<&'static Path> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        resources_argument(std::env::args_os())
+            .and_then(|dir| std::path::absolute(dir).ok())
+            .filter(|dir| dir.is_dir())
+    })
+    .as_deref()
+}
+
+/// The game's own copy of resource file `path`: the host's, or with no game to ask yet the
+/// file in the folder the game was started with.
+fn own(rt: &Rt, path: &str) -> Option<Vec<u8>> {
+    match rt.host() {
+        Some(host) => host.resource(path),
+        None => game_resources().and_then(|dir| std::fs::read(dir.join(path)).ok()),
+    }
+}
+
 /// Content folders by the namespace folders each has under `assets` and `data`.
 type ByNamespace = std::collections::HashMap<(String, String), Vec<PathBuf>>;
 
@@ -242,14 +276,14 @@ fn safe(path: &str) -> bool {
     !path.is_empty() && !path.contains('\\') && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
 }
 
-/// The bytes of resource file `path` (`assets/create/lang/en_us.json`): the host's, else those of
-/// the first fallback folder that has it, else of the first of the mods' content folders
-/// ([`content_dirs`]).
+/// The bytes of resource file `path` (`assets/create/lang/en_us.json`): the game's own ([`own`]),
+/// else those of the first fallback folder that has it, else of the first of the mods' content
+/// folders ([`content_dirs`]).
 pub fn file(rt: &Rt, path: &str) -> Option<Vec<u8>> {
     if !safe(path) {
         return None;
     }
-    if let Some(bytes) = rt.host().and_then(|h| h.resource(path)) {
+    if let Some(bytes) = own(rt, path) {
         return Some(bytes);
     }
     fallback_dirs()
@@ -271,7 +305,7 @@ pub(crate) fn copies(rt: &Rt, path: &str) -> Vec<Vec<u8>> {
         .filter_map(|d| std::fs::read(d.join(path)).ok())
         .collect();
     let mut out = Vec::new();
-    if let Some(own) = rt.host().and_then(|h| h.resource(path))
+    if let Some(own) = own(rt, path)
         && !mods.contains(&own)
     {
         out.push(own);
@@ -313,6 +347,9 @@ pub(crate) fn jar_path(rt: &mut Rt, path: &str) -> PathBuf {
             .iter()
             .chain(content_dirs_of(path))
             .map(|d| d.join(path))
+            // (And the game's own files, which are "the game's jar" to a mod that asks for
+            // vanilla's data by a path into it.)
+            .chain(game_resources().map(|d| d.join(path)))
             .find(|p| p.exists())
     {
         return found;
@@ -2013,6 +2050,25 @@ pub(crate) fn encode_png(width: usize, rgba: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::host::MemoryHost;
+
+    /// The game's resources folder is the one named after `--resources` among its arguments.
+    #[test]
+    fn the_games_resources_folder_is_read_from_its_arguments() {
+        let args = |list: &[&str]| resources_argument(list.iter().map(std::ffi::OsString::from));
+        assert_eq!(
+            args(&[
+                "horizon-client",
+                "--world",
+                "P",
+                "--resources",
+                "/games/prepared",
+                "--creative"
+            ]),
+            Some(PathBuf::from("/games/prepared"))
+        );
+        assert_eq!(args(&["horizon-client", "--world", "resources"]), None);
+        assert_eq!(args(&["horizon-client", "--resources"]), None);
+    }
 
     /// A reload listener of a mod's has what NeoForge gives each of them: the registries, and
     /// a context for its conditions.

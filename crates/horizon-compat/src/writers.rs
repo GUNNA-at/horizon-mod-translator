@@ -165,6 +165,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "printf" | "format" => {
             let (f, rest) = if types.first() == Some(&"Ljava/util/Locale;") { (a(2), a(3)) } else { (a(1), a(2)) };
             let (f, vals) = (crate::jlang::text(rt, f), crate::jutil::elements(rt, rest));
+            let vals = crate::jlang::format_values(rt, vals);
             let text = crate::jlang::format_java(rt, &f, &vals);
             put(rt, this, &text);
             this
