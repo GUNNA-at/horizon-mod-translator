@@ -2,7 +2,8 @@
   "hooks": [
     {
       "name": "content_block",
-      "target": "horizon_client::game::native_hooks::Game<'_>::native_content_block"
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_content_block",
+      "mod_api": false
     }
   ],
   "rust_summary": "content blocks as their files declare them, before the resources are built (`native_content_block`), and the `render_shape` block property.",

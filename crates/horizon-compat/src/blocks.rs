@@ -3616,9 +3616,11 @@ fn state_shapes(rt: &mut Rt, b: V, name: &str, states: &[(String, Vec<String>)])
     Some(out)
 }
 
-/// The `shapes` a content declaration holds for these states: one list when every state has the
-/// same (None when that is a full block, the template's own), by one property when that decides
-/// it, else the states that differ from the most common shape. Keys list properties by name.
+/// The `shapes` a content declaration holds for these states, as the game's `StateValues` reads
+/// them: one list for every state (`default` alone; None when that is a full block, the
+/// template's own), by one property when that decides it (`property`, `values`), else by all of
+/// them (`properties` by name, `values` keyed by their values in that order) for the states that
+/// differ from the most common shape, which is the `default`.
 fn shapes_json(shapes: &[(Vec<(String, String)>, Vec<crate::shapes::Box3>)]) -> Option<String> {
     let list = |boxes: &[crate::shapes::Box3]| {
         let each: Vec<String> = boxes.iter().map(|b| {
@@ -3629,7 +3631,7 @@ fn shapes_json(shapes: &[(Vec<(String, String)>, Vec<crate::shapes::Box3>)]) -> 
     };
     let first = &shapes.first()?.1;
     if shapes.iter().all(|(_, s)| s == first) {
-        return (first[..] != [FULL_BOX]).then(|| list(first));
+        return (first[..] != [FULL_BOX]).then(|| format!("{{\"default\": {}}}", list(first)));
     }
     // One property deciding the shape.
     let props: Vec<&String> = shapes[0].0.iter().map(|(k, _)| k).collect();
@@ -3663,11 +3665,17 @@ fn shapes_json(shapes: &[(Vec<(String, String)>, Vec<crate::shapes::Box3>)]) -> 
         .iter()
         .filter(|(_, s)| s != default)
         .map(|(combo, s)| {
-            let key: Vec<String> = combo.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let key: Vec<&str> = combo.iter().map(|(_, v)| v.as_str()).collect();
             format!("\"{}\": {}", key.join(","), list(s))
         })
         .collect();
-    Some(format!("{{\"states\": {{{}}}, \"default\": {}}}", states.join(", "), list(default)))
+    let names: Vec<String> = props.iter().map(|p| format!("\"{p}\"")).collect();
+    Some(format!(
+        "{{\"properties\": [{}], \"values\": {{{}}}, \"default\": {}}}",
+        names.join(", "),
+        states.join(", "),
+        list(default)
+    ))
 }
 
 /// A number as JSON writes it.
@@ -4551,7 +4559,7 @@ mod tests {
         );
         assert_eq!(template("ruby:repeater"), "minecraft:glass");
         assert_eq!(
-            boxes(&declared["ruby:repeater"]["shapes"]),
+            boxes(&declared["ruby:repeater"]["shapes"]["default"]),
             [[0.0, 0.0, 0.0, 16.0, 2.0, 16.0]]
         );
         assert_eq!(template("ruby:machine"), "minecraft:stone");

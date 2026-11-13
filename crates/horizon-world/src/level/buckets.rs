@@ -2,11 +2,11 @@
 //! `DispensibleContainerItem.emptyContents` for filled ones (`BucketItem`,
 //! `MobBucketItem`, `SolidBucketItem`), both without a player.
 use super::{
-    Behaviours, Dimension, LevelAccess, Sim, Ticks,
+    Behaviours, LevelAccess, Sim, Ticks,
     classes::{Class, Interface},
 };
 use crate::{
-    fluid::{FluidKind, FluidState},
+    fluid::{FluidKind, FluidState, FluidTemplate},
     registry::BlockStateId,
 };
 use horizon_core::{position::BlockPos, random::RandomSource};
@@ -34,6 +34,30 @@ impl BucketContent {
     }
 }
 
+/// `minecraft:lava_bucket`, or a content mod fluid's bucket copying lava: it
+/// fills and empties with lava's sounds.
+pub fn is_lava_bucket(item: &str) -> bool {
+    item == "minecraft:lava_bucket"
+        || FluidKind::of_bucket(item).is_some_and(|f| f.template() == FluidTemplate::Lava)
+}
+
+/// A content mod fluid's bucket as `bucket_contents` gives it: it pours the
+/// fluid's source with its template bucket's empty sound.
+pub fn mod_bucket_contents(
+    item: &str,
+) -> Option<(BucketContent, &'static str, Option<&'static str>)> {
+    let sound = if is_lava_bucket(item) {
+        "minecraft:item.bucket.empty_lava"
+    } else {
+        "minecraft:item.bucket.empty"
+    };
+    Some((
+        BucketContent::Fluid(FluidKind::of_bucket(item)?),
+        sound,
+        None,
+    ))
+}
+
 impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     /// `BucketPickup.pickupBlock(user, level, pos, state)`: the filled bucket
     /// that results, None when the block gives nothing. `creative` is whether
@@ -42,10 +66,13 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let b = self.b;
         let state = self.state(pos);
         let item = if b.instance_of(state, Class::Liquid) {
-            match b.fluid(state).kind() {
-                FluidKind::Water | FluidKind::FlowingWater => "minecraft:water_bucket",
-                FluidKind::Lava | FluidKind::FlowingLava => "minecraft:lava_bucket",
+            match b.fluid(state).kind().source() {
+                FluidKind::Water => "minecraft:water_bucket",
+                FluidKind::Lava => "minecraft:lava_bucket",
                 FluidKind::Empty => return None,
+                // `LiquidBlock.pickupBlock` gives the fluid's bucket: a mod
+                // fluid without one stays where it is.
+                fluid => fluid.info().bucket?,
             }
         } else if b.implements(state, Interface::SimpleWaterlogged)
             && b.table.has(state, b.props.waterlogged)
@@ -60,18 +87,22 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         };
         self.pickup_block(pos, state, creative).then_some(item)
     }
-    /// `BucketItem.emptyContents(user, level, pos, hitResult)`. `sound` is the
-    /// bucket's empty sound (mob buckets have their own); `sneaking` is
-    /// `user.isShiftKeyDown()` (false for a dispenser, whose user is null);
+    /// `BucketItem.emptyContents(user, level, pos, hitResult)`: where the
+    /// contents went, None when nothing was emptied. `beside` is
+    /// `hitResult.getBlockPos().relative(hitResult.getDirection())` (None for
+    /// a dispenser, which has no hit result). `sound` is the bucket's empty
+    /// sound (mob buckets have their own); `sneaking` is
+    /// `user.isShiftKeyDown()`, which only counts with a hit result;
     /// `creative` is whether that user is a creative player.
     pub(crate) fn bucket_empty(
         &mut self,
         pos: BlockPos,
+        beside: Option<BlockPos>,
         content: BucketContent,
         sound: &str,
         sneaking: bool,
         creative: bool,
-    ) -> bool {
+    ) -> Option<BlockPos> {
         let b = self.b;
         let fluid = match content {
             BucketContent::Powder => {
@@ -82,14 +113,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                     self.game_event(pos, "minecraft:fluid_place");
                     let sound: Arc<str> = sound.into();
                     self.sound(pos, &sound, 1.0, 1.0);
-                    return true;
+                    return Some(pos);
                 }
-                return false;
+                return None;
             }
             BucketContent::Nothing => {
                 let sound: Arc<str> = sound.into();
                 self.sound(pos, &sound, 1.0, 1.0);
-                return true;
+                return Some(pos);
             }
             BucketContent::MobWater => FluidKind::Water,
             BucketContent::Fluid(fluid) => fluid,
@@ -105,13 +136,18 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let place_liquid = may_replace || container;
         // `canPlaceFluidInsideBlock`: air always takes the fluid; a block that
         // merely holds it (a waterloggable block, a replaceable plant) only
-        // when the player is not sneaking (a dispenser has no user and so
-        // no hit result, which always allows it).
-        if !(b.is_air(state) || place_liquid && !sneaking) {
-            return false;
+        // when the player is not sneaking or there is no hit result (a
+        // dispenser, or the retry below).
+        if !(b.is_air(state) || place_liquid && (!sneaking || beside.is_none())) {
+            // A refused click (a double slab, or Shift on a waterloggable
+            // block) pours into the block beside the clicked face instead,
+            // without a hit result.
+            return beside.and_then(|beside| {
+                self.bucket_empty(beside, None, content, sound, sneaking, creative)
+            });
         }
         let water = matches!(fluid, FluidKind::Water | FluidKind::FlowingWater);
-        if water && self.level.dimension() == Dimension::Nether {
+        if water && self.level.dimension_type().water_evaporates {
             // WATER_EVAPORATES: the water hisses away.
             let pitch = 2.6 + (self.random().next_float() - self.random().next_float()) * 0.8;
             self.emit(super::LevelEvent::Sound {
@@ -120,7 +156,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 volume: 0.5,
                 pitch,
             });
-            return true;
+            return Some(pos);
         }
         if liquid_container && water {
             self.place_liquid(
@@ -130,28 +166,23 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 creative,
             );
             self.empty_sound(pos, sound, mob);
-            return true;
+            return Some(pos);
         }
-        if may_replace && !b.instance_of(state, Class::Liquid) {
+        // `BlockState.liquid()`: water, lava and the bubble column. A bubble
+        // column is not a `LiquidBlock`, and breaking it first spills break
+        // particles and a `block_destroy` a sculk sensor hears.
+        if may_replace && !b.liquid(state) {
             self.destroy_block(pos, true, super::flags::UPDATE_LIMIT);
         }
-        let source = FluidState::new(
-            if water {
-                FluidKind::Water
-            } else {
-                FluidKind::Lava
-            },
-            8,
-            false,
-        );
+        let source = FluidState::new(fluid.source(), 8, false);
         let legacy: BlockStateId = b.legacy_block(source);
         if !self.set_block(pos, legacy, super::flags::UPDATE_ALL_IMMEDIATE)
             && !self.fluid_at(pos).is_source()
         {
-            return false;
+            return None;
         }
         self.empty_sound(pos, sound, mob);
-        true
+        Some(pos)
     }
     /// `playEmptySound`: `MobBucketItem` overrides it without the game event.
     fn empty_sound(&mut self, pos: BlockPos, sound: &str, mob: bool) {
@@ -175,18 +206,21 @@ impl Behaviours {
     ) -> Option<&'static str> {
         self.sim(level, ticks).bucket_pickup(pos, creative)
     }
-    /// `DispensibleContainerItem.emptyContents(user, level, pos, hitResult)`.
+    /// `DispensibleContainerItem.emptyContents(user, level, pos, hitResult)`:
+    /// where the contents went. `beside` is the block beside the clicked
+    /// face, tried when `pos` refuses (None without a hit result).
     pub fn bucket_empty<L: LevelAccess + ?Sized>(
         &self,
         level: &mut L,
         ticks: &mut Ticks,
         pos: BlockPos,
+        beside: Option<BlockPos>,
         content: BucketContent,
         sound: &str,
         sneaking: bool,
         creative: bool,
-    ) -> bool {
+    ) -> Option<BlockPos> {
         self.sim(level, ticks)
-            .bucket_empty(pos, content, sound, sneaking, creative)
+            .bucket_empty(pos, beside, content, sound, sneaking, creative)
     }
 }

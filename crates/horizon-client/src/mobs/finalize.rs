@@ -21,10 +21,7 @@
 //! `sound_variant` the index in the species' sound variant registry.
 use super::{Mob, Species, farm::Climate, gear, spawning::LocalDifficulty};
 use crate::{enchant::Enchantments, items::Items};
-use horizon_core::{
-    geometry::Aabb,
-    random::{LegacyRandom, RandomSource},
-};
+use horizon_core::{geometry::Aabb, random::RandomSource};
 use serde_json::Value;
 use std::{fs, path::Path, sync::Arc};
 
@@ -409,9 +406,11 @@ pub enum Attr {
     JumpStrength,
     Armor,
     BurningTime,
+    /// `Attributes.FLYING_SPEED`: what `FlyingMoveControl` flies at.
+    FlyingSpeed,
 }
 impl Attr {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::MaxHealth,
         Self::MovementSpeed,
         Self::FollowRange,
@@ -421,6 +420,7 @@ impl Attr {
         Self::JumpStrength,
         Self::Armor,
         Self::BurningTime,
+        Self::FlyingSpeed,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -433,6 +433,7 @@ impl Attr {
             Self::JumpStrength => "jump_strength",
             Self::Armor => "armor",
             Self::BurningTime => "burning_time",
+            Self::FlyingSpeed => "flying_speed",
         }
     }
     /// The attribute's registry id (`minecraft:` and its name), without
@@ -448,6 +449,7 @@ impl Attr {
             Self::JumpStrength => "minecraft:jump_strength",
             Self::Armor => "minecraft:armor",
             Self::BurningTime => "minecraft:burning_time",
+            Self::FlyingSpeed => "minecraft:flying_speed",
         }
     }
     /// `RangedAttribute` bounds.
@@ -460,7 +462,7 @@ impl Attr {
             Self::KnockbackResistance | Self::SpawnReinforcements => (0.0, 1.0),
             Self::JumpStrength => (0.0, 32.0),
             Self::Armor => (0.0, 30.0),
-            Self::BurningTime => (0.0, 1024.0),
+            Self::BurningTime | Self::FlyingSpeed => (0.0, 1024.0),
         }
     }
 }
@@ -475,7 +477,7 @@ pub enum Op {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Modifier {
     pub attr: Attr,
-    pub id: &'static str,
+    pub id: std::borrow::Cow<'static, str>,
     pub amount: f64,
     pub op: Op,
 }
@@ -485,22 +487,103 @@ pub struct Modifier {
 pub struct Attributes {
     pub bases: Vec<(Attr, f64)>,
     pub modifiers: Vec<Modifier>,
+    /// `NAME_TAG_DISTANCE` from a server attribute update: the client reads
+    /// it for nameplates and a save never writes it.
+    pub name_tag_distance: Option<f64>,
+    /// `BELOW_NAME_DISTANCE` from a server attribute update.
+    pub below_name_distance: Option<f64>,
+    /// The transient minecraft:baby speed modifier was taken away
+    /// (`/attribute ... modifier remove`) until the next setBaby. Not
+    /// saved: a load runs setBaby again.
+    pub baby_speed_removed: bool,
+}
+/// The attribute `/attribute` names (`follow_range`, not
+/// `minecraft:follow_range`) when gameplay reads it from this store. Armor
+/// has its own map (`armor_attributes`).
+pub fn command_attr(short: &str) -> Option<Attr> {
+    Attr::ALL
+        .into_iter()
+        .find(|a| *a != Attr::Armor && a.name() == short)
 }
 /// The type's default value of an attribute, if the mob has it.
 pub fn default_value(m: &Mob, a: Attr) -> Option<f64> {
     m.kind.attributes.get(a.id()).copied()
 }
 pub fn base_value(m: &Mob, a: Attr) -> f64 {
+    base_value_with(m, a, || default_value(m, a))
+}
+/// [`base_value`] with the type's default given (`default_value`), for a
+/// caller that already looked it up for the mob's type.
+pub fn base_value_with(m: &Mob, a: Attr, default: impl FnOnce() -> Option<f64>) -> f64 {
     m.extra
         .attributes
         .as_ref()
         .and_then(|s| s.bases.iter().find(|(x, _)| *x == a).map(|(_, v)| *v))
-        .or_else(|| default_value(m, a))
-        .unwrap_or(if a == Attr::BurningTime { 1.0 } else { 0.0 })
+        .or_else(default)
+        .unwrap_or(match a {
+            Attr::BurningTime => 1.0,
+            // The registry's default, as the type's `flying_speed` falls back to.
+            Attr::FlyingSpeed => 0.4,
+            _ => 0.0,
+        })
+}
+/// The attribute instances the mob's own construction and load leave in its
+/// `AttributeMap`, which `AttributeMap.pack` saves although the loaded tag held
+/// none: `AttributeMap.getInstance` makes one for any `getAttribute`, a read or
+/// a `setBaseValue`. What `set_base` recorded (finalizeSpawn, a size, a baby
+/// growing up) is saved apart; these are the rest:
+/// - `movement_speed`: Zombie and Piglin.setBaby (the load calls it even for an
+///   adult), `Enderman.setTarget` (the load ends in `readPersistentAngerSaveData`,
+///   which calls it), and the first tick of any mob (`LivingEntity.removeFrost`).
+/// - `max_health`: `Wolf.applyTamingSideEffects`, through `setTame(false, true)`
+///   when the load finds no owner (a wolf that is tamed in game makes it too).
+/// - `attack_damage`: `Rabbit.setVariant`, and a baby Goat or Hoglin, whose load's
+///   `setAge` crosses the baby boundary (`ageBoundaryReached`).
+pub fn made_at_load(m: &Mob) -> Vec<Attr> {
+    let s = m.species();
+    let mut made = Vec::new();
+    if super::doors::is_zombie(s) || matches!(s, Species::Piglin | Species::Enderman) || m.age > 0 {
+        made.push(Attr::MovementSpeed);
+    }
+    if s == Species::Wolf {
+        made.push(Attr::MaxHealth);
+    }
+    if s == Species::Rabbit || (matches!(s, Species::Goat | Species::Hoglin) && m.is_baby()) {
+        made.push(Attr::AttackDamage);
+    }
+    made
+}
+/// The base of an instance `made_at_load` lists, as `AttributeMap.pack` writes it.
+pub fn made_base(m: &Mob, a: Attr) -> f64 {
+    match (m.species(), a) {
+        // `Wolf.applyTamingSideEffects` sets 40 for a tame wolf and 8 for the others;
+        // `attrs.max_health` is the value (modifiers included), never the base.
+        (Species::Wolf, Attr::MaxHealth) => {
+            base_value_with(m, a, || Some(super::tame::wolf_health_base(m.extra.tame)))
+        }
+        (s @ (Species::Goat | Species::Hoglin), Attr::AttackDamage) => {
+            base_value_with(m, a, || age_attack_damage(s, m.is_baby()))
+        }
+        _ => base_value(m, a),
+    }
+}
+/// `Goat` and `Hoglin.ageBoundaryReached`: the attack damage of a baby or an adult.
+fn age_attack_damage(s: Species, baby: bool) -> Option<f64> {
+    match s {
+        Species::Goat => Some(if baby { 1.0 } else { 2.0 }),
+        Species::Hoglin => Some(if baby { 0.5 } else { 6.0 }),
+        _ => None,
+    }
 }
 /// The transient modifiers of the mob's state (`SPEED_MODIFIER_BABY`).
 pub fn transient(m: &Mob, a: Attr) -> Option<(f64, Op)> {
-    if a != Attr::MovementSpeed || !m.is_baby() {
+    if a != Attr::MovementSpeed
+        || !m.is_baby()
+        || m.extra
+            .attributes
+            .as_ref()
+            .is_some_and(|s| s.baby_speed_removed)
+    {
         return None;
     }
     match m.species() {
@@ -594,7 +677,7 @@ fn refresh(m: &mut Mob, a: Attr) {
         Attr::KnockbackResistance => m.attrs.knockback_resistance = value(m, a),
         Attr::SpawnReinforcements => m.attrs.spawn_reinforcements = value(m, a),
         Attr::JumpStrength => m.attrs.jump_strength = value(m, a),
-        Attr::Armor | Attr::BurningTime => {}
+        Attr::Armor | Attr::BurningTime | Attr::FlyingSpeed => {}
     }
 }
 /// The value without the transient baby modifier (`speed_bonus` applies
@@ -626,11 +709,18 @@ pub fn modifier_amount(m: &Mob, a: Attr, id: &str) -> Option<f64> {
         .map(|x| x.amount)
 }
 /// `addOrReplacePermanentModifier`.
-pub fn add_modifier(m: &mut Mob, a: Attr, id: &'static str, amount: f64, op: Op) {
+pub fn add_modifier(
+    m: &mut Mob,
+    a: Attr,
+    id: impl Into<std::borrow::Cow<'static, str>>,
+    amount: f64,
+    op: Op,
+) {
+    let id = id.into();
     let s = m.extra.attributes.get_or_insert_with(Box::default);
     let new = Modifier {
         attr: a,
-        id,
+        id: id.clone(),
         amount,
         op,
     };
@@ -718,6 +808,20 @@ pub fn zombie_attributes(m: &mut Mob, special: f32, reason: Reason) {
 }
 pub fn max_health(m: &Mob) -> f32 {
     value(m, Attr::MaxHealth) as f32
+}
+/// `LivingEntity.onAttributeUpdated(MAX_HEALTH)` after a Health Boost
+/// change: the cached maximum follows the attribute model again, and Health
+/// above it is lowered (nothing is healed). Wolves write their maximum
+/// straight into the cache (`tame::set_tame`), outside the model, so they
+/// keep theirs.
+pub fn health_boost_changed(m: &mut Mob) {
+    if m.species() == Species::Wolf {
+        return;
+    }
+    refresh(m, Attr::MaxHealth);
+    if m.health > m.attrs.max_health {
+        m.health = m.attrs.max_health;
+    }
 }
 
 // ---- species facts --------------------------------------------------------
@@ -860,9 +964,17 @@ pub fn set_age(m: &mut Mob, age: i32) {
 fn age_boundary_reached(m: &mut Mob) {
     let baby = m.is_baby();
     match m.species() {
-        Species::Goat => set_base(m, Attr::AttackDamage, if baby { 1.0 } else { 2.0 }),
-        Species::Hoglin => set_base(m, Attr::AttackDamage, if baby { 0.5 } else { 6.0 }),
+        Species::Goat | Species::Hoglin => {
+            if let Some(damage) = age_attack_damage(m.species(), baby) {
+                set_base(m, Attr::AttackDamage, damage);
+            }
+        }
         Species::SulfurCube if !baby => sulfur_size(m, 2),
+        // HappyGhast.ageBoundaryReached: adultGhastSetup or babyGhastSetup,
+        // then Animal's no-op. A hatched ghastling needs it before it is in
+        // the level (DriedGhastBlock.spawnGhastling sets the baby age before
+        // addFreshEntity), or its first tick flies the adult goals.
+        Species::HappyGhast => super::happy_ghast::ensure_setup(m),
         _ => {}
     }
 }
@@ -917,6 +1029,14 @@ pub fn set_baby(m: &mut Mob, baby: bool) {
     match s {
         _ if zombie(s) || s == Species::Piglin => {
             m.extra.age = if baby { NON_AGEABLE_BABY } else { 0 };
+            // Zombie/Piglin.setBaby: removeModifier(minecraft:baby), then the
+            // transient one again for a baby.
+            if let Some(a) = m.extra.attributes.as_mut() {
+                a.baby_speed_removed = false;
+            }
+            if has_modifier(m, Attr::MovementSpeed, "minecraft:baby") {
+                remove_modifier(m, Attr::MovementSpeed, "minecraft:baby");
+            }
         }
         Species::Zoglin => {
             m.extra.age = if baby { NON_AGEABLE_BABY } else { 0 };
@@ -938,7 +1058,7 @@ pub const FEET: usize = 2;
 pub const LEGS: usize = 3;
 pub const CHEST: usize = 4;
 pub const HEAD: usize = 5;
-const SADDLE: usize = 7;
+pub const SADDLE: usize = 7;
 /// The `gear` slot of an `EquipmentSlot`.
 fn gear_slot(slot: usize) -> usize {
     match slot {
@@ -993,6 +1113,19 @@ pub fn item_stack(m: &Mob, slot: usize) -> Option<crate::items::ItemStack> {
         Some(stack)
     })
 }
+/// `LivingEntity.getItemBySlot` from the stacks a mob keeps: the hands and
+/// armour from `item_stack` (`EquipmentSlot` ordinals match these slots), the
+/// body and saddle from their own fields.
+pub fn equipment_stack(
+    m: &Mob,
+    slot: horizon_world::player_inventory::EquipmentSlot,
+) -> Option<crate::items::ItemStack> {
+    use horizon_world::player_inventory::EquipmentSlot as S;
+    match slot {
+        S::Body | S::Saddle => m.item_by_slot(slot),
+        _ => item_stack(m, slot as usize),
+    }
+}
 /// `setItemSlot` with the whole `stack`: its enchantments, trim, damage, name
 /// and count stay with the mob.
 pub fn set_item_stack(m: &mut Mob, slot: usize, stack: crate::items::ItemStack) {
@@ -1001,6 +1134,27 @@ pub fn set_item_stack(m: &mut Mob, slot: usize, stack: crate::items::ItemStack) 
     if slot == MAINHAND {
         m.extra.set_main_hand_stack(Some(stack));
     } else if slot <= HEAD {
+        gear::set_stack(m, gear_slot(slot), stack);
+    }
+}
+/// `ItemStack.setDamageValue` on what `m` has in `slot` (one of the hands or
+/// the armour): its enchantments and trim stay.
+pub fn set_slot_damage(m: &mut Mob, slot: usize, damage: u32) {
+    let Some(id) = item(m, slot).filter(|_| slot <= HEAD) else {
+        return;
+    };
+    let kept = if slot == MAINHAND {
+        m.extra.main_hand_stack().cloned()
+    } else {
+        gear::gear(m).and_then(|g| g.stacks[gear_slot(slot)].clone())
+    };
+    let mut stack = kept
+        .filter(|s| s.item == id)
+        .unwrap_or_else(|| crate::items::ItemStack::new(&id, 1));
+    stack.damage = damage;
+    if slot == MAINHAND {
+        m.extra.set_main_hand_stack(Some(stack));
+    } else {
         gear::set_stack(m, gear_slot(slot), stack);
     }
 }
@@ -1053,10 +1207,7 @@ pub fn equip_stack(
             .iter()
             .find(|(id, _)| id == "minecraft:trim")
             .and_then(|(_, v)| {
-                Some((
-                    Arc::from(v["material"].as_str()?),
-                    Arc::from(v["pattern"].as_str()?),
-                ))
+                crate::item_data::trim::from_nbt(&horizon_client_core::scoreboard::json_to_tag(v))
             });
         gear::set_trim(m, gear_slot(slot), trim);
     }
@@ -1518,12 +1669,7 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
         if g.is_none() {
             let mut effect = None;
             if self.difficulty.hard && self.float() < 0.1 * self.special() {
-                effect = Some(match self.int(5) {
-                    0 | 1 => "minecraft:speed",
-                    2 => "minecraft:strength",
-                    3 => "minecraft:regeneration",
-                    _ => "minecraft:invisibility",
-                });
+                effect = Some(super::spawning::spider_random_effect(self.random));
             }
             g = Some(Group::Spider(effect));
         }
@@ -1542,9 +1688,11 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
         {
             super::raider::state_mut(m).patrol_leader = true;
         }
+        // PatrollingMonster.finalizeSpawn: the leader wears
+        // `Raid.getOminousBannerInstance`, the patterned stack clients draw.
         if super::raider::state(m).is_some_and(|s| s.patrol_leader) {
             set_item(m, HEAD, super::raider::BANNER);
-            set_drop_chance(m, HEAD, 2.0);
+            super::raider::wear_banner(m);
         }
         if reason == Reason::Patrol {
             super::raider::state_mut(m).patrolling = true;
@@ -2020,14 +2168,9 @@ impl<L: FinalizeLevel + ?Sized, R: RandomSource> Ctx<'_, L, R> {
             }
             S::Zombie | S::ZombifiedPiglin => self.zombie(m, g, reason),
             S::ZombieVillager => {
+                // `ZombieVillager.finalizeSpawn` chooses the villager type and
+                // nothing else: the profession came from the constructor.
                 self.villager_type(m);
-                // ZombieVillager's constructor picks the profession from the
-                // fresh entity's random, before anything seeds it: an
-                // independent draw that leaves the mob's own random alone.
-                let mut fresh = LegacyRandom::new(
-                    (m.random.state() as i64).wrapping_mul(0x5851_F42D_4C95_7F2D) ^ i64::from(m.id),
-                );
-                m.extra.variant2 = fresh.next_int_bound(15).unwrap_or(0) as u8;
                 self.zombie(m, g, reason)
             }
             S::Husk => self.husk(m, g, reason),
@@ -2144,17 +2287,9 @@ pub fn panda_variant(main: u8, hidden: u8) -> u8 {
     if recessive && main != hidden { 0 } else { main }
 }
 /// `AbstractCubeMob.setSize(size, true)` for slimes and magma cubes.
-/// `SulfurCube.setSize(size, true)`, with the attribute bases it sets.
+/// `SulfurCube.setSize(size, true)`.
 fn sulfur_size(m: &mut Mob, size: i32) {
     super::sulfur_cube::set_size(m, size, true);
-    let size = m.extra.size;
-    set_base(m, Attr::MaxHealth, f64::from(4 * size));
-    set_base(
-        m,
-        Attr::MovementSpeed,
-        f64::from(0.2f32 + 0.1f32 * size as f32),
-    );
-    m.health = max_health(m);
 }
 fn cube_size(m: &mut Mob, size: i32) {
     super::cube::set_size(m, size);
@@ -2168,6 +2303,15 @@ pub fn variant_index(s: Species, name: &str) -> u8 {
         Species::ZombieNautilus => super::nautilus::VARIANTS.iter().position(|v| *v == name),
         // MushroomCow.Variant: red is the codec's default, brown the other.
         Species::Mooshroom => ["red", "brown"].iter().position(|v| *v == name),
+        // Fox.Variant, read from a `minecraft:fox/variant` component; the save
+        // keeps the same two names under `Type`.
+        Species::Fox => ["red", "snow"].iter().position(|v| *v == name),
+        // Horse.Variant and Llama.Variant, the coat colours their
+        // `.../variant` components carry; a trader llama inherits the llama's.
+        Species::Horse => super::equine::VARIANT_NAMES.iter().position(|v| *v == name),
+        Species::Llama | Species::TraderLlama => {
+            super::llama::VARIANTS.iter().position(|v| *v == name)
+        }
         _ => ["temperate", "warm", "cold"]
             .iter()
             .position(|v| *v == name),
@@ -2190,9 +2334,28 @@ pub fn species_variant_component(s: Species, variant: u8) -> Option<(&'static st
         Species::Mooshroom => "minecraft:mooshroom/variant",
         Species::Chicken => "minecraft:chicken/variant",
         Species::ZombieNautilus => "minecraft:zombie_nautilus/variant",
+        Species::Horse => "minecraft:horse/variant",
+        Species::Llama | Species::TraderLlama => "minecraft:llama/variant",
         _ => return None,
     };
     Some((component, format!("minecraft:{}", variant_name(s, variant))))
+}
+/// Whether the mob's save keeps its variant under `variant` — the registry
+/// id `VariantUtils.writeVariant` stores — rather than under its own key (a
+/// fox's and a mooshroom's `Type`) or a packed int (a horse's and a llama's
+/// `Variant`). Only these seven classes call `writeVariant`, so reporting the
+/// component does not mean the save carries the name.
+pub fn saves_variant_name(s: Species) -> bool {
+    matches!(
+        s,
+        Species::Wolf
+            | Species::Cat
+            | Species::Frog
+            | Species::Pig
+            | Species::Cow
+            | Species::Chicken
+            | Species::ZombieNautilus
+    )
 }
 /// The `*_sound_variant` registry of a species, in registry order.
 pub fn sound_variants(s: Species) -> &'static [&'static str] {
@@ -2249,13 +2412,20 @@ pub fn variant_sound(m: &Mob, kind: &str) -> Option<&'static str> {
 pub fn variant_name(s: Species, index: u8) -> &'static str {
     let i = index as usize;
     match s {
-        Species::Cat => super::tame::CAT_VARIANTS.get(i).copied().unwrap_or("tabby"),
+        Species::Cat => super::tame::CAT_VARIANTS.get(i).copied().unwrap_or("black"),
         Species::Wolf => super::tame::WOLF_VARIANTS.get(i).map_or("pale", |v| v.0),
         Species::ZombieNautilus => super::nautilus::VARIANTS
             .get(i)
             .copied()
             .unwrap_or("temperate"),
         Species::Mooshroom => ["red", "brown"].get(i).copied().unwrap_or("red"),
+        Species::Horse => super::equine::VARIANT_NAMES
+            .get(i)
+            .copied()
+            .unwrap_or("white"),
+        Species::Llama | Species::TraderLlama => {
+            super::llama::VARIANTS.get(i).copied().unwrap_or("creamy")
+        }
         _ => ["temperate", "warm", "cold"]
             .get(i)
             .copied()
@@ -2317,6 +2487,61 @@ mod tests {
         assert_eq!(variant_index(Species::Mooshroom, "minecraft:temperate"), 0);
         assert_eq!(variant_name(Species::Mooshroom, 2), "red");
     }
+    /// `Horse.get(DataComponents.HORSE_VARIANT)` and
+    /// `Llama.get(DataComponents.LLAMA_VARIANT)`: the coat colour a horse or a
+    /// llama reports, and the names a `.../variant` component carries.
+    #[test]
+    fn a_horse_and_a_llama_report_their_variant_component() {
+        for (species, component, names) in [
+            (
+                Species::Horse,
+                "minecraft:horse/variant",
+                &crate::mobs::equine::VARIANT_NAMES[..],
+            ),
+            (
+                Species::Llama,
+                "minecraft:llama/variant",
+                &crate::mobs::llama::VARIANTS[..],
+            ),
+            (
+                Species::TraderLlama,
+                "minecraft:llama/variant",
+                &crate::mobs::llama::VARIANTS[..],
+            ),
+        ] {
+            for (index, name) in names.iter().enumerate() {
+                let index = index as u8;
+                let name = format!("minecraft:{name}");
+                assert_eq!(
+                    species_variant_component(species, index),
+                    Some((component, name.clone())),
+                    "{species:?} {index}"
+                );
+                assert_eq!(variant_index(species, &name), index, "{name}");
+                assert_eq!(format!("minecraft:{}", variant_name(species, index)), name);
+            }
+        }
+        // Horse.Variant.WHITE and Llama.Variant.CREAMY are the defaults.
+        assert_eq!(variant_index(Species::Horse, "minecraft:temperate"), 0);
+        assert_eq!(variant_index(Species::Llama, "minecraft:temperate"), 0);
+        assert_eq!(variant_name(Species::Horse, 7), "white");
+        assert_eq!(variant_name(Species::TraderLlama, 4), "creamy");
+        assert_eq!(variant_name(Species::Cat, 20), "black");
+        // Only `VariantUtils.writeVariant` species save the name; a horse and
+        // a llama save a packed `Variant` int, a fox and a mooshroom `Type`.
+        for species in [Species::Wolf, Species::Cat, Species::Chicken, Species::Pig] {
+            assert!(saves_variant_name(species), "{species:?}");
+        }
+        for species in [
+            Species::Horse,
+            Species::Llama,
+            Species::TraderLlama,
+            Species::Fox,
+            Species::Mooshroom,
+        ] {
+            assert!(!saves_variant_name(species), "{species:?}");
+        }
+    }
     /// #2269: the offspring of a spawn egg used on a mob is a baby of that
     /// kind (`SpawnEggItem.spawnOffspringFromSpawnEgg`), and only the mob's
     /// own kind takes the egg.
@@ -2349,6 +2574,136 @@ mod tests {
             "minecraft:cow"
         ));
         assert!(!spawn_egg_is_for("minecraft:stick", "minecraft:cow"));
+    }
+    /// #7877: `/attribute <mob> <attr> modifier add` hands `add_modifier` an
+    /// id typed at run time; it lands in the value, reads back, and goes.
+    #[test]
+    fn a_command_modifier_with_a_runtime_id_changes_the_value() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("items.json").exists() {
+            return;
+        }
+        let data = crate::mobs::MobTypes::load(&root).unwrap();
+        let kind = std::sync::Arc::new(data.types.get("minecraft:zombie").unwrap().clone());
+        let mut m = crate::mobs::Mob::new(
+            2,
+            kind,
+            horizon_core::geometry::Vec3::new(0.0, 4.0, 0.0),
+            0.0,
+        );
+        set_base(&mut m, Attr::AttackDamage, 4.0);
+        let id = String::from("test:typed");
+        add_modifier(&mut m, Attr::AttackDamage, id.clone(), 3.0, Op::AddValue);
+        assert!(has_modifier(&m, Attr::AttackDamage, &id));
+        assert_eq!(modifier_amount(&m, Attr::AttackDamage, &id), Some(3.0));
+        assert_eq!(m.attrs.attack_damage, 7.0);
+        assert_eq!(value(&m, Attr::AttackDamage), 7.0);
+        remove_modifier(&mut m, Attr::AttackDamage, &id);
+        assert!(!has_modifier(&m, Attr::AttackDamage, &id));
+        assert_eq!(m.attrs.attack_damage, 4.0);
+    }
+    /// #7877: every attribute `/attribute` can name on a mob is edited in the
+    /// store the mob reads: base, modifier and removal reach the cached field
+    /// gameplay uses, for each attribute the mob types hold.
+    #[test]
+    fn every_command_attribute_reaches_the_store_the_mob_reads() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("items.json").exists() {
+            return;
+        }
+        let data = crate::mobs::MobTypes::load(&root).unwrap();
+        let mut covered = 0;
+        for a in Attr::ALL {
+            let short = a.name();
+            assert_eq!(command_attr(short), (a != Attr::Armor).then_some(a));
+            if a == Attr::Armor {
+                continue;
+            }
+            // Any type holding the attribute, in a stable order.
+            let mut names: Vec<_> = data.types.keys().collect();
+            names.sort();
+            let Some(kind) = names
+                .into_iter()
+                .map(|n| &data.types[n])
+                .find(|k| k.attributes.contains_key(a.id()))
+            else {
+                continue;
+            };
+            let mut m = crate::mobs::Mob::new(
+                2,
+                std::sync::Arc::new(kind.clone()),
+                horizon_core::geometry::Vec3::new(0.0, 4.0, 0.0),
+                0.0,
+            );
+            let cached = |m: &crate::mobs::Mob| match a {
+                Attr::MaxHealth => Some(f64::from(m.attrs.max_health)),
+                Attr::MovementSpeed => Some(m.attrs.speed),
+                Attr::FollowRange => Some(m.attrs.follow_range),
+                Attr::AttackDamage => Some(f64::from(m.attrs.attack_damage)),
+                Attr::KnockbackResistance => Some(m.attrs.knockback_resistance),
+                Attr::SpawnReinforcements => Some(m.attrs.spawn_reinforcements),
+                Attr::JumpStrength => Some(m.attrs.jump_strength),
+                _ => None,
+            };
+            // Max health clamps below 1.
+            let base = if a == Attr::MaxHealth { 2.0 } else { 0.5 };
+            set_base(&mut m, a, base);
+            assert_eq!(base_value(&m, a), base, "{short} base");
+            add_modifier(&mut m, a, format!("test:{short}"), 0.25, Op::AddValue);
+            assert_eq!(modifier_amount(&m, a, &format!("test:{short}")), Some(0.25));
+            assert_eq!(value(&m, a), base + 0.25, "{short} value");
+            if let Some(c) = cached(&m) {
+                assert_eq!(c, base + 0.25, "{short} cached field");
+            }
+            remove_modifier(&mut m, a, &format!("test:{short}"));
+            assert!(!has_modifier(&m, a, &format!("test:{short}")));
+            if let Some(c) = cached(&m) {
+                assert_eq!(c, base, "{short} cached field after removal");
+            }
+            covered += 1;
+        }
+        assert!(covered >= 7, "only {covered} attributes had a mob type");
+    }
+    /// #7877: `/attribute <mob> movement_speed|attack_damage base set` goes
+    /// through `AttributeInstance.setBaseValue`, so the value survives the
+    /// next refresh (an effect's modifier) instead of snapping back.
+    #[test]
+    fn a_set_base_survives_a_later_modifier_refresh() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("items.json").exists() {
+            return;
+        }
+        let data = crate::mobs::MobTypes::load(&root).unwrap();
+        let kind = std::sync::Arc::new(data.types.get("minecraft:zombie").unwrap().clone());
+        let mut m = crate::mobs::Mob::new(
+            2,
+            kind,
+            horizon_core::geometry::Vec3::new(0.0, 4.0, 0.0),
+            0.0,
+        );
+        set_base(&mut m, Attr::MovementSpeed, 0.5);
+        set_base(&mut m, Attr::AttackDamage, 7.0);
+        // Refresh through another attribute's change and a modifier.
+        set_base(&mut m, Attr::MaxHealth, 30.0);
+        add_modifier(
+            &mut m,
+            Attr::MovementSpeed,
+            "test:x",
+            0.5,
+            Op::AddMultipliedTotal,
+        );
+        assert_eq!(base_value(&m, Attr::MovementSpeed), 0.5);
+        assert_eq!(m.attrs.speed, 0.75);
+        remove_modifier(&mut m, Attr::MovementSpeed, "test:x");
+        assert_eq!(m.attrs.speed, 0.5);
+        assert_eq!(base_value(&m, Attr::AttackDamage), 7.0);
+        assert_eq!(m.attrs.attack_damage, 7.0);
     }
     /// #3887: Weakness and Slowness (and Health Boost) carry attribute
     /// modifiers in vanilla (`MobEffects`), and every effect's amount is
@@ -2397,6 +2752,23 @@ mod tests {
         assert_eq!(villager_type("minecraft:grove"), 4);
         assert_eq!(villager_type("minecraft:plains"), 0);
     }
+    /// A worn piece that wears (Thorns' `ChangeItemDamage`) keeps its
+    /// enchantments and trim, and the next wear adds to the last.
+    #[test]
+    fn a_worn_piece_keeps_its_enchantments_and_trim_as_it_wears() {
+        let kind = crate::mobs::sensor_scan_tests::kind();
+        let mut m = crate::mobs::Mob::new(1, kind, horizon_core::geometry::Vec3::ZERO, 0.0);
+        set_item(&mut m, CHEST, "minecraft:iron_chestplate");
+        set_slot_enchantments(&mut m, CHEST, vec![(Arc::from("minecraft:thorns"), 3)]);
+        let trim: gear::Trim = ("minecraft:gold".into(), "minecraft:coast".into());
+        gear::set_trim(&mut m, gear::CHEST, Some(trim.clone()));
+        set_slot_damage(&mut m, CHEST, 2);
+        set_slot_damage(&mut m, CHEST, 5);
+        let worn = item_stack(&m, CHEST).unwrap();
+        assert_eq!(worn.damage, 5);
+        assert_eq!(worn.enchantment_level("minecraft:thorns"), 3);
+        assert_eq!(worn.data().and_then(|d| d.trim.clone()), Some(trim));
+    }
     #[test]
     fn october_31_is_halloween() {
         assert!(halloween_date(10, 31));
@@ -2405,3 +2777,7 @@ mod tests {
         assert!(!halloween_date(1, 1));
     }
 }
+
+#[cfg(test)]
+#[path = "finalize_load_tests.rs"]
+mod load_tests;

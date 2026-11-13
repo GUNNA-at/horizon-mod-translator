@@ -29,6 +29,22 @@ impl Taken {
         };
         [p.x, p.y, p.z]
     }
+    /// `ClientboundTakeItemEntityPacket`'s taken entity.
+    fn entity_id(&self) -> u32 {
+        match self {
+            Taken::Item(i) => i.id,
+            Taken::Orb(o) => o.id,
+            Taken::Arrow(a) => a.id,
+            Taken::Trident(t) => t.id,
+        }
+    }
+    /// The packet's amount: the stack's size, or one of the others.
+    fn amount(&self) -> i32 {
+        match self {
+            Taken::Item(i) => i.stack.count as i32,
+            Taken::Orb(_) | Taken::Arrow(_) | Taken::Trident(_) => 1,
+        }
+    }
 }
 
 /// Whoever took it: the particle's `target`.
@@ -37,8 +53,6 @@ pub(super) enum Collector {
     Player,
     /// A mob, or another player on a server (both kept as mobs here).
     Mob(u32),
-    /// A LAN guest, by entity id (the host draws it as a model).
-    Guest(u32),
 }
 
 pub(super) struct Pickup {
@@ -80,13 +94,6 @@ pub(super) fn position(p: &Pickup, partial: f64) -> [f64; 3] {
     })
 }
 
-/// A LAN guest's target, from the model the host draws for it.
-pub(super) fn guest_target(host: &super::lan::LanHost, id: u32) -> Option<[f64; 3]> {
-    let m = host.models.values().find(|m| m.id == id)?;
-    let (p, eye) = (m.position, m.eye_height());
-    Some([p.x, (p.y + (p.y + eye)) / 2.0, p.z])
-}
-
 impl Game<'_> {
     /// `ItemPickupParticle.updatePosition`: the collector's x and z, halfway up to its eyes.
     fn collector_target(&self, collector: Collector) -> Option<[f64; 3]> {
@@ -99,15 +106,22 @@ impl Game<'_> {
                 let m = self.mobs.iter().find(|m| m.id == id)?;
                 (m.position, m.eye_height())
             }
-            Collector::Guest(id) => {
-                return guest_target(self.lan.as_ref()?, id);
-            }
         };
         Some([p.x, (p.y + (p.y + eye)) / 2.0, p.z])
     }
     /// `handleTakeItemEntity`: `particleEngine.add(new ItemPickupParticle(...))` when the
     /// collector is known; it joins the group at the end of the next particle tick.
     pub(super) fn add_pickup(&mut self, taken: Taken, collector: Collector) {
+        // The clients add the particle from ClientboundTakeItemEntityPacket;
+        // the server's own is never drawn, so a mob's take has to be sent (#12493).
+        if let (Collector::Mob(id), Some(host), None) = (collector, &self.lan, &self.remote) {
+            host.hub.take_item(
+                taken.entity_id() as i32,
+                id as i32,
+                taken.amount(),
+                taken.position(),
+            );
+        }
         if let Some(target) = self.collector_target(collector) {
             self.add_pickup_toward(taken, collector, target);
         }
@@ -162,6 +176,10 @@ mod tests {
     fn orb_at(x: f64, y: f64, z: f64) -> Taken {
         let at = horizon_core::geometry::Vec3::new(x, y, z);
         Taken::Orb(Box::new(ExperienceOrb {
+            fall_distance: 0.0,
+            rotation: [0.0, 0.0],
+            join: Default::default(),
+            no_gravity: false,
             id: 0,
             position: at,
             previous: at,
@@ -172,6 +190,8 @@ mod tests {
             count: 1,
             ticks: 0,
             health: 5,
+            air: 300,
+            following: None,
         }))
     }
 

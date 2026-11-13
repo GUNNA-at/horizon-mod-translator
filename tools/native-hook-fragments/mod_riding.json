@@ -4,13 +4,15 @@
       "name": "client_mod_passengers",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_passengers",
       "side": "client",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "client_mod_seat",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_seat",
       "side": "client",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "a server's players riding a mod's entities (`native_player_vehicle`, `native_player_wants_off`, `native_ride_player`, `native_client_player_vehicle`), and the client's hooks that seat its riders (`native_client_mod_passengers`, `native_client_mod_seat`).",

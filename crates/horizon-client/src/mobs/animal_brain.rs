@@ -71,6 +71,10 @@ impl<T> Slot<T> {
     pub fn present(&self) -> bool {
         self.v.is_some()
     }
+    /// `MemorySlot.timeToLive`: `i64::MAX` denotes a permanent memory.
+    pub fn ttl(&self) -> i64 {
+        self.ttl
+    }
 }
 impl<T: Clone> Slot<T> {
     pub fn value(&self) -> Option<T> {
@@ -641,7 +645,7 @@ fn targetable(m: &mut Mob, w: &MobWorld, who: Who) -> bool {
             // TargetingConditions.forNonCombat(): in range (scaled by the
             // player's visibility, at least 2) and in sight.
             let Some(p) = &w.player else { return false };
-            let r = (range * p.visibility_percent()).max(2.0);
+            let r = (range * p.visibility_percent(Some(m.kind.id.as_str()), w.items)).max(2.0);
             p.alive && !p.spectator && m.distance_sqr(p.position) <= r * r && m.sees(w, who)
         }
         Who::Mob(id) => {
@@ -1606,13 +1610,16 @@ impl B {
                         // Sniffer.spawnChildFromBreeding: the experience
                         // (finalizeSpawnChildFromBreeding), then the plop,
                         // both from the parent's random; the game lays the
-                        // egg.
+                        // egg. Vanilla makes the draw inside the `mob_drops`
+                        // check, so it is skipped with the rule off.
                         let at = [m.position.x, m.position.y, m.position.z];
-                        let xp = 1 + m.random.next_int_bound(7).unwrap_or(0);
-                        cx.events.push(MobEvent::Experience {
-                            at,
-                            amount: xp as u32,
-                        });
+                        if cx.w.mob_drops {
+                            let xp = 1 + m.random.next_int_bound(7).unwrap_or(0);
+                            cx.events.push(MobEvent::Experience {
+                                at,
+                                amount: xp as u32,
+                            });
+                        }
                         let pitch = (m.random.next_float() - m.random.next_float()) * 0.2 + 0.5;
                         cx.events
                             .push(MobEvent::Sound("block.sniffer_egg.plop", at, 1.0, pitch));
@@ -1863,7 +1870,7 @@ fn manhattan(a: [i32; 3], b: [i32; 3]) -> i32 {
 }
 /// `Swim`: deeper than the jump threshold, or in lava.
 fn swim_condition(m: &Mob) -> bool {
-    m.fluids.water > m.fluid_jump_threshold() || m.fluids.in_lava
+    m.floats()
 }
 /// `PositionTracker.isVisibleBy`.
 fn tracker_visible(m: &mut Mob, w: &MobWorld, t: Tracker) -> bool {
@@ -1982,20 +1989,20 @@ fn breed_partner(m: &mut Mob, w: &MobWorld) -> Option<Who> {
 
 // ---- The sniffer --------------------------------------------------------
 
-/// `Sniffer.transitionTo`: the state and its sound.
-fn transition(m: &mut Mob, cx: &mut Bx, to: u8) {
-    let at = [m.position.x, m.position.y, m.position.z];
-    let sound = |name: &'static str, pitch: f32| MobEvent::Sound(name, at, 1.0, pitch);
+/// `Sniffer.transitionTo`: the state and its sound (`this.playSound`, muted by silence).
+pub(crate) fn transition(m: &mut Mob, cx: &mut Bx, to: u8) {
+    let (at, silent) = ([m.position.x, m.position.y, m.position.z], m.silent);
+    let sound = |n: &'static str, p: f32| (!silent).then_some(MobEvent::Sound(n, at, 1.0, p));
     match to {
-        sniffer::FEELING_HAPPY => cx.events.push(sound("entity.sniffer.happy", 1.0)),
+        sniffer::FEELING_HAPPY => cx.events.extend(sound("entity.sniffer.happy", 1.0)),
         sniffer::SCENTING => {
             let pitch = if m.is_baby() { 1.3 } else { 1.0 };
-            cx.events.push(sound("entity.sniffer.scenting", pitch));
+            cx.events.extend(sound("entity.sniffer.scenting", pitch));
         }
-        sniffer::SNIFFING => cx.events.push(sound("entity.sniffer.sniffing", 1.0)),
+        sniffer::SNIFFING => cx.events.extend(sound("entity.sniffer.sniffing", 1.0)),
         // onDiggingStart: the seed drops 120 ticks in.
         sniffer::DIGGING => m.extra.ints[3] = m.age as i32 + 120,
-        sniffer::RISING => cx.events.push(sound("entity.sniffer.digging_stop", 1.0)),
+        sniffer::RISING => cx.events.extend(sound("entity.sniffer.digging_stop", 1.0)),
         _ => {}
     }
     sniffer::set_state(m, to);
@@ -2426,7 +2433,7 @@ fn axolotl_action(m: &mut Mob, cx: &mut Bx, action: AxolotlAction, until: &mut i
             if cx
                 .w
                 .target_info(target)
-                .is_some_and(|t| m.within_melee_range(&t))
+                .is_some_and(|t| m.within_melee_range(cx.w, &t))
                 && visible_contains(m, cx.w, target)
             {
                 mem(m).walk_target.clear();
@@ -2453,7 +2460,7 @@ fn axolotl_action(m: &mut Mob, cx: &mut Bx, action: AxolotlAction, until: &mut i
                 || !cx
                     .w
                     .target_info(target)
-                    .is_some_and(|t| m.within_melee_range(&t))
+                    .is_some_and(|t| m.within_melee_range(cx.w, &t))
             {
                 return false;
             }

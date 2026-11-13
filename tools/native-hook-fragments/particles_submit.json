@@ -3,7 +3,8 @@
     {
       "name": "particles_submit",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_particles_submit",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "a client draw hook for a mod's own particles (`native_particles_submit`), with the limit the game's particles keep (`native_particle_admitted`).",

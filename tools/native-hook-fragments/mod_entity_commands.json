@@ -4,19 +4,22 @@
       "name": "mod_entities",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entities",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "mod_entity_act",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_act",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "mod_entity_nbt",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_nbt",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "the entities a native mod keeps itself in the game's commands: those of a level as its selectors match them (`native_mod_entities`), `/kill` and `/tp` on one (`native_mod_entity_act`), and its compound for `/data get entity` and `nbt=` (`native_mod_entity_nbt`).",

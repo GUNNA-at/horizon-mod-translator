@@ -5,28 +5,32 @@
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_attack",
       "neoforge": "Player.attack",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "mod_entity_interact",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_entity_interact",
       "neoforge": "Player.interactOn",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "client_mod_entity_hit",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_entity_hit",
       "neoforge": "ProjectileUtil.getEntityHitResult",
       "side": "client",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "client_mod_entity_interact",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_mod_entity_interact",
       "neoforge": "MultiPlayerGameMode.interact",
       "side": "client",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "a player's blows and clicks on the entities a native mod keeps itself: the one the window's view meets (`native_client_mod_entity_hit`) and the click as the client predicts it (`native_client_mod_entity_interact`), the blow the server's game works out and the mod's entity takes (`native_mod_entity_attack`), and the click the mod makes on the server (`native_mod_entity_interact`).",

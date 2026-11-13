@@ -7,7 +7,7 @@
 //! The prepared bundles are the built-in pack, so the packs above it are
 //! entries that replace or join a bundle's (`GeneratorData::load_with`).
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// The bundle of `dimension/<id>.json` level stems. Nothing prepared has
 /// it: a pack's level stem stands in for the world preset's.
@@ -44,7 +44,13 @@ const TAG_KINDS: [(&str, &str); 3] = [
     ("tags/worldgen/biome", "biome_tags"),
 ];
 /// The pack folders `add_file` looks at, in walk order.
-pub const PACK_KINDS: [&str; 4] = ["dimension", "dimension_type", "tags", "worldgen"];
+pub const PACK_KINDS: [&str; 5] = [
+    "dimension",
+    "dimension_type",
+    "structure",
+    "tags",
+    "worldgen",
+];
 
 /// `ns:path` for a pack file `data/<ns>/<kind>/<path>.json`.
 fn resource_id(file: &str, kind: &str) -> Option<String> {
@@ -53,6 +59,13 @@ fn resource_id(file: &str, kind: &str) -> Option<String> {
         .strip_prefix(kind)?
         .strip_prefix('/')?
         .strip_suffix(".json")?;
+    Some(format!("{ns}:{path}"))
+}
+
+/// `ns:path` for a pack's structure template `data/<ns>/structure/<path>.nbt`.
+pub fn template_id(file: &str) -> Option<String> {
+    let (ns, rest) = file.strip_prefix("data/")?.split_once('/')?;
+    let path = rest.strip_prefix("structure/")?.strip_suffix(".nbt")?;
     Some(format!("{ns}:{path}"))
 }
 
@@ -70,22 +83,25 @@ pub enum PackFile {
 }
 
 /// A level's build range (`LevelHeightAccessor`: `min_y`, `height`) and the
-/// rest of its dimension type the game reads: `logical_height` and
-/// `has_skylight`.
+/// rest of its dimension type the game reads: `logical_height`,
+/// `has_skylight` and `has_ceiling`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LevelHeight {
     pub min_y: i32,
     pub height: i32,
     pub logical_height: i32,
     pub has_skylight: bool,
+    pub has_ceiling: bool,
 }
 impl LevelHeight {
     /// The vanilla dimension types'.
     pub fn vanilla(dimension_type: &str) -> Option<Self> {
-        let (min_y, height, logical_height, has_skylight) = match dimension_type {
-            "minecraft:overworld" | "minecraft:overworld_caves" => (-64, 384, 384, true),
-            "minecraft:the_nether" => (0, 256, 128, false),
-            "minecraft:the_end" => (0, 256, 256, true),
+        let (min_y, height, logical_height, has_skylight, has_ceiling) = match dimension_type {
+            // overworld_caves builds like the Overworld but has a ceiling.
+            "minecraft:overworld" => (-64, 384, 384, true, false),
+            "minecraft:overworld_caves" => (-64, 384, 384, true, true),
+            "minecraft:the_nether" => (0, 256, 128, false, true),
+            "minecraft:the_end" => (0, 256, 256, true, false),
             _ => return None,
         };
         Some(Self {
@@ -93,6 +109,7 @@ impl LevelHeight {
             height,
             logical_height,
             has_skylight,
+            has_ceiling,
         })
     }
     /// A dimension type's JSON, if its codec accepts the range: multiples
@@ -113,6 +130,9 @@ impl LevelHeight {
             height,
             logical_height,
             has_skylight: v["has_skylight"].as_bool().unwrap_or(true),
+            // The codec requires has_ceiling; a type the packs leave it out
+            // of gets the open-sky default.
+            has_ceiling: v["has_ceiling"].as_bool().unwrap_or(false),
         })
     }
     /// A level stem's `type` (a dimension type id, or one inline), with the
@@ -136,10 +156,21 @@ pub struct WorldgenOverrides {
     entries: BTreeMap<String, BTreeMap<String, String>>,
     /// Tag bundle name → (tag id, pack id, tag file text), lowest pack first.
     tags: BTreeMap<String, Vec<(String, String, String)>>,
+    /// Template id → the highest pack's `.nbt` file.
+    templates: BTreeMap<String, Arc<[u8]>>,
 }
 impl WorldgenOverrides {
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.tags.is_empty()
+        self.entries.is_empty() && self.tags.is_empty() && self.templates.is_empty()
+    }
+    /// A pack's structure template: called for packs from the lowest to the
+    /// highest, so the last call for an id wins.
+    pub fn set_template(&mut self, id: &str, nbt: Vec<u8>) {
+        self.templates.insert(id.to_owned(), nbt.into());
+    }
+    /// The structure templates packs give, by id.
+    pub fn templates(&self) -> &BTreeMap<String, Arc<[u8]>> {
+        &self.templates
     }
     /// A pack's file for `id` in `bundle`: called for packs from the lowest
     /// to the highest, so the last call for an id wins.
@@ -266,6 +297,38 @@ impl WorldgenOverrides {
         };
         LevelHeight::of_type(&ty, types)
     }
+    /// The `sea_level` of the noise settings these packs give the vanilla level `level`: those its
+    /// pack stem names (inline, or a pack's own file), else the preset's (`minecraft:overworld`,
+    /// `nether`, `end`) when a pack replaces them. `None` when nothing the packs give changes it,
+    /// for a generator that is not the noise one, and for settings the packs do not carry.
+    pub fn level_sea_level(&self, level: &str) -> Option<i32> {
+        let stem = self.entries.get(DIMENSIONS).and_then(|d| d.get(level));
+        let settings = match stem {
+            Some(stem) => {
+                let generator = &serde_json::from_str::<Value>(stem).ok()?["generator"];
+                if generator["type"].as_str() != Some("minecraft:noise") {
+                    return None;
+                }
+                generator["settings"].clone()
+            }
+            None => Value::String(
+                match level {
+                    "minecraft:the_nether" => "minecraft:nether",
+                    "minecraft:the_end" => "minecraft:end",
+                    _ => "minecraft:overworld",
+                }
+                .to_owned(),
+            ),
+        };
+        let settings = match settings {
+            Value::String(id) => {
+                serde_json::from_str(self.entries.get("settings")?.get(&id)?).ok()?
+            }
+            inline @ Value::Object(_) => inline,
+            _ => return None,
+        };
+        i32::try_from(settings["sea_level"].as_i64()?).ok()
+    }
     /// The entries packs give `bundle`.
     pub fn entries(&self, bundle: &str) -> impl Iterator<Item = (&str, &str)> {
         self.entries
@@ -274,6 +337,40 @@ impl WorldgenOverrides {
             .flatten()
             .map(|(id, json)| (id.as_str(), json.as_str()))
     }
+    /// Partial startup validation of winning fill-layer leaves through their existing codec.
+    /// Other feature types keep their existing lazy path; this never expands feature holders.
+    pub fn validate_fill_layers(
+        &self,
+        registry: &crate::registry::BlockRegistry,
+    ) -> Result<(), super::DecodeError> {
+        use super::block_feature::{FeatureBlockBindings, FillLayerFeature, integer_properties};
+        let entries: Vec<_> = self
+            .entries("features")
+            .filter(|(_, json)| {
+                let Ok(object) = serde_json::from_str::<super::Object>(json) else {
+                    return false;
+                };
+                let Some(kind) = object.get("type") else {
+                    return false;
+                };
+                let Ok(kind) = serde_json::from_str::<String>(kind.get()) else {
+                    return false;
+                };
+                super::density::identifier(&kind).ok().as_deref() == Some("minecraft:fill_layer")
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let bindings = FeatureBlockBindings::new(registry, integer_properties(registry))?;
+        for (id, json) in entries {
+            FillLayerFeature::from_json(json, &bindings).map_err(|error| {
+                super::DecodeError::Registry(format!("configured feature {id}: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
     /// The tag files packs give the tag bundle `bundle`, in pack order.
     pub fn tags(&self, bundle: &str) -> impl Iterator<Item = (&str, &str, &str)> {
         self.tags
@@ -312,6 +409,15 @@ impl WorldgenOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_template_id_comes_from_a_structure_nbt_file_only() {
+        assert_eq!(
+            template_id("data/p/structure/room/a.nbt").as_deref(),
+            Some("p:room/a")
+        );
+        assert_eq!(template_id("data/p/structure/a.json"), None);
+        assert_eq!(template_id("data/p/worldgen/structure/a.nbt"), None);
+    }
 
     #[test]
     fn the_highest_pack_wins_and_others_join() {
@@ -417,17 +523,36 @@ mod tests {
         let overworld = o.level_height("minecraft:overworld");
         assert_eq!(overworld, LevelHeight::vanilla("minecraft:overworld"));
         let nether = o.level_height("minecraft:the_nether").unwrap();
-        assert_eq!((nether.logical_height, nether.has_skylight), (128, false));
+        assert_eq!(
+            (
+                nether.logical_height,
+                nether.has_skylight,
+                nether.has_ceiling
+            ),
+            (128, false, true)
+        );
+        // overworld_caves builds like the Overworld but has a ceiling.
+        let caves = LevelHeight::vanilla("minecraft:overworld_caves").unwrap();
+        assert_eq!(
+            (
+                caves.min_y,
+                caves.height,
+                caves.has_skylight,
+                caves.has_ceiling
+            ),
+            (-64, 384, true, true)
+        );
         o.set(
             DIMENSION_TYPES,
             "minecraft:overworld",
-            r#"{"min_y":-64,"height":2096,"logical_height":384,"has_skylight":true}"#.into(),
+            r#"{"min_y":-64,"height":2096,"logical_height":384,"has_skylight":true,"has_ceiling":true}"#.into(),
         );
         let tall = LevelHeight {
             min_y: -64,
             height: 2096,
             logical_height: 384,
             has_skylight: true,
+            has_ceiling: true,
         };
         assert_eq!(o.level_height("minecraft:overworld"), Some(tall));
         let end = o.level_height("minecraft:the_end");
@@ -449,6 +574,15 @@ mod tests {
             o.set(DIMENSION_TYPES, "minecraft:overworld", bad.into());
             assert_eq!(o.level_height("minecraft:overworld"), None, "{bad}");
         }
+        // The codec requires has_ceiling: a type without it keeps the pack's
+        // fields and the open-sky default.
+        o.set(
+            DIMENSION_TYPES,
+            "minecraft:overworld",
+            r#"{"min_y":-64,"height":384,"logical_height":384,"has_skylight":true}"#.into(),
+        );
+        let open = o.level_height("minecraft:overworld").unwrap();
+        assert!((open.height, open.has_skylight, open.has_ceiling) == (384, true, false));
     }
 
     #[test]
@@ -474,5 +608,34 @@ mod tests {
         assert_eq!(tag, r#"{"values":["minecraft:plains"]}"#);
         let (_, stem) = o.entries(DIMENSIONS).next().unwrap();
         assert!(!stem.contains("molten_peaks") && stem.contains("minecraft:plains"));
+    }
+
+    #[test]
+    fn a_levels_sea_level_comes_from_the_noise_settings_the_packs_give_it() {
+        let mut o = WorldgenOverrides::default();
+        assert_eq!(o.level_sea_level("minecraft:the_nether"), None);
+        o.set("settings", "minecraft:nether", r#"{"sea_level":10}"#.into());
+        assert_eq!(o.level_sea_level("minecraft:the_nether"), Some(10));
+        assert_eq!(o.level_sea_level("minecraft:overworld"), None);
+        o.set("settings", "test:high", r#"{"sea_level":120}"#.into());
+        let stem = |settings: &str| {
+            format!(r#"{{"generator":{{"type":"minecraft:noise","settings":{settings}}}}}"#)
+        };
+        o.set(DIMENSIONS, "minecraft:overworld", stem(r#""test:high""#));
+        assert_eq!(o.level_sea_level("minecraft:overworld"), Some(120));
+        o.set(
+            DIMENSIONS,
+            "minecraft:the_end",
+            stem(r#"{"sea_level":-16}"#),
+        );
+        assert_eq!(o.level_sea_level("minecraft:the_end"), Some(-16));
+        o.set(DIMENSIONS, "minecraft:the_nether", stem(r#""test:absent""#));
+        assert_eq!(o.level_sea_level("minecraft:the_nether"), None);
+        o.set(
+            DIMENSIONS,
+            "minecraft:the_nether",
+            r#"{"generator":{"type":"minecraft:flat"}}"#.into(),
+        );
+        assert_eq!(o.level_sea_level("minecraft:the_nether"), None);
     }
 }

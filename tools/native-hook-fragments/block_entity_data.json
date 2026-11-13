@@ -3,7 +3,8 @@
     {
       "name": "block_entity_data",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_data",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "each update tag the server sends for a mod block entity, as it reaches the client (`native_block_entity_data`).",

@@ -5,20 +5,19 @@
 //! a NeoForge mod calls its own `SimpleCriterionTrigger.trigger`.
 use super::{Game, advancements::item_view, commands::Target};
 use horizon_client::{
-    advancements::{self as adv, EntityView},
+    advancements::{self as adv, EntityView, Tree},
     items::ItemStack,
 };
 use serde_json::Value;
 
 /// One open criterion of a mod's trigger, as the mod's test sees it.
-pub(crate) struct NativeCriterion<'a> {
+pub struct NativeCriterion<'a> {
     /// The criterion's `conditions`, `Null` when it has none. Its `player`
     /// predicate is the game's to test, as vanilla's `SimpleInstance.player`.
-    pub(crate) conditions: &'a Value,
+    pub conditions: &'a Value,
     world: &'a dyn adv::World,
 }
 
-#[allow(dead_code)]
 impl NativeCriterion<'_> {
     /// Whether `stack` passes the item predicate under `key` in the
     /// conditions, as the game's own triggers read an `ItemPredicate`:
@@ -26,7 +25,7 @@ impl NativeCriterion<'_> {
     /// and `damage` components, and the `enchantments` and `damage`
     /// predicates; other components and predicates aren't checked. A missing
     /// key passes, as an absent `Optional<ItemPredicate>` does.
-    pub(crate) fn item(&self, key: &str, stack: &ItemStack) -> bool {
+    pub fn item(&self, key: &str, stack: &ItemStack) -> bool {
         adv::item(&self.conditions[key], &item_view(stack), self.world)
     }
 }
@@ -63,7 +62,6 @@ fn mod_trigger(trigger: &str) -> bool {
 
 /// Helpers for server mods, kept as stable as the hook points.
 // Native mods use these; nothing in Horizon does.
-#[allow(dead_code)]
 impl Game<'_> {
     /// Fires the mod's criteria trigger `trigger` (`mymod:pipe_connected`)
     /// for the player with that UUID: vanilla's
@@ -291,9 +289,21 @@ impl Game<'_> {
         self.for_player(Target::Guest(conn), f)
     }
 
+    /// `native_trigger_criterion` with its test behind a reference, as a
+    /// trait mod calls it through `dyn Host`: the same players, criteria and
+    /// answer. API @API:host_bridge@.
+    pub(super) fn native_trigger_mod_criterion(
+        &mut self,
+        uuid: u128,
+        trigger: &str,
+        test: &dyn Fn(&NativeCriterion<'_>) -> bool,
+    ) -> bool {
+        self.native_trigger_criterion(uuid, trigger, test)
+    }
+
     /// `trigger` for a mod's trigger, for the player in place.
     fn trigger_mod_criteria(&mut self, trigger: &str, test: &dyn Fn(&NativeCriterion<'_>) -> bool) {
-        let me = self.player_entity();
+        let me = self.player_entity_for(trigger);
         self.trigger(trigger, |conditions, world| {
             passes(conditions, &me, world, test)
         });
@@ -319,6 +329,25 @@ fn passes(
         && adv::conditions(&conditions["player"], &player, world)
 }
 
+/// Whether a per-tick trigger needs the player's view. Until the advancements
+/// are loaded the tree is not read yet, so the view is built as before. After
+/// that, only the lookup `trigger` makes (`by_trigger`) can use it.
+fn view_needed(loaded: bool, tree: &Tree, trigger: &str) -> bool {
+    !loaded || tree.by_trigger.contains_key(trigger)
+}
+
+impl Game<'_> {
+    /// [`Self::player_entity_for`] when [`view_needed`] says so, and an empty
+    /// view otherwise: `trigger` then finds no listener and never reads it.
+    pub(super) fn player_entity_if_listened(&mut self, trigger: &str) -> EntityView {
+        if view_needed(self.adv.loaded, &self.adv.tree, trigger) {
+            self.player_entity_for(trigger)
+        } else {
+            EntityView::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +358,9 @@ mod tests {
     impl adv::World for Plains {
         fn dimension(&self) -> &str {
             "minecraft:overworld"
+        }
+        fn weather(&self) -> (bool, bool) {
+            (false, false)
         }
         fn biome(&self, _: [i32; 3]) -> String {
             "minecraft:plains".into()
@@ -411,5 +443,17 @@ mod tests {
         assert!(!mod_trigger("minecraft:inventory_changed"));
         assert!(!mod_trigger("inventory_changed"));
         assert!(!mod_trigger(":pipe_connected"));
+    }
+
+    #[test]
+    fn view_is_needed_only_for_a_listened_trigger_once_loaded() {
+        let mut tree = Tree::default();
+        // Before loading the tree is empty but not read yet: built as before.
+        assert!(view_needed(false, &tree, "minecraft:tick"));
+        assert!(!view_needed(true, &tree, "minecraft:tick"));
+        tree.by_trigger
+            .insert("minecraft:tick".into(), vec![(0, 0)]);
+        assert!(view_needed(true, &tree, "minecraft:tick"));
+        assert!(!view_needed(true, &tree, "minecraft:location"));
     }
 }

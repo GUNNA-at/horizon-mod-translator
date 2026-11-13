@@ -3,7 +3,8 @@
     {
       "name": "item_property",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_item_property",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "item properties for 1.21.1 item model overrides (`native_item_property`).",

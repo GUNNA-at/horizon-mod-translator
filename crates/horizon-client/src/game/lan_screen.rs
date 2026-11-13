@@ -112,6 +112,10 @@ fn labelled(key: &str, value: Text) -> Text {
 }
 
 impl WorldOptions {
+    /// No button keeps the focus a click gave it.
+    pub(super) fn clear_click_focus(&mut self) {
+        self.focused_button = None;
+    }
     /// Vanilla 26.3 WorldOptionsScreen.generalOptions: guests see difficulty,
     /// game rules and restrictions; game modes, commands and LAN are host-only.
     fn visible_buttons(&self, w: f32) -> Vec<(Button, f32, f32, f32)> {
@@ -142,11 +146,30 @@ impl WorldOptions {
         self.initial.difficulty = self.difficulty;
         self.initial.locked = self.locked;
     }
+    /// `WorldOptionsScreen.updatePortControlsState`: the port box takes an
+    /// edit only with LAN on; it stays focusable either way, so its value can
+    /// be read, selected and copied while LAN is off.
+    fn update_port_controls(&mut self) {
+        self.port.editable = self.lan;
+    }
     fn parsed_port(&self) -> Option<u16> {
         if self.port.value.is_empty() {
             return Some(self.hint);
         }
         self.port.value.parse::<u16>().ok().filter(|p| *p >= 1024)
+    }
+
+    /// `portEdit.setTooltip(PORT_INFO_TEXT)`: the port box explains itself while
+    /// the cursor is over it. The box is drawn even with LAN off, so the tooltip
+    /// shows there too; a remote world has no such box.
+    fn port_tooltip(port: &EditBox, cursor: (f32, f32), remote: bool) -> Option<Text> {
+        if remote || !ui::hovered(cursor, port.x, port.y, port.width, port.height) {
+            return None;
+        }
+        Some(match port_error(&port.value) {
+            Some(key) => Text::translate(key, &[Text::literal("1024"), Text::literal("65535")]),
+            None => Text::translate("lanServer.port", &[]),
+        })
     }
     fn snapshot(&self) -> Snapshot {
         Snapshot {
@@ -538,6 +561,18 @@ impl Restrictions {
     }
 }
 
+/// `WorldOptionsScreen.tryParsePort`'s invalid value: not a number in
+/// `PORT_LOWER_BOUND..=PORT_HIGHER_BOUND`. A number another process holds
+/// (`HttpUtil.isPortAvailable`) is not checked: the port map records that gap.
+fn port_error(value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        return None;
+    }
+    match value.parse::<u32>() {
+        Ok(port) if (1024..=65535).contains(&port) => None,
+        _ => Some("lanServer.port.invalid"),
+    }
+}
 impl Game<'_> {
     pub(super) fn remote_world_options_permission(&mut self, permission: bool) {
         if let Some(o) = self.world_options.as_mut() {
@@ -561,7 +596,17 @@ impl Game<'_> {
         else {
             return;
         };
-        let mut rules = horizon_client::gamerules::GameRules::default();
+        // The response itself lists the server's available rules; the client
+        // may not own this world's level.dat (including on the server thread).
+        let features = if entries.iter().any(|e| {
+            horizon_client::gamerules::rule(&e.name)
+                .is_some_and(|r| r.name == horizon_client::gamerules::MAX_MINECART_SPEED.name)
+        }) {
+            vec![horizon_client::gamerules::MINECART_IMPROVEMENTS.to_owned()]
+        } else {
+            Vec::new()
+        };
+        let mut rules = horizon_client::gamerules::GameRules::with_features(&features);
         for entry in entries {
             rules.set_string(&entry.name, &entry.value);
         }
@@ -804,7 +849,18 @@ impl Game<'_> {
         });
         let hover = ui::hovered(self.cursor, dx, dy, 200.0, 20.0) || is_focused;
         let label = Text::translate("gui.done", &[]);
-        ui::button(batch, atlas, dx, dy, 200.0, 20.0, &label, true, hover);
+        ui::action_button(
+            batch,
+            atlas,
+            horizon_client::widgets::Action::Done,
+            dx,
+            dy,
+            200.0,
+            20.0,
+            &label,
+            true,
+            hover,
+        );
     }
 
     fn draw_options_view(&self, o: &mut WorldOptions, batch: &mut HudBatch, cursor: (f32, f32)) {
@@ -873,6 +929,10 @@ impl Game<'_> {
             }
             if b == Button::Lock {
                 widgets::narratable(|| o.narration(b, [bx, by, 20.0, 20.0], tr).hovered(hover));
+                // An icon, but a button: the D-pad and Tab stop on it as on the others.
+                if active {
+                    widgets::target([bx, by, 20.0, 20.0]);
+                }
                 let lock = if o.locked { "locked" } else { "unlocked" };
                 let state = match (active, hover) {
                     (false, _) => "_disabled",
@@ -905,7 +965,7 @@ impl Game<'_> {
         if !o.remote {
             o.port.x = x + 158.0;
             o.port.y = top + PORT_TOP;
-            o.port.focused = o.lan && o.port.focused;
+            o.update_port_controls();
             o.port.text_color = if !o.lan {
                 rgba(0x70, 0x70, 0x70, 255)
             } else if o.parsed_port().is_some() {
@@ -957,17 +1017,38 @@ impl Game<'_> {
             let active = o.active(b);
             let is_focused = o.focused_button == Some(b);
             let hover = active && (ui::hovered(cursor, bx, by, bw, 20.0) || is_focused);
-            ui::button(batch, atlas, bx, by, bw, 20.0, &o.label(b), active, hover);
+            let action = match b {
+                Button::Apply => horizon_client::widgets::Action::Apply,
+                _ => horizon_client::widgets::Action::Cancel,
+            };
+            ui::action_button(
+                batch,
+                atlas,
+                action,
+                bx,
+                by,
+                bw,
+                20.0,
+                &o.label(b),
+                active,
+                hover,
+            );
+        }
+        // The widgets are drawn; the port box's tooltip goes over them.
+        if let Some(tip) = WorldOptions::port_tooltip(&o.port, cursor, o.remote) {
+            // Tooltip.splitTooltip: font.split(message, 170).
+            ui::tooltip(batch, atlas, &atlas.font.split(&tip, 170.0), cursor);
         }
     }
 
     /// The mouse wheel over the screen (ScrollableLayout, 10 pixels a step).
     pub(super) fn world_options_scroll(&mut self, delta: f32) {
         let (w, h) = self.gui_size();
+        let stick_scroll = self.pad_stick_scroll();
         match self.world_options.as_mut() {
             Some(o) if o.view == View::Options => {
                 let hit_btn = o.hit(self.cursor, (w, h)).or(o.focused_button);
-                if let Some(btn) = hit_btn {
+                if let Some(btn) = hit_btn.filter(|_| !stick_scroll) {
                     let step = if delta > 0.0 { -1 } else { 1 };
                     match btn {
                         Button::DefaultMode => {
@@ -1109,7 +1190,6 @@ impl Game<'_> {
         }
         let inside = self.cursor.1 >= HEADER && self.cursor.1 < h - FOOTER;
         o.port.focused = !o.remote
-            && o.lan
             && inside
             && ui::hovered(
                 self.cursor,
@@ -1344,7 +1424,7 @@ impl Game<'_> {
                 let reverse = shift;
                 let next = match o.focused_button {
                     Some(cur) => {
-                        if !o.remote && o.lan {
+                        if !o.remote {
                             if !reverse && cur == Button::Lan {
                                 o.port.focused = true;
                                 o.focused_button = None;
@@ -1853,5 +1933,60 @@ mod tests {
         assert!(!o.active(Button::Apply));
         assert!(o.locked);
         assert!(!o.active(Button::Difficulty));
+    }
+
+    /// `portEdit.setTooltip(PORT_INFO_TEXT)`: hovering the port box shows its
+    /// label; `setPortError` turns that into the reason a number is rejected.
+    /// A remote world (`o.remote`) has no port box to hover.
+    #[test]
+    fn the_port_box_explains_itself_on_hover() {
+        let mut port = EditBox::new(158.0, 100.0, 40.0, 20.0);
+        let tip = |port: &EditBox| {
+            WorldOptions::port_tooltip(port, (159.0, 101.0), false).map(|t| t.plain())
+        };
+        assert_eq!(tip(&port).as_deref(), Some("lanServer.port"));
+        // Empty takes the suggestion, a number in range is fine.
+        assert_eq!(tip(&port).as_deref(), Some("lanServer.port"));
+        for bad in ["0", "80", "70000", "abc", "-1"] {
+            port.set_value(bad);
+            assert_eq!(
+                tip(&port).as_deref(),
+                Some("lanServer.port.invalid"),
+                "{bad}"
+            );
+        }
+        for good in ["1024", "25565", "65535"] {
+            port.set_value(good);
+            assert_eq!(tip(&port).as_deref(), Some("lanServer.port"), "{good}");
+        }
+        assert!(WorldOptions::port_tooltip(&port, (157.0, 101.0), false).is_none());
+        assert!(WorldOptions::port_tooltip(&port, (159.0, 121.0), false).is_none());
+        assert!(WorldOptions::port_tooltip(&port, (159.0, 101.0), true).is_none());
+    }
+
+    /// `WorldOptionsScreen.updatePortControlsState`: with LAN off the port box
+    /// is read-only but keeps the focus, so its value can be selected and
+    /// copied; the caret moves, Backspace is consumed without a change, and
+    /// with LAN on it edits again.
+    #[test]
+    fn the_port_box_is_read_only_but_focusable_with_lan_off() {
+        use winit::keyboard::KeyCode;
+        let mut o = options(false, false);
+        assert!(!o.lan);
+        o.port.focused = true;
+        o.update_port_controls();
+        assert!(!o.port.editable);
+        assert!(o.port.focused);
+        o.port.set_value("25565");
+        assert!(o.port.key(KeyCode::Backspace, false, false));
+        assert_eq!(o.port.value, "25565");
+        assert!(o.port.key(KeyCode::ArrowLeft, false, false));
+        assert_eq!(o.port.cursor, 4);
+        // LAN on: the box takes the edit.
+        o.lan = true;
+        o.update_port_controls();
+        assert!(o.port.editable);
+        assert!(o.port.key(KeyCode::Backspace, false, false));
+        assert_eq!(o.port.value, "2555");
     }
 }

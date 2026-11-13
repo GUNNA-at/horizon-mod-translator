@@ -4,19 +4,22 @@
       "name": "entity_types",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_entity_types",
       "side": "both",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "load_entity",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_load_entity",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "save_entities",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_save_entities",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "the entities of a native mod's own types in the game's world: their types in the commands' registries (`native_entity_types`), one made from its compound by `/summon` or a loading chunk (`native_load_entity`), and theirs saved and unloaded with the chunks (`native_save_entities`).",

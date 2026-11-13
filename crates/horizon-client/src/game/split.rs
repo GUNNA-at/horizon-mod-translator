@@ -16,10 +16,10 @@
 //! data (`Resources`, the packs), one audio output and P1's server. Not one game process per
 //! player: that needs GPU textures, input and audio shared across processes.
 //!
-//! Controllers: P1's is the first used in a menu (or alone). In P1's world another controller
-//! pressing a button is offered to join, on every view (A joins, B says no); a controller that
-//! disconnects leaves its player waiting, its view dimmed, until it comes back or another takes
-//! over (`pads`).
+//! Controllers: P1's is the first used in a menu. In P1's world a controller it isn't using
+//! pressing a button is offered to join, on every view (A joins, Y gives it to P1, B says no); a
+//! controller that disconnects leaves its player waiting, its view dimmed, until it comes back
+//! or another takes over (`pads`).
 //!
 //! Horizon Settings > Splitscreen... enables joining (off by default).
 //! `HORIZON_SPLIT=N` (testing) enables it too, and
@@ -32,7 +32,7 @@ use super::{
     start_game,
 };
 use horizon_client::gamepad::Button;
-use horizon_client::split_layout::{self as layout, MAX_PLAYERS, Placement, View};
+use horizon_client::split_layout::{self as layout, MAX_PLAYERS, Placement, Spot, View};
 use horizon_client::{Result, gfx::compositor::Compositor, widgets};
 use std::{
     cell::RefCell,
@@ -49,9 +49,12 @@ use winit::{
     window::WindowId,
 };
 
+mod frames;
 mod hud;
+pub(super) mod launcher;
 mod pads;
 mod players;
+mod setup;
 mod windows;
 
 pub(super) use hud::Hud;
@@ -82,14 +85,6 @@ impl Game<'_> {
 const WINDOW_1: &str = "Window 1";
 const NEW_WINDOW: &str = "New window";
 
-/// A place offered while picking a profile.
-#[derive(Clone, PartialEq)]
-enum Spot {
-    Window(u8),
-    New,
-    Fill(String),
-}
-
 struct Guest<'a> {
     game: Box<Game<'a>>,
     /// The profile it plays as; `None` while it picks one.
@@ -112,6 +107,9 @@ struct Guest<'a> {
 pub(super) struct Split<'a> {
     pub(super) host: Game<'a>,
     guests: Vec<Guest<'a>>,
+    /// The run's `--offscreen`: no window is shown, splitscreen's included, and P1 draws
+    /// offscreen again when it is alone (`options.offscreen` is set while others play).
+    offscreen: bool,
     /// `HORIZON_SPLIT=N`: players still to add once P1 is in a world.
     test_players: usize,
     /// `HORIZON_SPLIT` is set: splitscreen is on for this run, without touching the saved switch.
@@ -125,15 +123,18 @@ pub(super) struct Split<'a> {
     p1_window: u8,
     /// Seats in the order their views fill a shared window.
     order: Vec<usize>,
+    /// Seats represented by the open Setup draft, to detect join/leave changes.
+    setup_seats: Vec<usize>,
     /// Whether Window 1 is shown (hidden while nobody plays in it): set once per change, since
     /// Wayland can't say whether a window is visible.
     window1_shown: bool,
     /// Where each numbered window was when it closed, to open there again (this session).
     window_rects: std::collections::HashMap<u8, (LogicalPosition<f64>, LogicalSize<f64>)>,
-    /// The monitors with their names, left to right, and the one Window 1 is on: read once a
-    /// frame (`refresh_monitors`).
+    /// The monitors with their names, left to right, and the one Window 1 is on: read while
+    /// splitscreen is on, once a second (`refresh_monitors`), and when it last read them.
     screens: Vec<(String, MonitorHandle)>,
     main_screen: Option<String>,
+    screens_read: Option<Instant>,
     /// `HORIZON_SPLIT_WINDOWS`: each seat's window, `1`, `2`... or `m<monitor>`.
     window_plan: Vec<String>,
     /// The views the players were last fitted to.
@@ -148,9 +149,20 @@ pub(super) struct Split<'a> {
     /// Whose game runs now (0 = P1), and P1's buttons while another's does.
     turn: usize,
     host_widgets: widgets::Saved,
+    /// The launcher's other Microsoft accounts' sessions, for splitscreen players to sign in
+    /// with (`launcher::accounts`).
+    accounts: Vec<Arc<horizon_client::auth::AuthSession>>,
+    /// `HORIZON_SPLIT_STATS`: when the frame times were last printed.
+    stats: Option<Instant>,
+    /// For the readout: where a frame's wall time goes (the turns with their renders, presents,
+    /// the GPU wait, outside `about_to_wait`), summed since the last print, and when this frame
+    /// started.
+    spent: [Duration; 4],
+    spent_frames: u32,
+    frame_started: Option<Instant>,
     /// The controllers while several play (`pads`), and P1's.
     pads: PadRouter,
-    p1_pad: Option<PadId>,
+    p1_pad: pads::P1Pad<PadId>,
     /// Pads whose buttons still count as the press that gave them: released first.
     fresh: Vec<PadId>,
     /// Controllers offered to join, each since when: several may join at once.
@@ -166,9 +178,11 @@ impl<'a> Split<'a> {
             .as_ref()
             .and_then(|n| n.parse::<usize>().ok())
             .map_or(0, |n| n.clamp(1, MAX_PLAYERS) - 1);
+        let offscreen = host.options.offscreen;
         Self {
             host,
             guests: Vec::new(),
+            offscreen,
             test_players,
             forced: split.is_some(),
             surfaces: Vec::new(),
@@ -178,10 +192,12 @@ impl<'a> Split<'a> {
             }],
             p1_window: 1,
             order: Vec::new(),
+            setup_seats: Vec::new(),
             window1_shown: true,
             window_rects: Default::default(),
             screens: Vec::new(),
             main_screen: None,
+            screens_read: None,
             window_plan: std::env::var("HORIZON_SPLIT_WINDOWS")
                 .map(|w| w.split(',').map(|s| s.trim().to_owned()).collect())
                 .unwrap_or_default(),
@@ -193,8 +209,13 @@ impl<'a> Split<'a> {
             res: None,
             turn: 0,
             host_widgets: Default::default(),
+            accounts: launcher::accounts(),
+            stats: std::env::var_os("HORIZON_SPLIT_STATS").map(|_| Instant::now()),
+            spent: Default::default(),
+            spent_frames: 0,
+            frame_started: None,
             pads: Default::default(),
-            p1_pad: None,
+            p1_pad: Default::default(),
             fresh: Vec::new(),
             offers: Vec::new(),
             lost: Vec::new(),
@@ -240,6 +261,8 @@ impl<'a> Split<'a> {
                 .get(i.wrapping_sub(1))
                 .map(|g| g.options.clone()),
         );
+        let seat = self.guests.get(i.wrapping_sub(1)).map_or(1, |g| g.seat);
+        horizon_hooks::engine::set_seat(seat - 1);
         self.turn = i;
     }
 
@@ -273,37 +296,7 @@ impl<'a> Split<'a> {
         if next != self.focus {
             self.turn(self.focus);
             if let Some(game) = self.game_mut(self.focus) {
-                for key in std::mem::take(&mut game.physical_keys) {
-                    game.native_key_event(key, false, false);
-                }
-                for key in std::mem::take(&mut game.keys) {
-                    if let Err(e) = game.mapped_key(key, false, false) {
-                        log::warn!("Horizon: splitscreen: releasing input: {e}");
-                    }
-                }
-                for button in std::mem::take(&mut game.physical_buttons) {
-                    game.extras_mouse(button, false);
-                }
-                game.drag_button = None;
-                game.modifiers = Default::default();
-                game.left = false;
-                game.right = false;
-                game.inventory_mouse_release(false);
-                game.inventory_mouse_release(true);
-                game.inventory_pick_release();
-                game.loom_release();
-                game.creative_screen.release();
-                game.ui.options.release();
-                game.dragging = false;
-                game.stats_release();
-                game.world_options_release();
-                game.advancements_mouse(false, [0, 0]);
-                if let Some(title) = &mut game.title {
-                    title.release();
-                    title.release_field();
-                }
-                game.capture(false);
-                game.keyboard_mouse = false;
+                game.release_keyboard_mouse();
             }
         }
         self.focus = next;
@@ -377,7 +370,7 @@ impl<'a> Split<'a> {
         old.release_surface();
         let api = self.host.settings.horizon.api;
         let batching = self.host.settings.horizon.translucent_batching;
-        let shader_pack = super::shader_packs::picked_pack_draws_flat(&self.host.settings);
+        let shader_pack = super::shader_packs::picked_pack_shape(&self.host.settings);
         let built = build_renderer(
             window.clone(),
             true,
@@ -387,7 +380,14 @@ impl<'a> Split<'a> {
             None,
             api,
             batching,
+            self.host.settings.vsync,
+            &self.host.settings.horizon,
             shader_pack,
+            old.display_reading(),
+            (
+                self.host.settings.file.int("textureFiltering"),
+                self.host.settings.file.int("maxAnisotropyBit"),
+            ),
         );
         let renderer = match built {
             Ok(r) => r,
@@ -408,6 +408,8 @@ impl<'a> Split<'a> {
             }
         };
         self.host.renderer = Some(renderer);
+        self.host.forget_atlas_slots();
+        self.host.split_window = !self.offscreen;
         self.host.options.offscreen = true;
         self.host.options.paced_by_split = true;
         // The new renderer takes the old one's present mode, settings and all: P1's again.
@@ -435,6 +437,7 @@ impl<'a> Split<'a> {
         }
         self.applied.clear();
         self.order.clear();
+        self.setup_seats.clear();
         if !watching {
             self.stop_routing();
         }
@@ -445,24 +448,31 @@ impl<'a> Split<'a> {
             return Ok(());
         };
         let window = main.window.clone();
-        window.set_visible(true);
+        window.set_visible(windows::window_shown(true, self.offscreen));
         self.window1_shown = true;
         self.host.window = Some(window.clone());
         let old = self.host.renderer.take().ok_or("no renderer")?;
         old.take_back(main.compositor);
         let api = self.host.settings.horizon.api;
         let batching = self.host.settings.horizon.translucent_batching;
-        let shader_pack = super::shader_packs::picked_pack_draws_flat(&self.host.settings);
+        let shader_pack = super::shader_packs::picked_pack_shape(&self.host.settings);
         let built = build_renderer(
             window.clone(),
-            false,
+            self.offscreen,
             &self.host.pack,
             &self.host.gui,
             Some(&old),
             None,
             api,
             batching,
+            self.host.settings.vsync,
+            &self.host.settings.horizon,
             shader_pack,
+            old.display_reading(),
+            (
+                self.host.settings.file.int("textureFiltering"),
+                self.host.settings.file.int("maxAnisotropyBit"),
+            ),
         );
         let renderer = match built {
             Ok(r) => r,
@@ -476,7 +486,9 @@ impl<'a> Split<'a> {
         };
         drop(old);
         self.host.renderer = Some(renderer);
-        self.host.options.offscreen = false;
+        self.host.forget_atlas_slots();
+        self.host.options.offscreen = self.offscreen;
+        self.host.split_window = false;
         self.host.options.paced_by_split = false;
         // Alone again: the pointer is P1's, its view the whole window.
         self.focus = 0;
@@ -492,9 +504,20 @@ impl<'a> Split<'a> {
         Ok(())
     }
 
-    /// P1 is playing in its own world, which others can join.
+    /// P1 is playing in a world others can join: its own (its server thread) or a server's.
     fn in_world(&self) -> bool {
-        self.host.title.is_none() && self.host.player.is_some() && self.host.integrated.is_some()
+        self.host.title.is_none()
+            && self.host.player.is_some()
+            && (self.host.integrated.is_some() || self.p1_server().is_some())
+    }
+
+    /// The server P1 joined over the network (a dedicated server, another computer's LAN
+    /// world, a friend's invite): the others join it too, each as its own profile.
+    fn p1_server(&self) -> Option<String> {
+        if self.host.integrated.is_some() || self.host.remote.is_none() {
+            return None;
+        }
+        self.host.server_address().map(str::to_owned)
     }
 
     /// The pads' players who accepted, and the testing players (`HORIZON_SPLIT`, one a frame),
@@ -504,7 +527,10 @@ impl<'a> Split<'a> {
         for pad in pad_joins {
             match self.join(Some(pad), None) {
                 Ok(()) => changed = true,
-                Err(e) => log::warn!("Horizon: splitscreen: a player could not join: {e}"),
+                Err(e) => {
+                    self.restore_given_up_pad(pad);
+                    log::warn!("Horizon: splitscreen: a player could not join: {e}");
+                }
             }
         }
         if self.in_world() && self.test_players > 0 {
@@ -529,13 +555,19 @@ impl<'a> Split<'a> {
 
     /// Each window shows its players' frames, then the GPU wait, once, for all of them. Only
     /// the game's window waits for the display (vsync): windows each waiting would divide the rate.
-    fn present(&mut self) {
+    /// When the windows had presented (before the GPU wait), for the frame-time readout.
+    fn present(&mut self) -> Instant {
         let views = self.views();
+        let vsync = self.host.settings.vsync;
+        let paced = windows::paced_surface(self.window1_shown, self.surfaces.len());
+        // A present mode switch reconfigures a surface, and an Outdated or Lost texture
+        // may: a reconfigure waits for the GPU to come idle and reports an error when a
+        // frame is submitted while it waits. Land this turn's frames on the submit
+        // threads first (the compositor then copies views already submitted, too).
+        self.wait_queues();
         let renderers: Vec<_> = std::iter::once(&self.host.renderer)
             .chain(self.guests.iter().map(|g| &g.game.renderer))
             .collect();
-        let vsync = self.host.settings.vsync;
-        let paced = windows::paced_surface(self.window1_shown, self.surfaces.len());
         for (k, surface) in self.surfaces.iter_mut().enumerate() {
             let frames: Vec<_> = renderers
                 .iter()
@@ -544,14 +576,29 @@ impl<'a> Split<'a> {
                 .filter_map(|(r, v)| Some((r.as_ref()?.offscreen_frame()?, v.1)))
                 .collect();
             surface.compositor.set_vsync(vsync && k == paced);
-            surface.compositor.present(&frames);
+            // Wayland shows a window once something is presented on it.
+            if windows::presents(self.offscreen) {
+                surface.compositor.present(&frames);
+            }
         }
+        let presented = Instant::now();
         // One player's CPU work overlapped the GPU drawing another's.
         let renderers = std::iter::once(&mut self.host.renderer)
             .chain(self.guests.iter_mut().map(|g| &mut g.game.renderer));
         for renderer in renderers.flatten() {
             renderer.paced_elsewhere = true;
             renderer.wait_in_flight();
+        }
+        presented
+    }
+    /// Every player's frame submitted by its submit thread, no device wait: before
+    /// anything reconfigures a surface, whose wait for the GPU breaks on a submission
+    /// made while it waits.
+    fn wait_queues(&mut self) {
+        let renderers = std::iter::once(&mut self.host.renderer)
+            .chain(self.guests.iter_mut().map(|g| &mut g.game.renderer));
+        for renderer in renderers.flatten() {
+            renderer.wait_submissions();
         }
     }
 }
@@ -692,9 +739,18 @@ impl ApplicationHandler for Split<'_> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.refresh_monitors();
         let on = self.host.settings.extras.splitscreen || self.forced;
-        self.host.ui.options.split_joined = self.guests.iter().any(|g| g.name.is_some());
+        // Only splitscreen places windows on monitors. Listing them is a round trip to the
+        // window server (macOS: 0.1-0.3 ms, more on a busy machine), so not every frame.
+        if (on || !self.surfaces.is_empty())
+            && self
+                .screens_read
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+        {
+            self.screens_read = Some(Instant::now());
+            self.refresh_monitors();
+        }
+        self.host.split_hud.menu = self.guests.iter().any(|g| g.name.is_some());
         // Off, or the last other player gone: P1 draws on its window again.
         if !self.surfaces.is_empty()
             && (!on || self.guests.is_empty())
@@ -703,6 +759,7 @@ impl ApplicationHandler for Split<'_> {
             log::warn!("Horizon: splitscreen could not switch back: {e}");
         }
         if self.surfaces.is_empty() {
+            self.sync_setup();
             if !on {
                 self.stop_routing();
                 return self.host.about_to_wait(event_loop);
@@ -711,11 +768,11 @@ impl ApplicationHandler for Split<'_> {
             // output (rumble, triggers) through the split's reader for P1's turn.
             let pad_joins = self.route_pads(true);
             self.turn(0);
-            if let Some(id) = self.p1_pad {
+            if let Some(id) = self.p1_pad.owner {
                 self.pads.lend_output(&mut self.host.pad, id);
             }
             self.host.about_to_wait(event_loop);
-            if self.p1_pad.is_some() {
+            if self.p1_pad.owner.is_some() {
                 self.pads.reclaim_output(&mut self.host.pad);
             }
             if self.admit(event_loop, pad_joins) {
@@ -723,20 +780,31 @@ impl ApplicationHandler for Split<'_> {
             }
             return;
         }
+        let started = Instant::now();
+        if let Some(previous) = self.frame_started.replace(started) {
+            // What the last frame left after its own work: events, the limiter, the OS.
+            self.spent[3] += started.saturating_duration_since(previous);
+        }
         let pad_joins = self.route_pads(false);
         self.turn(0);
         self.host.about_to_wait(event_loop);
         let mut changed = self.drop_out() | self.admit(event_loop, pad_joins);
+        self.follow_pack_answer();
         self.sync_profiles();
         changed |= self.pick_profiles();
+        changed |= self.sync_setup();
         changed |= self.sync_surfaces(event_loop);
         if changed || self.views() != self.applied {
             self.relayout(event_loop);
         }
-        // Each player's badge: who it is, shown a moment when something changes for it.
+        // Each player's badge: who it is, always with Names on (P1's Setup), else a moment when
+        // something changes for it.
+        let names = self.host.settings.extras.splitscreen_names;
         self.host.split_hud.badge = Some("P1".into());
+        self.host.split_hud.names = names;
         for g in &mut self.guests {
             g.game.split_hud.badge = Some(g.name.clone().unwrap_or_else(|| "New player".into()));
+            g.game.split_hud.names = names;
         }
         let master = self.host.audio.master;
         for i in 0..self.guests.len() {
@@ -769,8 +837,25 @@ impl ApplicationHandler for Split<'_> {
                 }
             }
         }
+        self.pads
+            .play_rumbles(&mut self.host.pad, self.p1_pad.owner);
+        for g in &mut self.guests {
+            self.pads.play_rumbles(&mut g.game.pad, g.pad);
+        }
         self.turn(0);
-        self.present();
+        let rendered = Instant::now();
+        let presented = self.present();
+        let waited = Instant::now();
+        for (k, d) in [rendered - started, presented - rendered, waited - presented]
+            .into_iter()
+            .enumerate()
+        {
+            self.spent[k] += d;
+        }
+        // The rest of the frame (the limiter, the OS) counts as outside, from `waited` on.
+        self.spent[3] = self.spent[3].saturating_sub(waited - started);
+        self.spent_frames += 1;
+        self.print_stats();
         // One pace for all: the fastest any player wants, so an idle one (vanilla's AFK limit)
         // can't slow the others. With vsync the display paces anything at or above its refresh
         // rate; the limiter on top would miss refreshes.
@@ -786,7 +871,8 @@ impl ApplicationHandler for Split<'_> {
             ))
             .and_then(|s| s.window.current_monitor()?.refresh_rate_millihertz())
             .map_or(60, |mhz| mhz.div_ceil(1000) as i32);
-        if !(self.host.settings.vsync && limit >= refresh_hz) {
+        // Offscreen, nothing presents: no display paces the frames.
+        if !(self.host.settings.vsync && limit >= refresh_hz && windows::presents(self.offscreen)) {
             horizon_client::window::end_frame(&mut self.limiter, limit, &mut self.clock);
         }
     }
@@ -798,5 +884,58 @@ impl ApplicationHandler for Split<'_> {
             }
         }
         self.turn(0);
+    }
+}
+
+impl Game<'_> {
+    /// Keyboard and mouse go to another player: release everything they held here.
+    pub(super) fn release_keyboard_mouse(&mut self) {
+        for key in std::mem::take(&mut self.physical_keys) {
+            self.native_key_event(key, false, false);
+        }
+        // Only what the keyboard held, and a script acting as it: this player's pad keeps its
+        // presses.
+        let mut released = self
+            .keys
+            .release_source(horizon_client::held::Source::Keyboard);
+        released.extend(
+            self.keys
+                .release_source(horizon_client::held::Source::Agent),
+        );
+        for key in released {
+            if let Err(e) = self.mapped_key(
+                key,
+                false,
+                false,
+                key,
+                horizon_client::held::Source::Keyboard,
+            ) {
+                log::warn!("Horizon: splitscreen: releasing input: {e}");
+            }
+        }
+        for button in std::mem::take(&mut self.physical_buttons) {
+            self.extras_mouse(button, false);
+        }
+        self.drag_button = None;
+        self.modifiers = Default::default();
+        // A press this player's pad holds goes on, as for its keys.
+        self.left = self.pad.holds_action("key.attack");
+        self.right = self.pad.holds_action("key.use");
+        self.inventory_mouse_release(false);
+        self.inventory_mouse_release(true);
+        self.inventory_pick_release();
+        self.loom_release();
+        self.creative_screen.release();
+        self.ui.options.release();
+        self.dragging = false;
+        self.stats_release();
+        self.world_options_release();
+        self.advancements_mouse(false, [0, 0]);
+        if let Some(title) = &mut self.title {
+            title.release();
+            title.release_field();
+        }
+        self.capture(false);
+        self.keyboard_mouse = false;
     }
 }

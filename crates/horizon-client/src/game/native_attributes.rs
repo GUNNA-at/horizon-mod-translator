@@ -78,7 +78,7 @@ impl Game<'_> {
     /// place: the acting player on a server, the client's own on a client. None when it isn't a
     /// living entity of the level or its type doesn't have the attribute. API @API:attributes@.
     #[allow(dead_code)]
-    pub(crate) fn native_attribute(&mut self, entity: Option<i32>, attribute: &str) -> Option<NativeAttribute> {
+    pub(crate) fn native_living_attribute(&mut self, entity: Option<i32>, attribute: &str) -> Option<NativeAttribute> {
         let name = attribute_name(attribute);
         match self.living(entity)? {
             Living::Player => {
@@ -107,7 +107,7 @@ impl Game<'_> {
     }
 
     /// Makes `change` to attribute `attribute` of the living entity `entity` (as
-    /// [`Game::native_attribute`] names them). Whether it was made: not when the entity doesn't
+    /// [`Game::native_living_attribute`] names them). Whether it was made: not when the entity doesn't
     /// have the attribute, a modifier of the id is there already (an `Add` without `replace`) or
     /// isn't (a `Remove`), or the modifier's id isn't a resource location; nor a modifier on a
     /// mob's plain attribute, whose base alone changes. API @API:attributes@.
@@ -183,7 +183,7 @@ impl Game<'_> {
 
     fn generic_attribute_of(&mut self, target: Target, name: &str) -> Option<NativeAttribute> {
         let attribute = self.motion.attributes.id(name)?;
-        let map = self.generic_attributes(target)?;
+        let map = self.generic_attributes(target, name)?;
         if !map.has(attribute) {
             return None;
         }
@@ -197,7 +197,7 @@ impl Game<'_> {
         let Some(attribute) = self.motion.attributes.id(name) else {
             return false;
         };
-        let Some(map) = self.generic_attributes(target) else {
+        let Some(map) = self.generic_attributes(target, name) else {
             return false;
         };
         if !map.has(attribute) {

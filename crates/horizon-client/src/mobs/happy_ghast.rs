@@ -79,7 +79,7 @@ fn setup(m: &mut Mob, baby: bool) {
     g.add(5, FloatAround { blocks: 16 });
 }
 fn wearing_harness(m: &Mob) -> bool {
-    m.extra.head.is_some()
+    m.extra.body.is_some()
 }
 /// `getControllingPassenger`: a player on a harnessed adult.
 pub fn controlled(m: &Mob) -> bool {
@@ -91,7 +91,7 @@ pub fn harnessed_adult(m: &Mob) -> bool {
 }
 /// `getHappyGhastRestrictionRadius`.
 fn restriction_radius(m: &Mob) -> i32 {
-    if !m.is_baby() && m.extra.head.is_none() {
+    if !m.is_baby() && m.extra.body.is_none() {
         64
     } else {
         32
@@ -342,7 +342,9 @@ impl Goal for HappyGhastFloat {
         !on_still_timeout(m) && Float.can_use(m, cx)
     }
     fn can_continue(&mut self, m: &mut Mob, cx: &mut Cx) -> bool {
-        Float.can_use(m, cx)
+        // `HappyGhastFloatGoal` inherits `Goal.canContinueToUse`, which asks
+        // the overridden `canUse`: the still timeout applies mid-float too.
+        self.can_use(m, cx)
     }
     fn every_tick(&self) -> bool {
         true
@@ -380,7 +382,8 @@ impl Goal for GhastTempt {
         let Some(p) = &cx.w.player else { return false };
         // getNearestPlayer(TargetingConditions.forNonCombat()
         // .ignoreLineOfSight().range(TEMPT_RANGE 16)): creative players too.
-        let range = (16.0_f64 * p.visibility_percent()).max(2.0);
+        let range =
+            (16.0_f64 * p.visibility_percent(Some(m.kind.id.as_str()), cx.w.items)).max(2.0);
         p.alive
             && !p.spectator
             && (Self::wants(m, &p.main_hand) || Self::wants(m, &p.off_hand))
@@ -563,18 +566,19 @@ pub fn ai_step(m: &mut Mob, w: &MobWorld) {
             m.ai.home = Some((here, radius));
         }
     }
-    // continuousHeal: a point every 30 seconds, every second in rain or snow
-    // (Level.precipitationAt).
+    // continuousHeal: a point every 30 seconds, every second in the clouds
+    // (`isInClouds`) or in rain or snow (`Level.precipitationAt`).
     if m.alive() && m.death_time == 0 && m.health < m.attrs.max_health {
         let (x, y, z) = (
             m.position.x.floor() as i32,
             m.position.y.floor() as i32,
             m.position.z.floor() as i32,
         );
-        let wet = w.precipitation_at(x, y, z).is_some();
+        let wet = w.in_clouds(m.position.y, f64::from(m.height()))
+            || w.precipitation_at(x, y, z).is_some();
         let interval = if wet { 20 } else { 600 };
         if m.age.is_multiple_of(interval) {
-            m.health = (m.health + 1.0).min(m.attrs.max_health);
+            m.heal(1.0);
         }
     }
     still_tick(m, w);
@@ -666,5 +670,240 @@ mod tests {
     #[test]
     fn travel_speed_is_five_thirds_of_the_flying_speed() {
         assert!((f64::from(AIR_SPEED) - FLYING_SPEED * 5.0 / 3.0).abs() < 1e-7);
+    }
+
+    /// `HappyGhast.ageBoundaryReached` runs the setup at the age crossing, not
+    /// at the next tick: `DriedGhastBlock.spawnGhastling` makes its ghastling a
+    /// baby before `addFreshEntity`, and `AgeableMob.setAge` calls
+    /// `ageBoundaryReached` there. Without it the hatched ghastling joins the
+    /// level with the adult's three goals, its ground navigation and its brain
+    /// stopped, and only its first `aiStep` (`ensure_setup`) fixes that.
+    #[test]
+    fn a_hatched_ghastling_is_set_up_as_one_at_the_age_crossing() {
+        use crate::mobs::Species;
+        let mut t = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        t.species = Species::HappyGhast;
+        let mut m = Mob::new(
+            1,
+            std::sync::Arc::new(t),
+            horizon_core::geometry::Vec3::ZERO,
+            0.0,
+        );
+        // `Mob::new` registers the adult's goals (HappyGhastFloat, its tempt
+        // goal and FloatAround) for the age-zero ghast it makes.
+        assert_eq!(m.extra.scratch[0], 2, "an adult's setup at construction");
+        assert!(m.ai.goals.has("HappyGhastFloatGoal"));
+
+        crate::mobs::finalize::set_age(&mut m, -24000);
+
+        assert!(m.is_baby());
+        assert_eq!(m.extra.scratch[0], 1, "babyGhastSetup ran");
+        assert!(
+            !m.ai.goals.has("HappyGhastFloatGoal")
+                && !m.ai.goals.has("RandomFloatAroundGoal")
+                && !m.ai.goals.has("ForNonPathfinders"),
+            "a ghastling has no goals: its brain drives it"
+        );
+        assert_eq!(m.ai.nav.kind, crate::mobs::nav::NavKind::Flying);
+        assert!(m.ai.nav.can_float);
+    }
+}
+
+#[cfg(test)]
+mod still_float_tests {
+    use super::*;
+    use crate::mobs::{Species, world::with_test_world};
+
+    /// `HappyGhastFloatGoal` inherits `Goal.canContinueToUse` (`canUse`), so
+    /// the still-timeout guard is re-checked on a running float goal too: a
+    /// ghast a player stands on stops floating instead of hopping in water.
+    #[test]
+    fn a_happy_ghast_on_a_still_timeout_stops_floating() {
+        let mut t = (*crate::mobs::sensor_scan_tests::kind()).clone();
+        t.species = Species::HappyGhast;
+        let mut m = Mob::new(
+            1,
+            std::sync::Arc::new(t),
+            horizon_core::geometry::Vec3::ZERO,
+            0.0,
+        );
+        m.fluids.water = 1.0;
+        let mut stopped = None;
+        let ran = with_test_world(&[], |w, _| {
+            let mut lr = horizon_core::random::LegacyRandom::new(0);
+            let mut events = Vec::new();
+            let mut cx = Cx {
+                w,
+                lr: &mut lr,
+                events: &mut events,
+            };
+            let mut goals = std::mem::take(&mut m.ai.goals);
+            goals.tick(&mut m, &mut cx);
+            assert!(
+                goals.is_running("HappyGhastFloatGoal"),
+                "an unburdened happy ghast in deep water floats"
+            );
+            // `isOnStillTimeout`: an adult with serverStillTimeout > 0.
+            m.extra.counter = 1;
+            goals.tick(&mut m, &mut cx);
+            stopped = Some(!goals.is_running("HappyGhastFloatGoal"));
+            m.ai.goals = goals;
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(
+            stopped,
+            Some(true),
+            "a happy ghast on a still timeout must stop floating"
+        );
+    }
+}
+
+#[cfg(test)]
+mod cloud_heal_tests {
+    use super::*;
+    use crate::mobs::world::{with_built_test_world, with_test_world};
+    use horizon_world::dimension_type::DimensionFacts;
+
+    /// `HappyGhast.continuousHeal`'s subject: the data's adult happy ghast (a
+    /// four-block box, 20 health) hurt down to 4, standing at `y`.
+    fn hurt_ghast(types: &crate::mobs::MobTypes, y: f64) -> Mob {
+        let kind = std::sync::Arc::new(types.types["minecraft:happy_ghast"].clone());
+        let mut m = Mob::new(1, kind, Vec3::new(0.5, y, 0.5), 0.0);
+        m.health = 4.0;
+        m
+    }
+
+    /// The health after one `aiStep` on tick `tick`.
+    fn health_after(m: &mut Mob, w: &MobWorld, tick: u32) -> f32 {
+        m.age = tick;
+        ai_step(m, w);
+        m.health
+    }
+
+    /// The overworld with its clouds at 120, their colour as opaque as `alpha`
+    /// makes it (0 is a dimension without clouds).
+    fn cloudy(alpha: f32) -> &'static DimensionFacts {
+        let mut d = DimensionFacts::overworld().clone();
+        d.cloud_height = 120.0;
+        d.cloud_color_alpha = alpha;
+        Box::leak(Box::new(d))
+    }
+
+    /// `Entity.isInClouds` is half of `isFastHealing`: a hurt ghast whose box
+    /// reaches the cloud band heals on tick 20, one just below it on tick 600.
+    #[test]
+    fn a_happy_ghast_in_the_clouds_heals_every_second() {
+        let dim = cloudy(0.8);
+        let mut seen = None;
+        let ran = with_test_world(&[], |w, types| {
+            let mut w = MobWorld::clone(w);
+            w.dimension_type = dim;
+            let mut above = hurt_ghast(types, 120.0);
+            let mut below = hurt_ghast(types, 115.0);
+            seen = Some((
+                health_after(&mut above, &w, 20),
+                health_after(&mut below, &w, 20),
+                health_after(&mut below, &w, 600),
+            ));
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(
+            seen,
+            Some((5.0, 4.0, 5.0)),
+            "in the clouds heals on tick 20; below them only on tick 600"
+        );
+    }
+
+    /// The band runs from `visual/cloud_height` to four blocks above it, and
+    /// the box counts, not the feet: a four-block box whose top only touches
+    /// the bottom is in (`getY() + getBbHeight() < cloudBottom` is false), and
+    /// so are feet exactly at the top (`getY() <= cloudTop`), but not above it.
+    #[test]
+    fn the_cloud_band_is_the_four_blocks_over_its_bottom() {
+        let dim = cloudy(0.8);
+        let mut seen = None;
+        let ran = with_test_world(&[], |w, types| {
+            let mut w = MobWorld::clone(w);
+            w.dimension_type = dim;
+            // 116 + 4 == 120: the box top exactly at the bottom of the band.
+            let mut top_at_bottom = hurt_ghast(types, 116.0);
+            // 120 + 4: the feet exactly at the top of the band, and above it.
+            let mut feet_at_top = hurt_ghast(types, 124.0);
+            let mut feet_above = hurt_ghast(types, 124.5);
+            seen = Some((
+                health_after(&mut top_at_bottom, &w, 20),
+                health_after(&mut feet_at_top, &w, 20),
+                health_after(&mut feet_above, &w, 20),
+            ));
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(
+            seen,
+            Some((5.0, 5.0, 4.0)),
+            "a box top at 120 and feet at 124 are in the clouds, feet at 124.5 are not"
+        );
+    }
+
+    /// A dimension whose `visual/cloud_color` is transparent has no clouds to
+    /// stand in (the Nether and the End), so the slow interval stays.
+    #[test]
+    fn a_dimension_without_clouds_never_counts_as_in_them() {
+        let dim = cloudy(0.0);
+        let mut seen = None;
+        let ran = with_test_world(&[], |w, types| {
+            let mut w = MobWorld::clone(w);
+            w.dimension_type = dim;
+            let mut m = hurt_ghast(types, 120.0);
+            seen = Some((health_after(&mut m, &w, 20), health_after(&mut m, &w, 600)));
+        });
+        if !ran {
+            return;
+        }
+        assert_eq!(seen, Some((4.0, 5.0)), "no cloud colour: the slow heal");
+    }
+
+    /// The other half of `isFastHealing`: `Level.precipitationAt` at the
+    /// block position, which the cloud test must not replace.
+    #[test]
+    fn a_happy_ghast_in_the_rain_still_heals_every_second() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        let Ok(biomes) = crate::biome::Biomes::load(&root) else {
+            return;
+        };
+        let plains = biomes.id("minecraft:plains");
+        let dim = cloudy(0.0);
+        let mut seen = None;
+        let ran = with_built_test_world(
+            &[],
+            |world, _| {
+                let mut chunk = crate::chunk::Chunk::empty(0, 0);
+                let qy = (120 - chunk.min_y()) >> 2;
+                for qx in 0..4 {
+                    for qz in 0..4 {
+                        chunk.set_biome_cell(qx, qy, qz, plains);
+                    }
+                }
+                world.chunks.insert((0, 0), std::sync::Arc::new(chunk));
+            },
+            |w, types| {
+                let mut w = MobWorld::clone(w);
+                w.raining = true;
+                w.dimension_type = dim;
+                let mut m = hurt_ghast(types, 120.0);
+                seen = Some(health_after(&mut m, &w, 20));
+            },
+        );
+        if !ran {
+            return;
+        }
+        assert_eq!(seen, Some(5.0), "rain over a wet biome: the fast heal");
     }
 }

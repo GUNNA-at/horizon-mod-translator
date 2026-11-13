@@ -3,7 +3,8 @@
     {
       "name": "block_effects",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_block_effects",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "a client hook asked before the game draws a block's crumbs as it breaks or is mined (`native_block_effects`), with the sprite the game's own take (`native_block_particle_sprite`).",

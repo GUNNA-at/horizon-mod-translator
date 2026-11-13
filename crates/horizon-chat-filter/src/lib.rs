@@ -1,8 +1,8 @@
 //! The dedicated server's chat filter (docs/chat-filter.md), without the game: `server.toml`'s
 //! `[chat_filter]`, the matcher for the slur list (`data/slurs.txt`, or the owner's `words_file`), and
 //! the escalation (a refused message, then a mute, then a temporary ban), with the mutes kept in a file
-//! so that they outlive a restart. The server's hub (`horizon_client::lan`) asks it before it relays a
-//! player's text and carries out what it decides.
+//! so that they outlive a restart. The server's hub (`horizon_client::lan`) asks it, through the engine's
+//! `horizon_server_files::chat_guard` hook, before it relays a player's text, and carries out what it decides.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 
 mod normalise;
 
+use horizon_server_files::chat_guard::{self, ChatGuard, Loaded, Place};
+pub use horizon_server_files::chat_guard::{Action, Mute};
+pub use horizon_server_files::duration::{
+    DurationUnit, duration_parts, duration_text, now_millis, parse_duration,
+};
 pub use normalise::{Run, Text};
 
 /// The list built into the game, used when `words_file` is empty.
@@ -125,7 +130,11 @@ impl Filter {
                     Some(w) => (w, true),
                     None => (word, false),
                 };
-                f.allowed.push((normalise::word(word), prefix));
+                // An allow entry with no letters would allow every word (an empty prefix).
+                let runs = normalise::word(word);
+                if !runs.is_empty() {
+                    f.allowed.push((runs, prefix));
+                }
                 continue;
             }
             let (kind, word) = match line.as_bytes()[0] {
@@ -214,38 +223,59 @@ fn fits(entry: &[Run], runs: &[Run], whole: bool) -> bool {
         .all(|(e, r)| e.letter == r.letter && r.count >= e.count)
 }
 
-/// What a hit leads to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    /// The text is refused, nothing more.
-    Refused,
-    /// Refused, and the player can't chat until then (epoch milliseconds).
-    Muted { until: i64 },
-    /// Refused, and the player is banned until then.
-    Banned { until: i64 },
+/// A mute as the mutes file keeps it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct SavedMute {
+    uuid: String,
+    name: String,
+    until: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
-impl Action {
-    pub fn name(self) -> &'static str {
-        match self {
-            Action::Refused => "refused",
-            Action::Muted { .. } => "muted",
-            Action::Banned { .. } => "banned",
+impl From<SavedMute> for Mute {
+    fn from(m: SavedMute) -> Self {
+        let SavedMute {
+            uuid,
+            name,
+            until,
+            by,
+            reason,
+        } = m;
+        Mute {
+            uuid,
+            name,
+            until,
+            by,
+            reason,
         }
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Mute {
-    pub uuid: String,
-    pub name: String,
-    /// Epoch milliseconds.
-    pub until: i64,
+impl From<Mute> for SavedMute {
+    fn from(m: Mute) -> Self {
+        let Mute {
+            uuid,
+            name,
+            until,
+            by,
+            reason,
+        } = m;
+        SavedMute {
+            uuid,
+            name,
+            until,
+            by,
+            reason,
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct MutesFile {
-    mutes: Vec<Mute>,
+    mutes: Vec<SavedMute>,
 }
 
 /// One player's hits: how many, and when the last one stops counting.
@@ -275,7 +305,7 @@ impl Guard {
         {
             for m in saved.mutes {
                 if let Some(uuid) = parse_uuid(&m.uuid) {
-                    mutes.insert(uuid, m);
+                    mutes.insert(uuid, m.into());
                 }
             }
         }
@@ -312,12 +342,38 @@ impl Guard {
         )
     }
 
-    /// When the player's mute ends, if they are muted at `now`.
-    pub fn muted_until(&self, uuid: u128, now: i64) -> Option<i64> {
-        self.mutes
-            .get(&uuid)
-            .map(|m| m.until)
-            .filter(|&until| until > now)
+    /// The player's mute, if they are muted at `now`.
+    pub fn muted(&self, uuid: u128, now: i64) -> Option<&Mute> {
+        self.mutes.get(&uuid).filter(|m| m.active(now))
+    }
+
+    /// The mutes in force at `now`, by name.
+    pub fn mutes(&self, now: i64) -> Vec<&Mute> {
+        let mut mutes: Vec<&Mute> = self.mutes.values().filter(|m| m.active(now)).collect();
+        mutes.sort_by(|a, b| a.name.cmp(&b.name));
+        mutes
+    }
+
+    /// An operator's `/mute` (`until` `None`) or `/tempmute`: replaces the player's mute.
+    pub fn mute(
+        &mut self,
+        uuid: u128,
+        name: &str,
+        until: Option<i64>,
+        by: &str,
+        reason: Option<String>,
+    ) {
+        self.mutes.insert(
+            uuid,
+            Mute {
+                uuid: uuid_string(uuid),
+                name: name.to_owned(),
+                until,
+                by: Some(by.to_owned()),
+                reason,
+            },
+        );
+        self.save();
     }
 
     /// A hit by the player at `now`: the hit's number in the window, and what it leads to.
@@ -343,15 +399,24 @@ impl Guard {
             let until = now + i64::from(c.mute_minutes) * MINUTE;
             // The window starts again when the mute ends.
             s.counts_until = until + window;
-            self.mutes.insert(
-                uuid,
-                Mute {
-                    uuid: uuid_string(uuid),
-                    name: name.to_owned(),
-                    until,
-                },
-            );
-            self.save();
+            // An operator's longer mute stays.
+            if !self
+                .mutes
+                .get(&uuid)
+                .is_some_and(|m| m.until.is_none_or(|u| u >= until))
+            {
+                self.mutes.insert(
+                    uuid,
+                    Mute {
+                        uuid: uuid_string(uuid),
+                        name: name.to_owned(),
+                        until: Some(until),
+                        by: None,
+                        reason: None,
+                    },
+                );
+                self.save();
+            }
             Action::Muted { until }
         } else {
             Action::Refused
@@ -377,8 +442,8 @@ impl Guard {
             return;
         };
         let now = now_millis();
-        self.mutes.retain(|_, m| m.until > now);
-        let mut mutes: Vec<Mute> = self.mutes.values().cloned().collect();
+        self.mutes.retain(|_, m| m.active(now));
+        let mut mutes: Vec<SavedMute> = self.mutes.values().cloned().map(Into::into).collect();
         mutes.sort_by(|a, b| a.name.cmp(&b.name));
         if let Ok(text) = serde_json::to_string_pretty(&MutesFile { mutes }) {
             let tmp = file.with_extension("json.tmp");
@@ -387,6 +452,94 @@ impl Guard {
             }
         }
     }
+}
+
+impl ChatGuard for Guard {
+    fn matches(&self, text: &str) -> bool {
+        self.filter.matches(text)
+    }
+
+    fn muted(&self, uuid: u128, now: i64) -> Option<&Mute> {
+        Guard::muted(self, uuid, now)
+    }
+
+    fn mutes(&self, now: i64) -> Vec<&Mute> {
+        Guard::mutes(self, now)
+    }
+
+    fn mute(
+        &mut self,
+        uuid: u128,
+        name: &str,
+        until: Option<i64>,
+        by: &str,
+        reason: Option<String>,
+    ) {
+        Guard::mute(self, uuid, name, until, by, reason);
+    }
+
+    fn strike(&mut self, uuid: u128, name: &str, now: i64) -> (u32, Action) {
+        Guard::strike(self, uuid, name, now)
+    }
+
+    fn unmute(&mut self, name: &str) -> Option<String> {
+        Guard::unmute(self, name)
+    }
+
+    fn log(
+        &mut self,
+        now: i64,
+        name: &str,
+        uuid: u128,
+        place: Place,
+        count: u32,
+        action: Action,
+        text: &str,
+    ) -> Result<(), String> {
+        let path = &self.config.log;
+        if path.is_empty() {
+            return Ok(());
+        }
+        let line = log_line(now, name, uuid, place.name(), count, action, text);
+        append_log(Path::new(path), &line).map_err(|e| format!("{path}: {e}"))
+    }
+}
+
+/// `server.toml`'s `[chat_filter]` for the dedicated server ([`chat_guard::install`] it at startup): on
+/// by default, off (with an error logged) when the section is wrong. The mutes are kept in `dir`.
+pub fn load(server_toml: &str, dir: &Path) -> Loaded {
+    let mut loaded = Loaded::default();
+    let config = match Config::from_server_toml(server_toml) {
+        Ok(config) => config,
+        Err(e) => {
+            loaded.log.push((
+                "ERROR",
+                format!("server.toml: {e}; the chat filter stays off"),
+            ));
+            return loaded;
+        }
+    };
+    if !config.enabled {
+        return loaded;
+    }
+    let (guard, problem) = Guard::load(config, dir);
+    if let Some(problem) = problem {
+        loaded.log.push(("WARN", problem));
+    }
+    loaded.log.push((
+        "INFO",
+        format!(
+            "Chat filter on: {} words (server.toml [chat_filter]; enabled = false turns it off)",
+            guard.filter.len()
+        ),
+    ));
+    loaded.guard = Some(Box::new(guard));
+    loaded
+}
+
+/// Gives the dedicated server this chat filter.
+pub fn install() {
+    chat_guard::install(load);
 }
 
 /// One line of `logs/chat-filter.log`, without its newline.
@@ -422,12 +575,6 @@ pub fn append_log(path: &Path, line: &str) -> std::io::Result<()> {
         .append(true)
         .open(path)?;
     writeln!(f, "{line}")
-}
-
-pub fn now_millis() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for epoch milliseconds.

@@ -7,6 +7,7 @@ use horizon_client::{
     advancements as adv,
     containers::Crafter,
     hud::{HudBatch, rgba},
+    menu::{Maps as _, Menu},
 };
 use horizon_protocol::packets::play::{self, Serverbound as S};
 use serde_json::Value;
@@ -67,7 +68,7 @@ impl Game<'_> {
             // CrafterBlock.neighborChanged sets the flag with the state; a
             // loaded crafter keeps its saved flag until then.
             if c.state_triggered.is_some_and(|t| t != triggered) {
-                c.triggered = triggered;
+                c.triggered = i32::from(triggered);
             }
             c.state_triggered = Some(triggered);
             let remaining = c.crafting_ticks - 1;
@@ -92,14 +93,14 @@ impl Game<'_> {
             return Ok(());
         };
         let grid: Vec<Option<ItemStack>> = crafter.items.to_vec();
-        // RecipeCache.get: the first crafting recipe that matches, assembled.
+        // Query active world recipes with this level's saved-map context.
+        let maps = self.level_maps(grid.iter().flatten());
         let found = self
-            .res
             .recipes()
-            .find(&grid, 3)
+            .find_with(&grid, 3, &|id| maps.state(id).map(|(_, scale)| scale))
             .map(|(name, result)| (name.to_owned(), result))
             .filter(|(_, result)| result.count > 0);
-        let Some((recipe, result)) = found else {
+        let Some((recipe, mut result)) = found else {
             self.dispenser_event(1050, key, 0);
             return Ok(());
         };
@@ -120,6 +121,10 @@ impl Game<'_> {
             true,
             horizon_world::level::flags::UPDATE_CLIENTS,
         );
+        // ItemStack.onCraftedBySystem invokes MapItem.onCraftedPostProcess
+        // before dispensing, registering the derived map under its new id.
+        Menu::map_crafted(Some(&maps), &mut result);
+        self.register_made_maps(maps);
         // The remainders come from the grid as it was before anything moved.
         let remainders = self.recipes().remainders(&recipe, &grid, 3);
         self.crafter_eject(key, facing, result, &recipe);
@@ -137,6 +142,7 @@ impl Game<'_> {
             }
         }
         self.container_changed(key);
+        self.native_crafter_craft([key.0, key.1, key.2], &recipe);
         Ok(())
     }
     /// `CrafterBlock.dispenseItem`: into the container in front, else out as an item.
@@ -179,14 +185,21 @@ impl Game<'_> {
             return;
         }
         self.spawn_dispensed(pos, facing, rest, 6);
-        // CrafterRecipeCraftedTrigger for players within the 17-block box.
-        let near = self.eye_position().is_some_and(|e| {
+        // CrafterRecipeCraftedTrigger: every player whose box meets the 17-block
+        // box around the crafter's centre (8.5 from the centre to a face: the
+        // player's own width and height reach into it, not its eye point).
+        // `AABB.intersects` is strict: a box that only touches a face is out.
+        let near = self.player.as_ref().is_some_and(|p| {
             let c = center(pos);
-            (0..3).all(|i| (e[i] - c[i]).abs() <= 8.5 + 1.0)
+            let b = p.bounds();
+            let (lo, hi) = (b.min_position(), b.max_position());
+            (lo.x < c[0] + 8.5 && hi.x > c[0] - 8.5)
+                && (lo.y < c[1] + 8.5 && hi.y > c[1] - 8.5)
+                && (lo.z < c[2] + 8.5 && hi.z > c[2] - 8.5)
         });
         if near {
-            let id = format!("minecraft:{recipe}");
-            let me = self.player_entity();
+            let id = horizon_client::crafting::qualified(recipe);
+            let me = self.player_entity_for("minecraft:crafter_recipe_crafted");
             self.trigger("minecraft:crafter_recipe_crafted", move |c, w| {
                 let ctx = adv::Entities {
                     this: Some(&me),
@@ -232,10 +245,8 @@ impl Game<'_> {
         let Some(c) = self.container.and_then(|k| self.crafter_at(k)) else {
             return;
         };
-        let powered = self
-            .container
-            .map(|k| self.world.block(k.0, k.1, k.2))
-            .is_some_and(|state| self.containers().prop(state, "triggered") == Some("true"));
+        // CrafterScreen draws the arrow from `menu.isPowered()`: data slot 9, the int, is 1.
+        let powered = c.is_triggered();
         let draws =
             horizon_client::screen_layout::crafter(&horizon_client::screen_layout::CrafterView {
                 width: 176,
@@ -370,6 +381,40 @@ mod tests {
         assert!(!c.disabled[0]);
         c.set_slot_state(4, true);
         assert_eq!(c.redstone_signal(), 1);
+    }
+    /// `CrafterBlockEntity.setSlotState`: a slot toggled in the menu lands on
+    /// the block entity itself, whose `setChanged` marks the chunk.
+    #[test]
+    #[ignore = "needs prepared resources in HORIZON_TEST_RESOURCES"]
+    fn a_slot_toggled_in_the_menu_lands_on_the_crafter() {
+        use crate::game::native_machines::tests::server_game;
+        let mut game = server_game();
+        let key = (2, 4, 3);
+        let state = game
+            .pack
+            .assets
+            .registry
+            .default_state("minecraft:crafter")
+            .unwrap();
+        game.world.set(key.0, key.1, key.2, state).unwrap();
+        let mut crafter = Crafter::default();
+        crafter.set_slot_state(3, false);
+        game.world
+            .block_entities
+            .put(key, BlockEntity::Crafter(crafter));
+        game.container = Some(key);
+        game.world.modified.clear();
+
+        game.crafter_slot_clicked(303, 0, horizon_client::menu::Input::Pickup);
+
+        let Some(BlockEntity::Crafter(c)) = game.world.block_entities.get(&key) else {
+            panic!("no crafter");
+        };
+        assert!(!c.disabled[3], "the click enabled the slot");
+        assert!(
+            game.world.modified.contains(&(0, 0)),
+            "the toggled slot left the chunk unmarked"
+        );
     }
     #[test]
     fn hoppers_fill_the_smaller_stacks_first() {

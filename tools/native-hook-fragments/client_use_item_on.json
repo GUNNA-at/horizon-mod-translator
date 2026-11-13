@@ -5,7 +5,8 @@
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_use_item_on",
       "neoforge": "PlayerInteractEvent.RightClickBlock",
       "side": "client",
-      "cancellable": true
+      "cancellable": true,
+      "mod_api": false
     }
   ],
   "rust_summary": "the client's use of a hand on a block, before its prediction (`native_client_use_item_on`).",

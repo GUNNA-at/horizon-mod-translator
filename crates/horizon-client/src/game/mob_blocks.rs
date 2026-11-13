@@ -8,6 +8,16 @@ use horizon_client::{
     mobs::{Mob, Species, render},
 };
 
+// `FishingRodCast`: the main hand takes precedence when both hold rods.
+fn fishing_cast_item(
+    player_id: u32,
+    hook_owners: impl Iterator<Item = u32>,
+    main_hand_rod: bool,
+    off_hand: bool,
+) -> bool {
+    hook_owners.into_iter().any(|owner| owner == player_id) && main_hand_rod != off_hand
+}
+
 /// `CarriedBlockLayer.submit`: block models use coordinates in [0, 1].
 fn carried_block_matrix(base: glam::Mat4) -> glam::Mat4 {
     base * glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.6875, -0.75))
@@ -18,21 +28,17 @@ fn carried_block_matrix(base: glam::Mat4) -> glam::Mat4 {
         * glam::Mat4::from_rotation_y(90.0f32.to_radians())
 }
 
-/// Drops the quads of `out[first..]` whose face normal points away from the eye, which
-/// is the origin of camera-relative vertices. Each quad is four vertices carrying its
-/// face normal in `Vertex::normal`, as `block_model_vertices` writes for diffuse faces.
+/// Drops the quads of `out[first..]` that face away from the eye, which is the origin of
+/// camera-relative vertices, as a pipeline that culls back faces does. A quad's front is
+/// the side its winding faces, `(v1 - v0) x (v2 - v0)` (`FaceBakery.calculateFacing`), not
+/// the baked `facing` in `Vertex::normal`: that is the nearest axis, 45 degrees off for a
+/// cross model's planes, and would keep the wrong one of a coplanar pair from some angles.
 fn cull_back_quads(out: &mut Vec<Vertex>, first: usize) {
     let mut kept = first;
     for quad in (first..out.len()).step_by(4) {
-        let vertices = &out[quad..quad + 4];
-        let n = vertices[0].normal;
-        let normal = glam::Vec3::new(f32::from(n[0]), f32::from(n[1]), f32::from(n[2]));
-        let centre = vertices.iter().fold(glam::Vec3::ZERO, |sum, v| {
-            sum + glam::Vec3::from_array(v.pos)
-        }) * 0.25;
-        // The eye is at the origin: the face is seen from its front when the eye is on the
-        // side its normal points to, that is when `normal . (eye - centre) > 0`.
-        if normal.dot(centre) < 0.0 {
+        let [a, b, c] = [0, 1, 2].map(|k| glam::Vec3::from_array(out[quad + k].pos));
+        // The eye is at the origin: the front is seen when `front . (eye - a) > 0`.
+        if (b - a).cross(c - a).dot(a) < 0.0 {
             out.copy_within(quad..quad + 4, kept);
             kept += 4;
         }
@@ -74,42 +80,6 @@ fn antenna_block_matrix(head: glam::Mat4, flowerbed_shift: bool) -> glam::Mat4 {
 pub(super) const APPARITION_TICKS: i32 = 30;
 
 impl Game<'_> {
-    /// `CustomHeadLayer` for a pumpkin worn by a LAN guest drawn on the
-    /// in-frame host, whose model has no worn stacks for `head_item_geometry`.
-    pub(super) fn player_pumpkin_geometry(
-        &self,
-        mob: &Mob,
-        stack: Option<&ItemStack>,
-        camera: glam::DVec3,
-        alpha: f64,
-        light: u32,
-        out: &mut Vec<Vertex>,
-    ) {
-        let Some(stack) = stack.filter(|s| &*s.item == "minecraft:carved_pumpkin") else {
-            return;
-        };
-        let Some(head) =
-            render::part_transform(mob, alpha as f32, camera, self.res.mob_data(), "head")
-        else {
-            return;
-        };
-        let pose = head
-            * glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.25, 0.0))
-            * glam::Mat4::from_rotation_y(std::f32::consts::PI)
-            * glam::Mat4::from_scale(glam::Vec3::new(0.625, -0.625, -0.625));
-        let owner = super::item_draw::owner_at(
-            [mob.position.x, mob.position.y, mob.position.z],
-            mob.body_yaw,
-            &mob.kind.id,
-        );
-        let state = self.resolve_item(
-            stack,
-            horizon_assets::item_model::DisplayContext::Head,
-            Some(&owner),
-            mob.id as i32 + 5,
-        );
-        self.submit_item_world(&state, pose, light, out);
-    }
     /// Count the elder guardian's apparition down.
     pub(super) fn tick_apparition(&mut self) {
         self.creatures.elder_apparition = (self.creatures.elder_apparition - 1).max(0);
@@ -173,18 +143,11 @@ impl Game<'_> {
         light: u32,
         out: &mut Vec<Vertex>,
     ) {
-        use horizon_client::mobs::{Part, anim::Poses, load_model};
-        static MODELS: std::sync::OnceLock<Option<(Part, Part)>> = std::sync::OnceLock::new();
+        use horizon_client::mobs::anim::Poses;
         if !horizon_client::mobs::raider::is_captain(mob) {
             return;
         }
-        let Some((pole, flag)) = MODELS.get_or_init(|| {
-            let root = &self.options.resources;
-            Some((
-                load_model(root, "minecraft:standing_banner#main")?,
-                load_model(root, "minecraft:standing_banner#flag")?,
-            ))
-        }) else {
+        let Some((pole, flag)) = &self.entity_models.banner else {
             return;
         };
         let Some(head) =
@@ -219,9 +182,28 @@ impl Game<'_> {
                 .iter()
                 .position(|n| *n == dye)
                 .unwrap_or(0);
-            let color = render::abgr(render::DYE[index]);
+            let color = render::abgr(render::dye(index));
             render::draw(flag, m, &flag_poses, r, color, light, 0, out);
         }
+    }
+    /// `BlockModelRenderState.submit` of a block state's baked model, as every block layer of
+    /// a mob draws it (`CarriedBlockLayer`, `MushroomCowMushroomLayer`, `SnowGolemHeadLayer`,
+    /// `IronGolemFlowerLayer`, `BlockDecorationLayer`): lit, through
+    /// `Sheets.cutoutBlockItemSheet` or `translucentBlockItemSheet`, whose `ITEM_CUTOUT` and
+    /// `ITEM_TRANSLUCENT` pipelines cull back faces. Without the cull both coplanar sides of
+    /// a cross model (a flower, a mushroom) are drawn and flicker as the mob moves. `CULL_BACK`
+    /// would drop them too, but it turns off the normal lighting this model needs.
+    fn block_layer_vertices(
+        &self,
+        state: horizon_world::registry::BlockStateId,
+        seed: i64,
+        t: glam::Mat4,
+        light: u32,
+        out: &mut Vec<Vertex>,
+    ) {
+        let first = out.len();
+        self.block_model_vertices(state, seed, t, light, true, out);
+        cull_back_quads(out, first);
     }
     /// The blocks one mob holds or carries.
     pub(super) fn mob_block_geometry(
@@ -230,10 +212,11 @@ impl Game<'_> {
         camera: glam::DVec3,
         alpha: f64,
         light: u32,
+        skin: Option<&mut super::creatures::Skinned>,
         out: &mut Vec<Vertex>,
     ) {
         self.captain_banner_geometry(mob, camera, alpha, light, out);
-        self.held_item_geometry(mob, camera, alpha, light, true, out);
+        self.held_item_geometry(mob, camera, alpha, light, true, skin, out);
         self.worn_block_geometry(mob, camera, alpha, light, out);
         self.head_item_geometry(mob, camera, alpha, light, true, out);
         self.golem_flower_geometry(mob, camera, alpha, light, out);
@@ -246,13 +229,7 @@ impl Game<'_> {
             let base = render::base_transform(mob, alpha as f32, camera);
             let t = carried_block_matrix(base);
             // Preserve cross models (flowers, fungi) and state properties (facing).
-            let first = out.len();
-            self.block_model_vertices(state, 42, t, light, true, out);
-            // The carried block uses the item cutout render type, which culls back faces
-            // (RenderPipelines.ITEM_CUTOUT). Without that, both coplanar sides of a cross
-            // model are drawn and flicker. CULL_BACK would drop them too, but it turns off
-            // the normal lighting this model needs.
-            cull_back_quads(out, first);
+            self.block_layer_vertices(state, 42, t, light, out);
         }
     }
     /// `BlockDecorationLayer.submit`: the block item in a copper golem's
@@ -311,7 +288,7 @@ impl Game<'_> {
             "minecraft:wildflowers" | "minecraft:pink_petals"
         );
         let t = antenna_block_matrix(head, flowerbeds);
-        self.block_model_vertices(state, 42, t, light, true, out);
+        self.block_layer_vertices(state, 42, t, light, out);
     }
     /// `IronGolemFlowerLayer`: the poppy in the right arm while the golem
     /// offers it (`getOfferFlowerTick() > 0`), drawn with `NO_OVERLAY`.
@@ -344,7 +321,7 @@ impl Game<'_> {
             * Mat4::from_scale(Vec3::splat(0.5))
             * Mat4::from_rotation_x((-90.0f32).to_radians())
             * Mat4::from_translation(Vec3::splat(-0.5));
-        self.block_model_vertices(state, 42, t, light, true, out);
+        self.block_layer_vertices(state, 42, t, light, out);
     }
     /// `SnowGolemHeadLayer` and `MushroomCowMushroomLayer`: the carved pumpkin
     /// on a snow golem's head, and the mushrooms on an adult mooshroom's back
@@ -410,7 +387,7 @@ impl Game<'_> {
         let overlay = horizon_client::overlay::living(0.0, mob.hurt_time > 0 || mob.death_time > 0);
         for t in transforms {
             let start = out.len();
-            self.block_model_vertices(state, 0, t, light, true, out);
+            self.block_layer_vertices(state, 0, t, light, out);
             for vertex in &mut out[start..] {
                 vertex.layer = overlay;
             }
@@ -419,6 +396,7 @@ impl Game<'_> {
     /// `ItemInHandLayer`: both hands through the item model pipeline; `lit`
     /// applies the level's diffuse lighting (off for GUI previews, which
     /// light the projected quads themselves).
+    /// `skin`: the mob's GPU path draws, which a lit item joins when it can.
     pub(super) fn held_item_geometry(
         &self,
         mob: &Mob,
@@ -426,6 +404,7 @@ impl Game<'_> {
         alpha: f64,
         light: u32,
         lit: bool,
+        mut skin: Option<&mut super::creatures::Skinned>,
         out: &mut Vec<Vertex>,
     ) {
         // ItemInHandLayer submits with OverlayTexture.NO_OVERLAY: no hurt tint.
@@ -492,13 +471,17 @@ impl Game<'_> {
                 mob.body_yaw,
                 &mob.kind.id,
             );
-            // The local player's rod while its hook is out.
-            owner.fishing_cast_with_this_item = self.cast_rod().is_some()
-                && self.main_hand_rod() != off_hand
-                && self
-                    .player_model
-                    .as_ref()
-                    .is_some_and(|p| std::ptr::eq(p, mob));
+            owner.fishing_cast_with_this_item = if local_player {
+                self.cast_rod().is_some() && self.main_hand_rod() != off_hand
+            } else {
+                let active = self.remote_hooks.iter().filter(|h| h.owner_fishing);
+                fishing_cast_item(
+                    mob.id,
+                    active.map(|hook| hook.owner),
+                    mob.extra.main_hand.as_deref() == Some("minecraft:fishing_rod"),
+                    off_hand,
+                )
+            };
             owner.main_arm_left = mob.main_arm_left();
             if off_hand == mob.extra.using_off_hand && mob.extra.using_item > 0 {
                 owner.using_this_item = true;
@@ -520,7 +503,18 @@ impl Game<'_> {
             };
             // `updateForLiving`: seeded by the entity id plus the context ordinal.
             let seed = mob.id as i32 + ordinal;
-            let state = self.resolve_item(&stack, context, Some(&owner), seed);
+            let hand = if off_hand {
+                horizon_client::cit::Hand::Off
+            } else {
+                horizon_client::cit::Hand::Main
+            };
+            let state = self.resolve_item_in_hand(&stack, context, Some(&owner), seed, hand);
+            if lit
+                && let Some(skinned) = skin.as_deref_mut()
+                && self.skin_item_into(&state, t, light, skinned)
+            {
+                continue;
+            }
             if lit {
                 self.submit_item_world(&state, t, light, out);
             } else {
@@ -563,13 +557,10 @@ impl Game<'_> {
         } else {
             return;
         };
-        // Helmets are drawn by HumanoidArmorLayer, not CustomHeadLayer.
-        if self
-            .res
-            .items()
-            .get(&stack.item)
-            .and_then(|i| i.equip_asset.as_ref())
-            .is_some()
+        // Helmets are drawn by HumanoidArmorLayer, not CustomHeadLayer
+        // (LivingEntityRenderer.extractRenderState: HumanoidArmorLayer.shouldRender).
+        if horizon_client::item_sync::equippable(&stack, self.res.items())
+            .is_some_and(|e| e.asset_id.is_some() && e.slot == "head")
         {
             return;
         }
@@ -648,12 +639,13 @@ impl Game<'_> {
                 light,
                 lights: if lit {
                     Some(horizon_client::block_entity_render::diffuse_lights(
-                        self.dim == super::Dim::Nether,
+                        self.nether_lighting(),
                     ))
                 } else {
                     None
                 },
                 glint: self.glint(),
+                tier: 0,
             };
             let profile = stack
                 .extra
@@ -726,6 +718,17 @@ mod tests {
     }
 
     #[test]
+    fn remote_fishing_rod_cast_follows_owner_and_holding_hand() {
+        let owners = [7, 12];
+        assert!(fishing_cast_item(7, owners.into_iter(), true, false));
+        assert!(!fishing_cast_item(7, owners.into_iter(), true, true));
+        assert!(fishing_cast_item(12, owners.into_iter(), false, true));
+        assert!(!fishing_cast_item(12, owners.into_iter(), false, false));
+        assert!(!fishing_cast_item(8, owners.into_iter(), true, false));
+        assert!(!fishing_cast_item(7, [].into_iter(), true, false));
+    }
+
+    #[test]
     fn a_worn_head_follows_the_living_vehicle() {
         let (Some(mut wearer), Some(mut horse)) =
             (mob(1, "minecraft:zombie"), mob(2, "minecraft:horse"))
@@ -748,6 +751,53 @@ mod tests {
         // Dead wearer, living vehicle: the vehicle's.
         wearer.health = 0.0;
         assert_eq!(worn_head_animation(&wearer, Some(2), &mobs, 0.5), 3.5);
+    }
+
+    /// One plane of a cross model, turned 45 degrees about Y, as its two baked faces. Face
+    /// `a` is wound towards (1, 0, 1), face `b` the other way, but their baked `facing` is the
+    /// nearest axis: south and north. The eye (the origin) looks at the plane from a side
+    /// that is on `a`'s front yet north of the plane, or the mirror of that, so a cull by
+    /// `facing` keeps the face a culling pipeline drops.
+    #[test]
+    fn cross_planes_keep_the_face_wound_towards_the_eye() {
+        let vertex = |pos: Vec3, normal: [i8; 4]| Vertex {
+            pos: pos.to_array(),
+            uv: [0.0; 2],
+            layer: 0,
+            color: u32::MAX,
+            light: 0,
+            normal,
+            glint_uv: [0.0; 2],
+        };
+        let along = Vec3::new(1.0, 0.0, -1.0);
+        for (to_eye, a_seen) in [
+            (Vec3::new(2.0, 0.0, -1.0), true),
+            (Vec3::new(-2.0, 0.0, 1.0), false),
+        ] {
+            let corner = -to_eye - (along + Vec3::Y) * 0.5;
+            let a = [
+                corner,
+                corner + along,
+                corner + along + Vec3::Y,
+                corner + Vec3::Y,
+            ];
+            let b = [
+                corner,
+                corner + Vec3::Y,
+                corner + along + Vec3::Y,
+                corner + along,
+            ];
+            let mut out: Vec<Vertex> = a.iter().map(|p| vertex(*p, [0, 0, 127, 127])).collect();
+            out.extend(b.iter().map(|p| vertex(*p, [0, 0, -127, 127])));
+            cull_back_quads(&mut out, 0);
+            let kept: Vec<[f32; 3]> = out.iter().map(|v| v.pos).collect();
+            let expected = if a_seen { a } else { b };
+            assert_eq!(
+                kept,
+                expected.map(|p| p.to_array()),
+                "eye on the {to_eye} side"
+            );
+        }
     }
 
     #[test]

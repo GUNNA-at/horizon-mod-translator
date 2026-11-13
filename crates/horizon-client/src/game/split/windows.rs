@@ -65,9 +65,13 @@ pub(super) fn above_menu_bar(title: &str) {
     }
 }
 
-/// Player `game` into `window`; when it `moved` from another, the mouse it held there goes free
-/// (a click takes it in the new one).
-pub(super) fn into_window(game: &mut Game<'_>, window: Arc<Window>, moved: bool) {
+/// Move a player into a native window. Changing only its viewport keeps the grab;
+/// moving to another window releases it until a click there.
+pub(super) fn into_window(game: &mut Game<'_>, window: Arc<Window>) {
+    let moved = game
+        .window
+        .as_ref()
+        .is_none_or(|old| old.id() != window.id());
     if moved && game.captured {
         game.capture(false);
     }
@@ -285,7 +289,15 @@ impl<'a> Split<'a> {
             })
             .collect();
         let sizes: Vec<_> = self.surfaces.iter().map(|s| s.size).collect();
-        layout::place_ordered(&windows, &self.player_order(), &sizes, 0, 0)
+        // How 2 and 3 players share a window: P1's settings (Setup's layout squares).
+        let e = &self.host.settings.extras;
+        layout::place_ordered(
+            &windows,
+            &self.player_order(),
+            &sizes,
+            e.splitscreen_two,
+            e.splitscreen_three,
+        )
     }
 
     /// The players (indices) in the order they fill a window they share (`order`, by seat;
@@ -311,9 +323,12 @@ impl<'a> Split<'a> {
             let Some(window) = self.surfaces.get(surface).map(|s| s.window.clone()) else {
                 continue;
             };
-            let moved = before.get(i).is_none_or(|b| b.0 != surface);
+            let moved = self
+                .game(i)
+                .and_then(|g| g.window.as_ref())
+                .is_none_or(|old| old.id() != window.id());
             if let Some(game) = self.game_mut(i) {
-                into_window(game, window.clone(), moved);
+                into_window(game, window.clone());
                 game.options.split_in_main_window = surface == 0;
                 game.view_at = at;
             }
@@ -501,9 +516,9 @@ impl<'a> Split<'a> {
                 continue;
             }
             // Opened without the focus: whoever types in the game's window keeps the keyboard.
-            let attributes = Window::default_attributes()
-                .with_window_icon(horizon_client::window::icon())
-                .with_active(false);
+            let attributes = horizon_client::window::with_icon(Window::default_attributes())
+                .with_active(false)
+                .with_visible(window_shown(true, self.offscreen));
             // A monitor's window covers it, borderless. On macOS not the system's fullscreen, a
             // Space of its own that hides the other windows as it slides in.
             let placement = self.placement(*key).cloned();
@@ -555,6 +570,9 @@ impl<'a> Split<'a> {
                 .map_err(Into::into)
                 .and_then(|w| {
                     let w = Arc::new(w);
+                    // The new surface configures itself on the players' device, and that
+                    // wait breaks on a frame submitted meanwhile: drain every queue first.
+                    self.wait_queues();
                     let renderer = self.host.renderer.as_ref().ok_or("no renderer")?;
                     Ok::<_, Box<dyn std::error::Error>>((w.clone(), renderer.compositor(w)?))
                 });
@@ -598,7 +616,9 @@ impl<'a> Split<'a> {
         // The game's window only while someone plays on it.
         let main_used = (0..self.players()).any(|i| self.window_of(i) == 1);
         if self.window1_shown != main_used {
-            self.surfaces[0].window.set_visible(main_used);
+            self.surfaces[0]
+                .window
+                .set_visible(window_shown(main_used, self.offscreen));
             self.window1_shown = main_used;
         }
         for k in 0..self.surfaces.len() {
@@ -639,6 +659,18 @@ impl<'a> Split<'a> {
     }
 }
 
+/// Whether a splitscreen window is shown: one a player plays in, never in an `--offscreen` run
+/// (its first window is hidden too, `with_visible` in `resumed`).
+pub(super) fn window_shown(in_use: bool, offscreen: bool) -> bool {
+    in_use && !offscreen
+}
+
+/// Whether the compositors present the players' frames on their windows: not in an
+/// `--offscreen` run, whose frames are read from the players' offscreen textures.
+pub(super) fn presents(offscreen: bool) -> bool {
+    !offscreen
+}
+
 /// The surface whose presenting waits for the display (vsync), and whose monitor's refresh rate
 /// paces the frames: Window 1, or the next while Window 1 is hidden (a hidden window's present
 /// can block or be throttled).
@@ -659,5 +691,28 @@ mod paced_tests {
             "Window 1 hidden: the next window waits"
         );
         assert_eq!(paced_surface(false, 1), 0);
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::{presents, window_shown};
+
+    #[test]
+    fn an_offscreen_run_shows_no_splitscreen_window() {
+        // The two answers every splitscreen window path asks: shown, and presented.
+        assert!(!window_shown(true, true), "a window in use stays hidden");
+        assert!(!window_shown(false, true));
+        assert!(!presents(true), "nothing presented maps a Wayland window");
+    }
+
+    #[test]
+    fn a_windowed_run_shows_the_windows_players_use() {
+        assert!(window_shown(true, false));
+        assert!(
+            !window_shown(false, false),
+            "Window 1 hidden while nobody plays in it"
+        );
+        assert!(presents(false));
     }
 }

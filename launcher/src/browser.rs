@@ -14,13 +14,16 @@ pub mod images;
 pub mod installed;
 pub mod java;
 pub mod java_instance;
+pub mod lock;
 pub mod modrinth;
+
+pub use lock::{lock_home, try_lock_home, HomeLockGuard};
 
 use serde::{Deserialize, Serialize};
 
-/// The Minecraft version Horizon plays. A version port updates it with the other `"26.3"` sites
-/// (docs/version-ports.md).
-pub const GAME: &str = "26.3";
+/// The Minecraft version Horizon plays: the pinned version, so a port's regenerated
+/// `crates/horizon-core/src/version.rs` moves it with everything else (docs/version-ports.md).
+pub const GAME: &str = horizon_platform::version::VERSION_ID;
 
 /// What a project is, as far as Horizon is concerned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -83,6 +86,16 @@ impl SourceId {
             SourceId::Modrinth => "Modrinth",
             SourceId::CurseForge => "CurseForge",
             SourceId::Horizon => "Horizon",
+        }
+    }
+
+    /// The source a list names after the author ("from {source}") for project `id`: Modrinth and
+    /// CurseForge always, Horizon's registry only for Horizon's own projects
+    /// ([`horizon::official`]), so a contributor's project reads "by <author>" alone.
+    pub fn shown_for(self, id: &str) -> Option<&'static str> {
+        match self {
+            SourceId::Horizon if !horizon::is_official(id) => None,
+            _ => Some(self.label()),
         }
     }
 }
@@ -316,7 +329,7 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
                 Some(newest) => format!("Made for {newest}: the game may refuse it. "),
                 None => "Lists no Minecraft version. ".into(),
             };
-            Support::Partial(format!("{made_for}{DATAPACK_SUPPORT}"))
+            Support::Partial(format!("{made_for}{}", datapack_support()))
         }
         Kind::Mod => {
             if !loaders.iter().any(|l| java::LOADERS.contains(&l.as_str())) {
@@ -337,9 +350,11 @@ pub fn support(kind: Kind, game_versions: &[String], loaders: &[String]) -> Supp
 
 /// What a data pack does in Horizon today, said before install; the install says it for the
 /// pack's own files (`crate::datapacks::coverage`).
-pub const DATAPACK_SUPPORT: &str = "Horizon runs a data pack's functions, function tags, \
-     predicates and item modifiers; not yet its recipes, loot tables, advancements, other tags \
-     or worldgen.";
+pub fn datapack_support() -> &'static str {
+    crate::i18n::tr(
+        "Horizon runs a data pack's functions, function tags, predicates, item modifiers, recipes, loot tables, advancements, villager trades, damage types, most tags and most worldgen (biomes, features, structures, dimensions). Other files, such as world presets, are not read yet.",
+    )
+}
 
 /// A Minecraft version whose mods port-pack carries over: 1.21 and later (the data folders
 /// took their current names in 1.21).
@@ -425,7 +440,26 @@ pub fn safe_name(name: &str) -> Option<&str> {
         && name.chars().all(|c| {
             !c.is_control() && !matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         });
-    ok.then_some(name)
+    // Windows opens a device for CON, NUL.jar, COM1.zip and so on, whatever follows the first dot.
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim_end()
+        .to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ["COM", "LPT"].iter().any(|port| {
+            stem.strip_prefix(port).is_some_and(|n| {
+                let mut digits = n.chars();
+                matches!(digits.next(), Some('0'..='9' | '¹' | '²' | '³'))
+                    && digits.next().is_none()
+            })
+        });
+    // Bidirectional and invisible marks that make a shown name read as another.
+    let disguised = name.chars().any(|c| {
+        matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+    });
+    (ok && !device && !disguised).then_some(name)
 }
 
 #[cfg(test)]

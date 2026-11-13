@@ -224,7 +224,7 @@ fn prism_native_jars_are_found_through_the_linked_folder() {
     );
     let official = Path::new("com/mojang/jtracy/1.14.38/jtracy-1.14.38-natives-windows.jar");
     assert!(!linked.join("libraries").join(official).exists());
-    let found = horizon_prepare::artifacts::launcher_library(
+    let found = horizon_platform::prepare::artifacts::launcher_library(
         &linked,
         "com.mojang:jtracy:1.14.38:natives-windows",
         official,
@@ -287,6 +287,30 @@ fn the_modrinth_app_atlauncher_and_gdlauncher_are_found() {
         );
         assert_linked(&linked, &dir.join(base), jar);
     }
+}
+
+#[test]
+fn dawn_client_is_found_in_cache() {
+    let s = Scratch::new("dawn");
+    let dir = s.launcher(".dawn", "cache/minecraft", "versions/26.3/26.3.jar");
+    s.write(".dawn/cache/minecraft/versions/26.3/26.3.json", MANIFEST);
+    let linked = s.0.join("linked");
+    let mojang = Mojang::new(b"");
+    let got = resolve_with(&dir, &[], &linked, &mojang).unwrap();
+    assert_eq!(got, dir.join("cache/minecraft"));
+    assert!(mojang.urls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_dawn_sync_folder_finds_the_launcher_root() {
+    let s = Scratch::new("dawn-tree");
+    let dir = s.launcher(".dawn", "cache/minecraft", "versions/26.3/26.3.jar");
+    s.write(".dawn/cache/minecraft/versions/26.3/26.3.json", MANIFEST);
+    let chosen = dir.join("auto-sync/groups/default");
+    fs::create_dir_all(&chosen).unwrap();
+    let linked = s.0.join("linked");
+    let got = resolve_with(&chosen, &[], &linked, &Mojang::new(b"")).unwrap();
+    assert_eq!(got, dir.join("cache/minecraft"));
 }
 
 /// A Modrinth App that only ever played a Fabric profile of 26.3 keeps the vanilla client jar
@@ -389,7 +413,9 @@ fn the_not_found_message_names_the_launcher_that_was_chosen() {
     fs::create_dir_all(&other).unwrap();
     let error = resolve_with(&other, &[], &s.0.join("linked"), &Mojang::new(MANIFEST)).unwrap_err();
     assert!(
-        error.contains("Prism Launcher, MultiMC, the Modrinth App, ATLauncher or GDLauncher"),
+        error.contains(
+            "Prism Launcher, MultiMC, the Modrinth App, ATLauncher, GDLauncher or Dawn Client"
+        ),
         "{error}"
     );
 }
@@ -480,9 +506,35 @@ fn nothing_found_lists_every_folder_and_what_it_lacks() {
         empty.display()
     );
     assert!(error.starts_with(&expected), "{error}");
-    assert!(error.contains("Prism Launcher, MultiMC, the Modrinth App, ATLauncher or GDLauncher"));
+    assert!(error.contains(
+        "Prism Launcher, MultiMC, the Modrinth App, ATLauncher, GDLauncher or Dawn Client"
+    ));
     // A launcher that isn't installed isn't listed.
     assert!(!error.contains("atlauncher"));
+    assert!(mojang.urls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_version_file_without_its_game_says_to_play_it_once() {
+    // What the official launcher leaves for a version picked but never played (#14286).
+    let s = Scratch::new("listed");
+    let chosen = s.0.join(".minecraft");
+    s.write(".minecraft/versions/26.3/26.3.json", MANIFEST);
+    let modrinth = s.0.join("ModrinthApp");
+    s.write("ModrinthApp/meta/versions/26.3/26.3.json", MANIFEST);
+    let known = [("Modrinth App", modrinth.clone())];
+    let mojang = Mojang::new(MANIFEST);
+    let error = resolve_with(&chosen, &known, &s.0.join("linked"), &mojang).unwrap_err();
+    let expected = format!(
+        "Minecraft 26.3 was not found. Horizon looked in:\n  \
+         {} (versions/26.3/26.3.json is here but not the game itself: play 26.3 once in that \
+         launcher to download it)\n  \
+         {} (Modrinth App: meta/versions/26.3/26.3.json is here but not the game itself: play \
+         26.3 once in that launcher to download it)\nTo fix it:\n",
+        chosen.display(),
+        modrinth.display()
+    );
+    assert!(error.starts_with(&expected), "{error}");
     assert!(mojang.urls.lock().unwrap().is_empty());
 }
 
@@ -521,6 +573,7 @@ fn each_system_has_its_launcher_folders() {
         "ATLauncher: /home/r/.local/share/atlauncher",
         "GDLauncher: /home/r/.local/share/gdlauncher_carbon",
         "GDLauncher: /home/r/.config/gdlauncher_next",
+        "Dawn Client: /home/r/.dawn",
     ] {
         assert!(got.iter().any(|g| g == expected), "{expected} in {got:#?}");
     }
@@ -538,6 +591,7 @@ fn each_system_has_its_launcher_folders() {
     assert!(
         got.contains(&"Prism Launcher: /Users/r/Library/Application Support/PrismLauncher".into())
     );
+    assert!(got.contains(&"Dawn Client: /Users/r/Library/Application Support/.dawn".into()));
     let windows = Folders {
         home: "C:/Users/r".into(),
         data: "C:/Users/r/AppData/Roaming".into(),
@@ -549,4 +603,5 @@ fn each_system_has_its_launcher_folders() {
         "the official launcher: C:/Users/r/AppData/Roaming/.minecraft"
     );
     assert!(got.contains(&"ATLauncher: C:/Users/r/AppData/Roaming/ATLauncher".into()));
+    assert!(got.contains(&"Dawn Client: C:/Users/r/AppData/Roaming/.dawn".into()));
 }

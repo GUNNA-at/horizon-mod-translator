@@ -5,14 +5,16 @@
       "target": "horizon_client::game::native_hooks::Game<'_>::native_gui_pre",
       "neoforge": "RenderGuiEvent.Pre",
       "side": "client",
-      "cancellable": true
+      "cancellable": true,
+      "mod_api": false
     },
     {
       "name": "gui_post",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_gui_post",
       "neoforge": "RenderGuiEvent.Post",
       "side": "client",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "the HUD as a whole, before and after its layers (`native_gui_pre`, `native_gui_post`).",

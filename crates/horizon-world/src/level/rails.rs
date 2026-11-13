@@ -327,7 +327,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         let state = self.rail_update_dir(pos, state, true);
         if !self.b.data(state).is(Class::Rail) {
             let block = self.b.block(state);
-            self.neighbor_changed_full(state, pos, block, pos, moved);
+            self.from(pos)
+                .neighbor_changed_full(state, pos, block, moved);
         }
         state
     }
@@ -539,7 +540,8 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             let rail = self.rail_new(pos, next);
             for connection in rail.connections {
                 let at = self.state(connection);
-                self.neighbor_changed_full(at, connection, b.block(at), pos, false);
+                self.from(pos)
+                    .neighbor_changed_full(at, connection, b.block(at), false);
             }
             self.update_neighbors_at(pos, block);
             self.update_neighbors_at(below(pos), block);
@@ -578,10 +580,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 f64::from(pos.z) + 1.0,
             ),
         );
-        let pressed = self
-            .level
-            .count_entities(area, super::EntityQuery::Everything)
-            > 0;
+        let pressed = self.level.count_entities_at(
+            pos,
+            b.table.name(state),
+            area,
+            super::EntityQuery::Everything,
+        ) > 0;
         let block = b.block(state);
         if pressed != was {
             let next = b.table.set_bool(state, b.props.powered, pressed);
@@ -596,8 +600,9 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
     }
     fn tripwire_hook_notify(&mut self, block: BlockId, pos: BlockPos, direction: Direction) {
         let front = direction.opposite();
-        self.update_neighbors_at(pos, block);
-        self.update_neighbors_at(rel(pos, front), block);
+        let orientation = self.initial_orientation(Some(front), Some(Direction::Up));
+        self.update_neighbors_at_oriented(pos, block, orientation);
+        self.update_neighbors_at_oriented(rel(pos, front), block, orientation);
     }
     fn tripwire_emit(
         &mut self,

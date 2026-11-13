@@ -16,11 +16,32 @@ use horizon_protocol::packets::play::{AttributeModifier, AttributeSnapshot};
 use std::sync::Arc;
 
 /// `EquipmentSlotGroup.test`: whether a modifier's slot group covers a slot.
+/// For one snapshot of the mobs, each type's movement speed: its synced
+/// instance (`synced_attribute`) and the type's default base, both looked up
+/// by name. The pointers are only compared while the snapshot holds the types.
+#[derive(Default)]
+pub(super) struct SpeedByType(
+    horizon_client::fast_hash::FxHashMap<
+        *const horizon_client::mobs::MobType,
+        (Option<i32>, Option<f64>),
+    >,
+);
+
 fn slot_in_group(group: &str, slot: &str) -> bool {
     group == slot
         || group == "any"
         || (group == "hand" && matches!(slot, "mainhand" | "offhand"))
         || (group == "armor" && matches!(slot, "feet" | "legs" | "chest" | "head" | "body"))
+}
+
+fn generic_attributes_into(
+    map: &horizon_world::attributes::entity::EntityAttributes,
+    out: &mut Vec<AttributeSnapshot>,
+) {
+    for s in generic_syncable(map) {
+        let (attribute, base) = (s.attribute, s.base);
+        *instance(out, attribute, base) = s;
+    }
 }
 
 impl Game<'_> {
@@ -55,10 +76,59 @@ impl Game<'_> {
         finalize::value_with(m, Attr::KnockbackResistance, &extra)
     }
 
+    /// Each mob's `gear_knockback_resistance`, for the pushes that read the
+    /// mob (`Mob::knockback`, Punch, the mace's smash): worked out for the
+    /// mobs that wear or hold something, since the mob does not know items.
+    pub(super) fn refresh_gear_knockback_resistance(&mut self) {
+        let values: Vec<Option<f64>> = self
+            .mobs
+            .iter()
+            .map(|m| {
+                let e = &m.extra;
+                [
+                    &e.main_hand,
+                    &e.off_hand,
+                    &e.feet,
+                    &e.legs,
+                    &e.chest,
+                    &e.head,
+                ]
+                .iter()
+                .any(|s| s.is_some())
+                .then(|| self.mob_knockback_resistance(m))
+            })
+            .collect();
+        for (m, value) in self.mobs.iter_mut().zip(values) {
+            m.gear_knockback_resistance = value;
+        }
+    }
+
+    /// What a mob's synced attribute instances are read from (`mob_attributes`).
+    pub(super) fn attr_sources(&self) -> AttrSources<'_> {
+        AttrSources {
+            catalog: &self.motion.attributes,
+            items: self.items(),
+            commands: &self.cmds.attributes,
+        }
+    }
+}
+
+/// What the synced attribute instances are read from: the attribute catalog, the item table and
+/// what `/attribute` changed. Plain tables, so the tick's helper threads can read them
+/// (`Game::lan_entities`).
+#[derive(Clone, Copy)]
+pub(super) struct AttrSources<'a> {
+    catalog: &'a horizon_world::attributes::entity::Catalog,
+    items: &'a horizon_client::items::Items,
+    commands:
+        &'a std::collections::HashMap<Target, horizon_world::attributes::entity::EntityAttributes>,
+}
+
+impl AttrSources<'_> {
     /// The registry id of a client-syncable attribute the entity type has
     /// (`AttributeMap.getInstance` is null for the others), by name.
     fn synced_attribute(&self, entity: &str, name: &str) -> Option<i32> {
-        let catalog = &self.motion.attributes;
+        let catalog = self.catalog;
         let id = catalog.id(name)?;
         (catalog.attribute(id).syncable && catalog.default_base(entity, id).is_some())
             .then(|| id.registry_id())
@@ -66,7 +136,7 @@ impl Game<'_> {
 
     /// The type's base value of an attribute, as the instance starts.
     fn attribute_default(&self, entity: &str, name: &str) -> f64 {
-        let catalog = &self.motion.attributes;
+        let catalog = self.catalog;
         catalog
             .id(name)
             .and_then(|id| catalog.default_base(entity, id))
@@ -84,7 +154,7 @@ impl Game<'_> {
         out: &mut Vec<AttributeSnapshot>,
     ) {
         for (slot, item) in slots {
-            let Some(info) = item.and_then(|i| self.items().get(i)) else {
+            let Some(info) = item.and_then(|i| self.items.get(i)) else {
                 continue;
             };
             for (attribute, id, amount, op, group) in &info.modifiers {
@@ -114,13 +184,28 @@ impl Game<'_> {
     /// `LivingEntity.removeFrost`), what finalizeSpawn set, the baby speed
     /// modifier, its effects' modifiers, its equipment's, and what
     /// `/attribute` changed.
-    pub(super) fn mob_attributes(&self, m: &Mob, out: &mut Vec<AttributeSnapshot>) {
+    pub(super) fn mob_attributes(
+        &self,
+        m: &Mob,
+        speeds: &mut SpeedByType,
+        out: &mut Vec<AttributeSnapshot>,
+    ) {
         let kind = m.kind.id.as_str();
         // Movement speed is synced for nearly every mob, and read up to three
-        // times below: looked up once per mob and tick.
-        let speed = self
-            .synced_attribute(kind, Attr::MovementSpeed.id())
-            .map(|a| (a, finalize::base_value(m, Attr::MovementSpeed)));
+        // times below: its instance and the type's default are looked up by
+        // name once per type and snapshot, its base once per mob.
+        let (synced, default) = *speeds.0.entry(Arc::as_ptr(&m.kind)).or_insert_with(|| {
+            (
+                self.synced_attribute(kind, Attr::MovementSpeed.id()),
+                finalize::default_value(m, Attr::MovementSpeed),
+            )
+        });
+        let speed = synced.map(|a| {
+            (
+                a,
+                finalize::base_value_with(m, Attr::MovementSpeed, || default),
+            )
+        });
         if let Some((a, base)) = speed {
             instance(out, a, base);
         }
@@ -137,7 +222,7 @@ impl Game<'_> {
                         a,
                         finalize::base_value(m, x.attr),
                         AttributeModifier {
-                            id: x.id.to_owned(),
+                            id: x.id.to_string(),
                             amount: x.amount,
                             operation: match x.op {
                                 Op::AddValue => 0,
@@ -238,8 +323,21 @@ impl Game<'_> {
             out,
         );
         self.generic_attributes_of(Target::Mob(m.id), out);
+        if let Some(map) = m.extra.armor_attributes.as_deref() {
+            generic_attributes_into(map, out);
+        }
     }
 
+    /// The instances `/attribute` created in an entity's generic map
+    /// replace the ones derived from its state.
+    fn generic_attributes_of(&self, t: Target, out: &mut Vec<AttributeSnapshot>) {
+        if let Some(map) = self.commands.get(&t) {
+            generic_attributes_into(map, out);
+        }
+    }
+}
+
+impl Game<'_> {
     /// An armor stand's synced instances: movement speed (its first
     /// `aiStep`), its equipment's modifiers and what `/attribute` changed.
     pub(super) fn stand_attributes(
@@ -249,18 +347,19 @@ impl Game<'_> {
     ) -> Vec<AttributeSnapshot> {
         const KIND: &str = "minecraft:armor_stand";
         let mut out = Vec::new();
-        if let Some(a) = self.synced_attribute(KIND, "minecraft:movement_speed") {
+        let sources = self.attr_sources();
+        if let Some(a) = sources.synced_attribute(KIND, "minecraft:movement_speed") {
             instance(
                 &mut out,
                 a,
-                self.attribute_default(KIND, "minecraft:movement_speed"),
+                sources.attribute_default(KIND, "minecraft:movement_speed"),
             );
         }
         let slots = horizon_client::entities::ArmorStand::SLOTS
             .into_iter()
             .zip(equipment.iter().map(|s| s.as_ref().map(|s| &s.item)));
-        self.equipment_attributes(KIND, |_| None, slots, &mut out);
-        self.generic_attributes_of(Target::Stand(id), &mut out);
+        sources.equipment_attributes(KIND, |_| None, slots, &mut out);
+        sources.generic_attributes_of(Target::Stand(id), &mut out);
         out
     }
 
@@ -304,18 +403,6 @@ impl Game<'_> {
             if has != creative {
                 let _ = p.set_modifier(attribute, id, amount, "add_value", creative);
             }
-        }
-    }
-
-    /// The instances `/attribute` created in an entity's generic map
-    /// replace the ones derived from its state.
-    fn generic_attributes_of(&self, t: Target, out: &mut Vec<AttributeSnapshot>) {
-        let Some(map) = self.cmds.attributes.get(&t) else {
-            return;
-        };
-        for s in generic_syncable(map) {
-            let (attribute, base) = (s.attribute, s.base);
-            *instance(out, attribute, base) = s;
         }
     }
 }

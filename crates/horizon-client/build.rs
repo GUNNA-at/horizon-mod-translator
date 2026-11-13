@@ -1,30 +1,39 @@
-//! Embeds Horizon's icon (`packaging/icons/horizon.ico`) in the Windows executables, as icon
-//! resource 1: Explorer and the task bar show it, and the window takes it as its icon.
-//! The optional Segment Heap manifest is embedded in the same resource compilation.
+//! Generates the native mod API, and gives the Windows executable Horizon's icon and its stack
+//! (`packaging/windows/exe.rs`, shared with the official executable's build script).
+#[path = "../../packaging/windows/exe.rs"]
+mod windows_exe;
+
 fn main() {
-    let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let ico = format!("{dir}/../../packaging/icons/horizon.ico");
-    println!("cargo:rerun-if-changed={ico}");
-    // The game's main thread gets 8 MB of stack on Windows as on macOS and Linux (Windows gives 1
-    // MB): splitscreen builds a joining player's `Game`, ~67 KB, deep in the event loop.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        let arg = match std::env::var("CARGO_CFG_TARGET_ENV").as_deref() {
-            Ok("msvc") => "/STACK:8388608",
-            _ => "-Wl,--stack,8388608",
-        };
-        println!("cargo:rustc-link-arg-bin=horizon-client={arg}");
+    let root =
+        std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
+    let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    horizon_mod_api_gen::generate(&root, &out_dir, horizon_mod_api_gen::Target::Client)
+        .expect("generating native mod API");
+    // A workspace horizon-mixins changed holds native mods, whichever tool ran it (the launcher,
+    // or a mod's own script with no `native-mods.json` beside its game): `HORIZON_MIXIN_MODS`
+    // names them for `game::mods::built_with_native_mods`. Watched only once it exists: a
+    // bundle applied in place also edits `game/`, which `generate` watches.
+    let stage = root.join(horizon_mod_api_gen::MIXINS_STAGE);
+    if stage.is_file() {
+        println!("cargo:rerun-if-changed={}", stage.display());
     }
-    #[cfg(windows)]
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        let mut resource = winresource::WindowsResource::new();
-        resource.set_icon(&ico);
-        if std::env::var_os("CARGO_FEATURE_WINDOWS_SEGMENT_HEAP").is_some() {
-            let manifest = format!("{dir}/windows-segment-heap.manifest");
-            println!("cargo:rerun-if-changed={manifest}");
-            resource.set_manifest_file(&manifest);
-        }
-        if let Err(e) = resource.compile() {
-            panic!("embedding Windows resources: {e}");
+    let staged = horizon_mod_api_gen::staged_mods(&root);
+    if !staged.is_empty() {
+        println!("cargo:rustc-env=HORIZON_MIXIN_MODS={}", staged.join(","));
+    }
+    // Whether a native mod can run in a mob's turn (`game/creatures/mob_islands.rs`). The
+    // launcher adds trait packages to the workspace's members.
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("Cargo.toml").display()
+    );
+    for dir in ["native-api", "native-crates"] {
+        if root.join(dir).is_dir() {
+            println!("cargo:rerun-if-changed={}", root.join(dir).display());
         }
     }
+    if let Some(found) = horizon_mod_api_gen::mob_turn(&root) {
+        println!("cargo:rustc-env=HORIZON_MOB_TURN={found}");
+    }
+    windows_exe::resources("horizon-client");
 }

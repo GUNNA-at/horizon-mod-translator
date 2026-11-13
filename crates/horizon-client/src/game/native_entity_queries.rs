@@ -11,9 +11,9 @@ impl Game<'_> {
     /// minecarts and the rest. Players aside (`player_entities` tells them). An entity's box is
     /// its type's size about its feet (`EntityType.getDimensions().makeBoundingBox`), a baby's
     /// as an adult's. Empty on a client or for another dimension.
-    /// API @API:native_entities_in@.
+    /// API @API:native_entity_ids_in@.
     #[allow(dead_code)]
-    pub(crate) fn native_entities_in(&self, dimension: &str, min: [f64; 3], max: [f64; 3]) -> Vec<i32> {
+    pub(crate) fn native_entity_ids_in(&self, dimension: &str, min: [f64; 3], max: [f64; 3]) -> Vec<i32> {
         if (self.serving.is_none() && self.options.dedicated.is_none()) || dimension != self.dim.id() {
             return Vec::new();
         }

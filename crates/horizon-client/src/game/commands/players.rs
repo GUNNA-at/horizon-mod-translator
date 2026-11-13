@@ -61,6 +61,12 @@ impl Game<'_> {
             .unwrap_or(Target::Player)
     }
 
+    /// The name of the server's own source: "Rcon" for a command an RCON client sent
+    /// (`RconConsoleSource`), "Server" otherwise (`MinecraftServer.createCommandSourceStack`).
+    pub(in crate::game) fn server_name(&self) -> Text {
+        Text::literal(if self.rcon_source { "Rcon" } else { "Server" })
+    }
+
     /// `PlayerList.getPlayerByName`: names are not case sensitive. Horizon:
     /// on a server where a mod gave players nicknames
     /// (`native_set_nickname`), a name no player has finds the player going
@@ -191,7 +197,7 @@ impl Game<'_> {
         {
             log::error!("could not open {}: {e}", dim.id());
         }
-        let Some(swap) = self.enter_guest(&mut host, conn) else {
+        let Some(swap) = self.enter_guest(&mut host, conn, back) else {
             if self.dim != back
                 && let Err(e) = self.enter_level(Some(&mut host), back)
             {

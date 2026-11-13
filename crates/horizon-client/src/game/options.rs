@@ -3,6 +3,7 @@
 use super::{Game, Screen};
 use horizon_client::{
     Result,
+    hdr_calibration::WindowState,
     hud::HudBatch,
     lang,
     options_ui::{Event, Page},
@@ -10,6 +11,9 @@ use horizon_client::{
 };
 use serde_json::{Value, json};
 use winit::{event::MouseButton, keyboard::KeyCode, window::Fullscreen};
+
+/// `CommonLinks.ACCESSIBILITY_HELP`, the Accessibility page's footer link.
+pub(super) const ACCESSIBILITY_HELP_LINK: &str = "https://aka.ms/MinecraftJavaAccessibility";
 
 pub(super) const CONTROL_HELP: &[&str] = &[
     "options-get [KEY...]           options.txt values by key, with their type, range or choices",
@@ -120,9 +124,14 @@ impl Game<'_> {
         self.keys.clear();
         self.screen = Screen::Options;
         self.options_from_title = from_title;
-        self.options_to_game = false;
+        let minecart_improvements = self.minecart_improvements();
+        let mods_live = self.mods_live_now();
+        // From the title after leaving a server, the row is back before the next world ticks.
+        self.hold_fullbright();
         let ui = &mut self.ui.options;
         ui.open_at(!from_title && self.title.is_none(), page);
+        ui.mods_live = mods_live;
+        ui.minecart_improvements = minecart_improvements;
         let root = self.options.resources.clone();
         ui.languages = lang::available(&[&root]);
         self.refresh_pack_lists();
@@ -165,20 +174,44 @@ impl Game<'_> {
         if changed {
             let infos = super::packs::pack_infos(&self.vanilla_root(), &self.server_packs.active);
             self.ui.options.update_pack_infos(infos);
+            self.ui.options.pack_configs = super::packs::pack_configs(&self.vanilla_root());
         }
     }
     pub(super) fn draw_options(&mut self, batch: &mut HudBatch) {
         self.watch_pack_folder();
+        let context = self.controller_settings_context();
         let mut ui = std::mem::take(&mut self.ui.options);
-        ui.draw(&self.settings, batch, &self.gui.atlas, self.cursor);
+        if ui.controller_open() {
+            ui.set_controller_context(context);
+        }
+        let output = self
+            .renderer
+            .as_ref()
+            .map_or(Default::default(), |r| r.output());
+        ui.draw(&self.settings, output, batch, &self.gui.atlas, self.cursor);
         self.ui.options = ui;
-        self.show_calibration(batch.height);
+        self.show_calibration((batch.width, batch.height));
+    }
+    /// Whose controller settings these are and what this game sees (`controller_ui`): the
+    /// player's badge in splitscreen with its name, and its own controller.
+    fn controller_settings_context(&self) -> horizon_client::controller_ui::Context {
+        let name = self.options.player_name();
+        let player = match &self.split_hud.badge {
+            Some(badge) if *badge != name => format!("{badge} · {name}"),
+            _ => name,
+        };
+        horizon_client::controller_ui::Context {
+            player,
+            device: self.pad.device_or_virtual(),
+            detected: detected_controller_style(self.pad.device.as_ref(), self.pad.style),
+            glyphs: self.ui.options.pad_glyphs,
+        }
     }
     /// HDR calibration's test picture to the renderer, full screen while it runs: the
-    /// window goes fullscreen for it and back after, if it wasn't already.
-    pub(super) fn show_calibration(&mut self, h: f32) {
+    /// window goes fullscreen for it and back after, as it was (maximized, say).
+    pub(super) fn show_calibration(&mut self, size: (f32, f32)) {
         let picture = (self.screen == Screen::Options)
-            .then(|| self.ui.options.calibration_picture(h))
+            .then(|| self.ui.options.calibration_picture(&self.gui.atlas, size))
             .flatten();
         if let Some(r) = self.renderer.as_mut() {
             r.set_hdr_calibration(picture.map(|(step, nits, band)| {
@@ -192,19 +225,25 @@ impl Game<'_> {
         let Some(window) = &self.window else {
             return;
         };
-        match (picture.is_some(), self.ui.options.calibration_fullscreen) {
+        match (picture.is_some(), self.ui.options.calibration_window) {
             (true, None) => {
-                let was = window.fullscreen().is_some();
-                if !was {
-                    window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+                // Before entering fullscreen, which un-maximizes a window on Windows.
+                let was = WindowState::of(window.fullscreen().is_some(), window.is_maximized());
+                if was != WindowState::Fullscreen {
+                    let borderless = horizon_client::window::borderless_fullscreen(window);
+                    horizon_client::window::enter_fullscreen(window, borderless);
                 }
-                self.ui.options.calibration_fullscreen = Some(was);
+                self.ui.options.calibration_window = Some(was);
             }
             (false, Some(was)) => {
-                if !was {
+                let (leave_fullscreen, maximize) = was.leaving();
+                if leave_fullscreen {
                     window.set_fullscreen(None);
                 }
-                self.ui.options.calibration_fullscreen = None;
+                if maximize {
+                    window.set_maximized(true);
+                }
+                self.ui.options.calibration_window = None;
             }
             _ => {}
         }
@@ -282,10 +321,17 @@ impl Game<'_> {
             .shortcut(&self.gui.atlas, shortcut, &mut self.clipboard)
     }
     pub(super) fn options_scroll(&mut self, amount: f32) -> Result<()> {
+        if self.pad_stick_scroll() {
+            let size = self.gui_size();
+            self.ui
+                .options
+                .scroll_at(&self.settings, size, self.cursor, amount);
+            return Ok(());
+        }
         let framebuffer = self.renderer.as_ref().map_or([1280, 720], |r| {
             [r.config.width as i32, r.config.height as i32]
         });
-        if self.ui.options.page() == Page::Video && self.has_control_down() {
+        if self.ui.options.video_open() && self.has_control_down() {
             // VideoSettingsScreen.mouseScrolled: Ctrl with the wheel steps the GUI scale.
             let mut ui = std::mem::take(&mut self.ui.options);
             let events = ui.video_wheel_gui_scale(&mut self.settings, framebuffer, amount);
@@ -314,6 +360,9 @@ impl Game<'_> {
                 Event::Changed => {
                     self.settings.save(&Self::options_path());
                     self.apply_settings();
+                    self.switch_mods();
+                    self.sync_native_switches();
+                    self.sync_pregen_option();
                     self.sync_agent_control();
                     self.ui.options.agent_status = self.agent_status_lines();
                 }
@@ -331,23 +380,27 @@ impl Game<'_> {
                     let text = self.agent_details();
                     self.clipboard.set(&text);
                 }
+                // The AI Agent page's repro buttons (game/repro.rs).
+                Event::ToggleRecording => self.toggle_recording_key(),
+                Event::ExportRepro => self.export_repro_key(),
+                // The Music page: the situations' tracks, and playing one now.
+                Event::ListMusicTracks => self.ui.options.music_groups = self.music_groups(),
+                Event::PlayMusicTrack(event, track) => self.play_music_track(&event, &track),
                 Event::Close if self.ui.options.resource_error.is_some() => {}
                 Event::Close => {
                     self.settings.save(&Self::options_path());
-                    let to_game = std::mem::take(&mut self.options_to_game);
-                    self.screen = if std::mem::take(&mut self.options_to_world_options) {
+                    self.screen = if let Some(screen) = self.panel.recipes_settings_return.take() {
+                        screen
+                    } else if std::mem::take(&mut self.options_to_world_options) {
                         Screen::WorldOptions
-                    } else if self.options_from_title || to_game {
+                    } else if self.options_from_title {
                         Screen::Playing
                     } else {
                         Screen::Paused
                     };
-                    if to_game {
-                        self.capture(true);
-                    }
                     self.dragging = false;
                     // Closed from calibration (horizon-ctl, a lost window): out of it.
-                    self.show_calibration(0.0);
+                    self.show_calibration((0.0, 0.0));
                 }
                 Event::Language(code) => {
                     self.load_language(&code);
@@ -356,10 +409,34 @@ impl Game<'_> {
                     self.settings.save(&Self::options_path());
                     self.reload_packs();
                 }
+                Event::PackOptions { entries, chosen } => {
+                    super::packs::save_pack_options(&entries, chosen);
+                    self.ui.options.pack_configs = super::packs::pack_configs(&self.vanilla_root());
+                    self.reload_packs();
+                }
                 Event::OpenPackFolder => {
                     let dir = super::packs::packs_dir();
                     let _ = std::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
+                }
+                Event::ImportPacks(paths) => {
+                    let vanilla = self.vanilla_root();
+                    super::packs::import_resource_packs(
+                        &mut self.ui.options,
+                        &vanilla,
+                        &self.server_packs.active,
+                        &paths,
+                    );
+                }
+                // Horizon's own Add button: the screen picked a hit, the game
+                // owns the folder it lands in.
+                Event::DownloadPack(i) => {
+                    let dir = super::packs::packs_dir();
+                    if let Some(screen) = &mut self.ui.options.pack_screen
+                        && let Some(browser) = &mut screen.browser
+                    {
+                        browser.download(i, &dir, horizon_core::VANILLA_VERSION);
+                    }
                 }
                 Event::DataPacks(ids) => {
                     let resources = self.vanilla_root();
@@ -376,7 +453,25 @@ impl Game<'_> {
                     let _ = std::fs::create_dir_all(&dir);
                     super::packs::open_folder(&dir);
                 }
+                Event::BrowseMods => {
+                    let ui = &mut self.ui.options.mod_browser;
+                    self.mods.jobs.browse(ui, Self::game_dir());
+                }
+                Event::InstallMod(id) => {
+                    let ui = &mut self.ui.options.mod_browser;
+                    self.mods.jobs.install(ui, Self::game_dir(), id);
+                }
+                // The website, through ConfirmLinkScreen as other links.
+                Event::OpenModPage(url) => self.confirm_trusted_link(&url, Screen::Options),
                 Event::ListShaderPacks => {
+                    let (key, _) = horizon_client::shader_pack_list::resolve(
+                        &Self::shader_packs_dir(),
+                        &self.settings.horizon.shader_pack,
+                    );
+                    if key != self.settings.horizon.shader_pack {
+                        self.settings.horizon.shader_pack = key;
+                        self.settings.save(&Self::options_path());
+                    }
                     self.settings.shader_packs =
                         horizon_client::shader_pack_list::scan(&Self::shader_packs_dir());
                 }
@@ -397,7 +492,24 @@ impl Game<'_> {
                 Event::NativeSettings(i) => self.native_settings_refresh(i),
                 Event::NativeButton(i, b) => self.native_settings_event(i, b),
                 Event::Credits => self.open_win_screen(false, super::win::Finish::Options),
+                Event::HudEditor => self.open_hud_editor(true),
+                // AccessibilityOptionsScreen's link button: ConfirmLinkScreen
+                // back to the options screen.
+                Event::AccessibilityHelp => {
+                    self.confirm_trusted_link(ACCESSIBILITY_HELP_LINK, Screen::Options)
+                }
                 Event::Narrator => self.narrator_status_changed(),
+                Event::OpenStudioReplay(path) => {
+                    let path = path.to_string_lossy().to_string();
+                    if let Err(e) = self.open_studio_replay(&path) {
+                        log::warn!("Horizon Studio: could not open {path}: {e}");
+                    }
+                }
+                Event::OpenStudioFolder => {
+                    let dir = std::path::PathBuf::from("recordings");
+                    let _ = std::fs::create_dir_all(&dir);
+                    super::packs::open_folder(&dir);
+                }
             }
         }
         Ok(())
@@ -426,8 +538,7 @@ impl Game<'_> {
             {
                 self.settings.video_modes = modes;
             }
-            let in_video_screen = self.screen == Screen::Options
-                && self.ui.options.page() == horizon_client::options_ui::Page::Video;
+            let in_video_screen = self.screen == Screen::Options && self.ui.options.video_open();
             let wanted = self.settings.fullscreen;
             let exclusive = self.settings.file.bool("exclusiveFullscreen");
             let preferred = self
@@ -452,10 +563,18 @@ impl Game<'_> {
             self.reload_packs();
         }
         self.apply_fullscreen();
+        // A failed HDR start that named no driver becomes the window's driver's, and another
+        // driver's is dropped, so HDR output is tried again.
+        if let Some(driver) = self.renderer.as_ref().and_then(|r| r.hdr_driver())
+            && self.settings.horizon.settle_failed_start(driver)
+            && let Some(dir) = Self::options_path().parent()
+        {
+            self.settings.horizon.save(dir);
+        }
+        self.hold_fullbright();
         let s = &self.settings;
         if let Some(r) = self.renderer.as_mut() {
             r.gamma = s.gamma;
-            r.fullbright = s.extras.fullbright;
             r.improved_transparency = s.improved_transparency;
             r.set_present_mode(s.vsync, s.horizon.present_mode);
             r.animated_textures = s.horizon.animated_textures;
@@ -465,21 +584,30 @@ impl Game<'_> {
                 s.file.int("textureFiltering"),
                 s.file.int("maxAnisotropyBit"),
             );
-            r.set_world_post(
-                s.horizon.resolution_scale as f32 / 100.0,
-                s.horizon.fxaa,
-                s.horizon.taa,
-                s.horizon.upscaling.ratio(),
-            );
+            // Dynamic Resolution's scale where it is on; turned off, it starts over at the floor.
+            if !s.horizon.dynamic_resolution {
+                self.dynamic_resolution.reset();
+            }
+            let scale = super::frame_autotune::world_scale(&s.horizon, &self.dynamic_resolution);
+            super::frame_autotune::apply_world_post(r, &s.horizon, scale);
             r.set_frame_generation(
                 s.horizon.frame_generation != horizon_client::graphics::FrameGeneration::Off,
             );
-            r.set_hdr(
-                s.horizon.hdr,
-                s.horizon.paper_white_nits() as f32,
-                s.horizon.peak_nits() as f32,
-                s.horizon.hdr_black_level as f32 / 100.0,
-                s.horizon.hdr_ui_brightness as f32 / 100.0,
+            r.set_hdr_lighting(s.horizon.hdr_lighting);
+            // Where it is offered (`Renderer::gpu_culling_offer`); unchanged, it does nothing.
+            // Auto has it on while its measurements say so (`GpuCullingAuto`), and starts over
+            // when the choice is another one.
+            let gpu_culling = match s.horizon.gpu_culling {
+                horizon_client::graphics::GpuCullingMode::Off => false,
+                horizon_client::graphics::GpuCullingMode::On => true,
+                horizon_client::graphics::GpuCullingMode::Auto => self.gpu_culling_auto.on(),
+            };
+            if s.horizon.gpu_culling != horizon_client::graphics::GpuCullingMode::Auto {
+                self.gpu_culling_auto.reset();
+            }
+            let _ = r.set_gpu_culling(gpu_culling);
+            r.update_output(
+                &s.horizon,
                 &Self::options_path().with_file_name(horizon_client::graphics::HDR_MARKER),
             );
         }
@@ -506,13 +634,20 @@ impl Game<'_> {
             font.reset_cache();
             self.ui.chat.rescale(&self.gui.atlas);
         }
+        // 3D skin layers: a skin's slabs are built when it is resolved, so a
+        // change here rebuilds the players already on screen (the Options
+        // screen keeps resolving them every frame; this covers the console
+        // and a setting restored from options.txt at start).
+        if self.title.is_none() {
+            self.update_remote_skins();
+        }
     }
     /// `Window.updateFullscreenState`: a fullscreen change made by the window
     /// system is adopted by the option (`Minecraft.fullscreenStateChanged`).
     pub(super) fn observe_fullscreen(&mut self) {
         // HDR calibration's own fullscreen is not the player's option: it
         // goes back to what it was when the calibration ends.
-        if self.ui.options.calibration_fullscreen.is_some() {
+        if self.ui.options.calibration_window.is_some() {
             return;
         }
         let Some(w) = &self.window else { return };
@@ -537,8 +672,11 @@ impl Game<'_> {
             }
             if let Some(w) = &self.window {
                 let on = w.fullscreen().is_none();
-                w.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
-                if !on {
+                if on {
+                    let borderless = horizon_client::window::borderless_fullscreen(w);
+                    horizon_client::window::enter_fullscreen(w, borderless);
+                } else {
+                    w.set_fullscreen(None);
                     windowed_again(w);
                 }
             }
@@ -574,9 +712,23 @@ impl Game<'_> {
             has_overlay: false,
         };
         let limit = framerate_limit(self.settings.max_fps as i32, context);
-        self.settings
+        let limit = self
+            .settings
             .horizon
-            .battery_limit(limit, self.title.is_none(), self.focused)
+            .battery_limit(limit, self.title.is_none(), self.focused);
+        // A native mod may only lower it (`native_framerate_limit`).
+        let mut hooked = limit;
+        self.native_framerate_limit(
+            self.focused,
+            context.iconified,
+            self.title.is_none(),
+            &mut hooked,
+        );
+        if hooked >= 1 {
+            hooked.min(limit)
+        } else {
+            limit
+        }
     }
     /// `Minecraft.runTick`'s frame limiter: `FramerateLimiter.limitDisplayFPS`
     /// below 260 frames per second, sleeping then spin-waiting until the
@@ -592,10 +744,44 @@ impl Game<'_> {
             }
             horizon_client::graphics::Pacing::Efficient => {
                 let mut clock = horizon_client::window::SleepingClock(self.frame_clock);
-                horizon_client::window::end_frame(&mut self.limiter, limit, &mut clock);
+                horizon_client::window::end_frame_on_grid(&mut self.limiter, limit, &mut clock);
             }
         }
     }
+}
+
+impl Game<'_> {
+    /// Fullbright as this window may draw it (`fullbright_held`): the renderer's flag and the
+    /// graphics screen's row. Each tick (`tick_frame_visuals`) and when settings apply, so
+    /// joining or leaving a server needs no call of its own.
+    pub(super) fn hold_fullbright(&mut self) {
+        let held = fullbright_held(
+            self.remote.as_ref().map(|r| r.save_folder.is_some()),
+            self.replay.playing(),
+        );
+        self.settings.fullbright_held = held;
+        if let Some(r) = self.renderer.as_mut() {
+            r.fullbright = self.settings.extras.fullbright && !held;
+        }
+    }
+}
+
+/// Fullbright is held off on another's server, where it would light what the server shows
+/// dark (#3823): a connection with no save of this window's own (`Remote::save_folder`), as a
+/// multiplayer server or a LAN guest has. Single player, a LAN host, a splitscreen seat in
+/// P1's world and Replay Studio keep it. `connection`: none, or whether it plays a save.
+fn fullbright_held(connection: Option<bool>, studio: bool) -> bool {
+    connection == Some(false) && !studio
+}
+
+/// The named device can be a connected pad that has not driven the game yet.
+fn detected_controller_style(
+    device: Option<&horizon_client::controller_ui::Device>,
+    fallback: horizon_client::gamepad::GlyphStyle,
+) -> horizon_client::gamepad::GlyphStyle {
+    device.map_or(fallback, |d| {
+        horizon_client::gamepad::GlyphStyle::of_device(d.vendor, d.product)
+    })
 }
 
 /// Out of fullscreen, a window that splitscreen opened to fill a monitor (no border, the
@@ -620,5 +806,50 @@ fn windowed_again(w: &winit::window::Window) {
             at.x + (screen.width.saturating_sub(small.width) / 2) as i32,
             at.y + (screen.height.saturating_sub(small.height) / 2) as i32,
         ));
+    }
+}
+
+#[cfg(test)]
+mod fullbright_tests {
+    use super::fullbright_held;
+
+    #[test]
+    fn fullbright_is_held_only_on_another_servers_world() {
+        // The title screen, with no connection.
+        assert!(!fullbright_held(None, false));
+        // Single player and a LAN host play their own save; so does a splitscreen seat in P1's.
+        assert!(!fullbright_held(Some(true), false));
+        // A multiplayer server, or another player's world opened to LAN.
+        assert!(fullbright_held(Some(false), false));
+        // Replay Studio plays a recording, not a server.
+        assert!(!fullbright_held(Some(false), true));
+    }
+}
+
+#[cfg(test)]
+mod controller_context_tests {
+    use super::detected_controller_style;
+    use horizon_client::{controller_ui::Device, gamepad::GlyphStyle};
+
+    #[test]
+    fn detected_style_follows_the_named_device_even_before_it_is_used() {
+        let mut device = Device {
+            name: "pad".into(),
+            vendor: Some(0x054c),
+            product: None,
+        };
+        assert_eq!(
+            detected_controller_style(Some(&device), GlyphStyle::Xbox),
+            GlyphStyle::PlayStation
+        );
+        device.vendor = Some(0x057e);
+        assert_eq!(
+            detected_controller_style(Some(&device), GlyphStyle::PlayStation),
+            GlyphStyle::Nintendo
+        );
+        assert_eq!(
+            detected_controller_style(None, GlyphStyle::PlayStation),
+            GlyphStyle::PlayStation
+        );
     }
 }

@@ -5,7 +5,8 @@
       "target": "horizon_client::game::native_hooks::Game<'_>::native_level_save",
       "neoforge": "LevelEvent.Save",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "a server's level saved (`native_level_save`).",

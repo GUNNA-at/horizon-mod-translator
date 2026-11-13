@@ -16,7 +16,7 @@ const NATIVE_FALLING_MAX_SPEED: f64 = 3.9;
 
 /// What a mod's falling block does when it lands and when it hits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct NativeFalling {
+pub struct NativeFalling {
     /// `FallingBlockEntity.dropItem`: whether it drops as an item where it
     /// can't be placed.
     pub drop_item: bool,
@@ -44,7 +44,6 @@ fn start_velocity(velocity: [f64; 3]) -> Option<Vec3> {
     })
 }
 
-#[allow(dead_code)]
 impl Game<'_> {
     /// Throws a falling block of `state` from `pos` (its bottom centre) at
     /// `velocity` (blocks a tick) in the level in place, `dimension`: it
@@ -54,7 +53,7 @@ impl Game<'_> {
     /// with nothing thrown, on a client's copy of the world, for another
     /// dimension, an air or unknown state, a chunk that isn't loaded, a value
     /// that isn't finite, or with 1024 falling blocks in the level already.
-    /// Each axis of `velocity` is cut to 3.9. API @API:native_falling_block@.
+    /// Each axis of `velocity` is cut to 3.9. API 81.
     pub(super) fn native_spawn_falling_block(
         &mut self,
         dimension: &str,
@@ -93,6 +92,8 @@ impl Game<'_> {
         let at = Vec3::new(pos[0], pos[1], pos[2]);
         self.next_entity += 1;
         self.falling.push(FallingBlock {
+            rotation: [0.0, 0.0],
+            join: Default::default(),
             id: self.next_entity,
             state,
             start_pos: cell,
@@ -103,6 +104,7 @@ impl Game<'_> {
             no_gravity: false,
             drop_item: falling.drop_item,
             fall_distance: 0.0,
+            on_ground: false,
             stuck: Vec3::ZERO,
             damage,
             saved: None,

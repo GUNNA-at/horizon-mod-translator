@@ -2,7 +2,8 @@
   "hooks": [
     {
       "name": "block_entities_unload",
-      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entities_unload"
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entities_unload",
+      "mod_api": false
     }
   ],
   "rust_summary": "a chunk's mod block entities leaving the world with it after it saved, as it unloads or its level closes (`native_block_entities_unload`).",

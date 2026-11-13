@@ -9,7 +9,8 @@ widget id instead: the title screen, the options (a slider set by id) and the in
 the options scenario reads and sets options.txt values by key; the events scenario waits for
 states (wait-for) and reads the event log; the consume scenario eats and drinks consumables (a
 golden apple, milk, honey, chorus fruit) and checks their effects, remainders and teleport, then
-holds an eye of ender in use and the sprint key with and without blindness; the use-screen
+holds an eye of ender in use and the sprint key with and without blindness; the copper-chest
+scenario checks a copper chest doesn't weather while a player or a copper golem has it open; the use-screen
 scenario opens the inventory and the chat over an item in use and checks the use is released, not
 eaten behind the GUI; the pick scenario
 middle-clicks slots (AbstractContainerScreen's cloning): a full stack in creative, from the hotbar
@@ -57,6 +58,8 @@ POSITIONAL = {
     'click_button': ['label'], 'type': ['text'], 'wait': ['ticks'], 'wait_ready': ['seconds'],
     'command': ['command'], 'look_at_block': ['x', 'y', 'z'], 'click': ['id'], 'set': ['id', 'value'],
     'give': ['item', 'count'], 'options_get': ['keys'], 'options_set': ['key', 'value'],
+    'record_start': ['name'], 'record_replay': ['name'], 'repro_export': ['name', 'path'],
+    'turn': ['dyaw', 'dpitch'], 'interact': ['x', 'y', 'z'],
     'wait_for': ['condition', 'value'], 'open': ['world', 'seed', 'mode'], 'select': ['slot'],
     'summon': ['kind', 'x', 'y', 'z'], 'interact_entity': ['id'], 'effect': ['id', 'seconds', 'amplifier'],
     'xp': ['levels'], 'options': ['page'], 'lan': ['action'], 'world_backup': ['folder'],
@@ -333,7 +336,7 @@ def ui_scenario(d, out):
     if 'game' not in widgets(d):  # with no worlds, Singleplayer opens Create New World itself
         d('click', id='create-new-world')
     tree = widgets(d)
-    assert tree['game']['kind'] == 'button' and any(w['kind'] == 'field' for w in tree.values()), tree
+    assert tree['game']['kind'] == 'tab' and any(w['kind'] == 'field' for w in tree.values()), tree
     d('type', field='name', replace=True, text='UI World')
     d('click', id='create-new-world')
     d('wait_for', condition='loaded', timeout=400)  # a few frames later, as in the survival scenario
@@ -401,9 +404,12 @@ def options_scenario(d, out):
     # The options screen shows it: FOV 90 sits at (90 - 30) / 80 of its slider.
     d('click', id='options')
     assert abs(widgets(d)['fov']['value'] - 0.75) < 0.01
-    # Applied at once: a GUI scale of 2 on the 1280x720 window makes the GUI 640x360.
+    # Applied at once: a GUI scale of 2 halves the GUI of scale 1, which is the window's pixels
+    # (1280x720 at 100 % display scaling, 1600x900 at 125 %).
+    d('options_set', key='guiScale', value='1')
+    full = d('ui')['gui_size']
     d('options_set', key='guiScale', value='2')
-    assert d('ui')['gui_size'] == [640, 360], 'the GUI scale did not apply'
+    assert d('ui')['gui_size'] == [(n + 1) // 2 for n in full], 'the GUI scale did not apply'
     d('options_set', key='guiScale', value='0')
     return {'options': len(options)}
 
@@ -445,6 +451,119 @@ def events_scenario(d, out):
     assert logs['delta'] == 3, logs
     assert all(b['seq'] > a['seq'] for a, b in zip(events, events[1:]))
     return {'events': len(events)}
+
+
+def repro_scenario(d, out):
+    # Input provenance and the repro recording: who caused what, the recording on disk,
+    # the bundle a bug report carries, and a replay ending where the recording did.
+    import zipfile
+
+    d('click', id='singleplayer')
+    if 'game' not in widgets(d):
+        d('click', id='create-new-world')
+    d('type', field='name', replace=True, text='Repro')
+    d('click', id='create-new-world')
+    d('wait_for', condition='loaded', timeout=400)
+
+    # Everything the control socket does is the agent's input.
+    d('give', item='stone', count=1)
+    # Stand still on the ground first: the world copy's player data and the
+    # recording start from the same place, so the replay can follow.
+    for _ in range(200):
+        state = d('state')
+        player = state['player']
+        # Standing still: gravity keeps a small downward velocity on the ground.
+        if (player['on_ground'] and abs(player['velocity'][0]) < 0.01
+                and abs(player['velocity'][2]) < 0.01):
+            break
+        d('wait', ticks=2)
+    else:
+        raise AssertionError(f'the player never settled: {player}')
+    provenance = state['input']
+    assert provenance['last_origin'] == 'agent', provenance
+    assert provenance['counts']['agent'] >= 1, provenance
+
+    name = 'e2e-repro'
+    started = d('record_start', name=name)
+    record_dir = Path(started['dir'])
+    assert started['ok'] and record_dir.is_dir(), started
+
+    # Walk a moment, so the recording has key events and a state trail.
+    d('key', key='w', action='down')
+    d('wait', ticks=25)
+    d('key', key='w', action='up')
+    # A deterministic change the replay must reproduce even when the spawn is
+    # against a wall and the walk moves nowhere.
+    d('turn', dyaw=45, dpitch=0)
+    d('wait', ticks=5)
+    entries = d('input_log', origin='agent', limit=50)['events']
+    assert any(e.get('line', '').startswith('key w down') for e in entries), entries
+    assert any(e.get('line', '').startswith('key w up') for e in entries), entries
+    # Read-only polls and session commands never reach the input log.
+    assert not any(e.get('line', '').startswith(('state', 'record-stop')) for e in entries), entries
+    status = d('record_status')['recording']
+    assert status and status['inputs'] > 0, status
+    stopped = d('record_stop')
+    assert stopped['inputs'] > 0 and stopped['state'] > 0, stopped
+
+    # On disk: one JSON line per input and the state keyframes the tick wrote,
+    # not only the final one `record-stop` appends.
+    inputs = [json.loads(line) for line in (record_dir / 'inputs.jsonl').read_text().splitlines() if line.strip()]
+    assert inputs and inputs[0]['origin'] == 'agent' and 'tick' in inputs[0], inputs[:2]
+    assert any(e.get('line') == 'key w down' for e in inputs), inputs
+    # Only real input: no read-only polls and no session commands.
+    assert 3 <= len(inputs) <= 10, f'unexpected input log: {inputs[:10]}'
+    states = [json.loads(line) for line in (record_dir / 'state.jsonl').read_text().splitlines() if line.strip()]
+    keyframes = [s for s in states if s['kind'] == 'state']
+    assert len(keyframes) >= 2, f'the tick did not write keyframes: {states[:2]}'
+    first_state = keyframes[0]['state']['player']
+    last_state = keyframes[-1]['state']['player']
+    walked = sum((a - b) ** 2 for a, b in zip(first_state['position'], last_state['position'])) ** 0.5
+    turned = abs((last_state['yaw'] - first_state['yaw'] + 180) % 360 - 180)
+    assert walked >= 2.0 or turned >= 20.0, (
+        f'the recording did not see the input: {walked:.2f} blocks, {turned:.1f} degrees')
+    assert (record_dir / 'events.jsonl').is_file() and (record_dir / 'session.json').is_file()
+    assert (record_dir / 'world' / 'level.dat').is_file(), 'the world copy is missing'
+
+    # The bundle: the recording, the logs and a status in one zip.
+    bundle = d('repro_export', name=name)
+    zip_path = Path(bundle['path'])
+    assert zip_path.is_file() and zip_path.stat().st_size > 0, bundle
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+    prefix = record_dir.name
+    for wanted in ('session.json', 'inputs.jsonl', 'state.jsonl', 'events.jsonl', 'README.txt'):
+        assert f'{prefix}/{wanted}' in names, (wanted, names)
+    assert 'status.json' in names and 'logs/latest.log' in names, names
+    assert any(name.endswith('/world/level.dat') for name in names), names
+
+    # The replay: the recording's world opens and its input runs again.
+    replayed = d('record_replay', name=name, timeout=120)
+    assert replayed['ok'] and replayed['events'] > 0, replayed
+    for _ in range(240):
+        state = d('state')
+        if state['input'].get('replay') is None:
+            break
+        time.sleep(0.25)
+    else:
+        raise AssertionError('the replay did not finish')
+    # How it ended, and that every recorded input ran (none skipped: the
+    # recording holds only key/wait commands).
+    ended_event = next((e for e in d('events')['events']
+                        if e.get('event') == 'replay' and e.get('state') in ('done', 'timeout')), None)
+    assert ended_event and ended_event['state'] == 'done', ended_event
+    assert ended_event['skipped'] == 0 and ended_event['sent'] == ended_event['total'], ended_event
+    ended_player = state['player']
+    want_player = keyframes[-1]['state']['player']
+    ended = ended_player['position']
+    want = want_player['position']
+    distance = sum((a - b) ** 2 for a, b in zip(ended, want)) ** 0.5
+    yaw_error = abs((ended_player['yaw'] - want_player['yaw'] + 180) % 360 - 180)
+    assert yaw_error < 10.0, f'the replay ended facing {ended_player["yaw"]}, the recording {want_player["yaw"]}' 
+    # Best effort: the same inputs on the same saved world, not frame-perfect.
+    assert distance < 4.0, f'the replay ended at {ended}, the recording at {want} ({distance:.2f})'
+    return {'inputs': len(inputs), 'keyframes': len(keyframes), 'bundle': zip_path.name,
+            'replay_distance': round(distance, 2)}
 
 
 def consume_scenario(d, out):
@@ -535,6 +654,83 @@ def consume_scenario(d, out):
     d('command', command='effect clear @s minecraft:blindness')
     assert sprints(), 'no sprint once blindness is cleared'
     return {'teleported': [round(m, 2) for m in moved], 'eye_use_ticks': eye['using']['ticks']}
+
+
+def copper_chest_scenario(d, out):
+    # WeatheringCopperChestBlock.randomTick: a copper chest doesn't weather while a player or a copper
+    # golem (CopperGolem.hasContainerOpen) has it open, and does once it closes. Each has a control
+    # nobody opens, so a chest that kept its age can't be down to random ticks not reaching it.
+    d('click', id='singleplayer')
+    if 'game' not in widgets(d):
+        d('click', id='create-new-world')
+    d('type', field='name', replace=True, text='CopperChest')
+    d('click', id='create-new-world')
+    d('wait_for', condition='loaded', timeout=400)
+    d('command', command='tp @s 0.5 201 0.5')
+    d('wait_ready', seconds=120)
+
+    def block(x, z):
+        return d('block', x=x, y=201, z=z)
+
+    def chest(x, z, nbt=''):
+        d('command', command=f'setblock {x} 201 {z} minecraft:copper_chest[facing=south,type=single]{nbt}')
+
+    def weathers(x, z, ticks):
+        for _ in range(ticks // 5):
+            if block(x, z)['block'] != 'minecraft:copper_chest':
+                return True
+            d('wait', ticks=5)
+        return False
+
+    def oxidizes(x, z, ticks):
+        # All three stages: an unprotected chest beside it can't stay fresh that long by luck.
+        for _ in range(ticks // 5):
+            if block(x, z)['block'] == 'minecraft:oxidized_copper_chest':
+                return True
+            d('wait', ticks=5)
+        return False
+
+    d('command', command='fill -6 200 -6 20 200 20 minecraft:stone')
+    d('command', command='fill -6 201 -6 20 206 20 minecraft:air')
+    # The first teleport loaded the chunks; the player fell while they did.
+    d('command', command='tp @s 0.5 201 0.5')
+    d('wait', ticks=5)
+    chest(2, 0)
+    chest(16, 0)
+    d('interact', x=2, y=201, z=0)
+    d('command', command='gamerule random_tick_speed 3000')
+    assert oxidizes(16, 0, 600), 'the control never oxidized'
+    assert block(2, 0)['block'] == 'minecraft:copper_chest', block(2, 0)
+    d('close')
+    assert weathers(2, 0, 400), 'the chest did not weather once the player closed it'
+
+    d('command', command='gamerule random_tick_speed 0')
+    chest(2, 12, '{Items:[{Slot:0b,id:"minecraft:stone",count:16}]}')
+    chest(16, 12)
+    d('command', command='setblock 5 201 12 minecraft:chest[facing=south,type=single]')
+    d('command', command='summon minecraft:copper_golem 3.5 201 14.5')
+    for _ in range(600):
+        if block(2, 12)['lid'] > 0:
+            break
+        d('wait', ticks=5)
+    else:
+        raise Failed('the golem never opened the chest')
+    d('command', command='gamerule random_tick_speed 30000')
+    assert oxidizes(16, 12, 200), 'the control never oxidized'
+    state = block(2, 12)
+    assert state['lid'] > 0, 'the golem closed the chest before the control oxidized'
+    assert state['block'] == 'minecraft:copper_chest', state
+    for _ in range(160):
+        state = block(2, 12)
+        if state['lid'] >= 1:
+            assert state['block'] == 'minecraft:copper_chest', state
+        elif state['block'] != 'minecraft:copper_chest':
+            break
+        d('wait', ticks=5)
+    else:
+        raise Failed('the chest did not weather once the golem closed it')
+    d('command', command='gamerule random_tick_speed 3')
+    d('screenshot', path=str(out / f'copper-chest-{d.name}.png'))
 
 
 def use_screen_scenario(d, out):
@@ -744,7 +940,7 @@ def manage_scenario(d, out):
     d('xp', levels=5)
     assert d('lan', action='status') is not None
     d('options', page='horizon')
-    assert 'graphics' in widgets(d), widgets(d).keys()
+    assert 'ai-agent' in widgets(d), widgets(d).keys()
     d('close')
     d('pause')
     d('click', id='save-and-quit-to-title')
@@ -792,8 +988,9 @@ def pause_save_scenario(d, out):
 
 
 SCENARIOS = {'survival': scenario, 'ui': ui_scenario, 'options': options_scenario, 'events': events_scenario,
-             'consume': consume_scenario, 'use-screen': use_screen_scenario, 'pick': pick_scenario,
-             'suggestions': suggestions_scenario, 'manage': manage_scenario, 'pause-save': pause_save_scenario}
+             'consume': consume_scenario, 'copper-chest': copper_chest_scenario, 'use-screen': use_screen_scenario, 'pick': pick_scenario,
+             'suggestions': suggestions_scenario, 'manage': manage_scenario, 'pause-save': pause_save_scenario,
+             'repro': repro_scenario}
 
 
 REFUSAL = "AI features are off: turn off No AI in the launcher's settings"
@@ -829,7 +1026,7 @@ def no_ai_check(mode, ctl, resources):
                 assert r.returncode == 4 and reply == {'error': REFUSAL, 'kind': 'denied'}, (r.returncode, reply)
             client = ctl.with_name('horizon-client')
             args = [str(client), '--control-socket', str(socket), '--world', 'NoAi', '--world-frames', '30']
-            if sys.platform == 'darwin':
+            if sys.platform == 'darwin' or os.environ.get('HORIZON_E2E_HEADLESS'):
                 args.append('--offscreen')
             r = subprocess.run(args, cwd=work, env=env, capture_output=True, text=True, timeout=600)
             text = r.stdout + r.stderr + ''.join(
@@ -933,7 +1130,8 @@ def run(mode, ctl, out, resources, which='survival'):
     driver = (Cli if mode == 'cli' else Mcp)(ctl, socket, work, env)
     started = time.time()
     try:
-        driver('launch', wait=False, offscreen=sys.platform == 'darwin')
+        driver('launch', wait=False,
+               offscreen=sys.platform == 'darwin' or bool(os.environ.get('HORIZON_E2E_HEADLESS')))
         summary = SCENARIOS[which](driver, out)
         print(f'[{mode}] PASS in {time.time() - started:.0f} s: {summary}')
         return True

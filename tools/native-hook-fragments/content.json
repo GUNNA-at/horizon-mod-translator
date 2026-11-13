@@ -2,7 +2,8 @@
   "hooks": [
     {
       "name": "content",
-      "target": "horizon_client::game::native_hooks::Game<'_>::native_content"
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_content",
+      "mod_api": false
     }
   ],
   "rust_summary": "a content mod's whole content before the resources are built (`native_content`): code declares blocks and items as files would (`Content::declare_block`, `declare_item`).",

@@ -7,15 +7,14 @@
 //! Where it differs from vanilla, on purpose: a packet is read from the stream (vanilla takes one `read` for
 //! one packet, so a command that TCP splits closes the connection), the password is compared in constant time,
 //! and a connection that hasn't logged in within [`LOGIN_WITHIN`] is closed, with at most [`MAX_CLIENTS`] open
-//! at once (vanilla has neither limit). A reply is cut in packets of 4096 characters, where vanilla cuts at
-//! 4096 UTF-16 units.
+//! at once (vanilla has neither limit).
 
 use crate::{
     api::{Phase, Shared, same_token},
     engine,
     supervisor::note,
 };
-use horizon_server_files::properties::{ServerProperties, SystemEntropy};
+use horizon_platform::server_files::properties::{ServerProperties, SystemEntropy};
 use serde_json::Value;
 use std::{
     io::{self, Read, Write},
@@ -41,12 +40,19 @@ const RESPONSE: i32 = 0;
 const AUTH_FAILURE: i32 = -1;
 /// `RconClient.buf`: the most a request takes, the length included.
 const MAX_REQUEST: usize = 1460;
-/// The characters of a reply in one packet (`sendCmdResponse`).
+/// The UTF-16 units of a reply in one packet (`sendCmdResponse`).
 const CHUNK: usize = 4096;
 /// How long a connection may take to log in.
 const LOGIN_WITHIN: Duration = Duration::from_secs(30);
 /// The connections open at once.
 const MAX_CLIENTS: usize = 16;
+/// The connections one address may hold of them: one client can't take every place, idle, and keep
+/// the operator's own RCON client out.
+const PER_ADDRESS: usize = 4;
+/// How long a refused login waits before its connection closes: one guess per connection, and a
+/// connection's place stays taken meanwhile, so the most connections at once also bound how fast
+/// passwords can be tried.
+const REFUSED_PAUSE: Duration = Duration::from_secs(1);
 
 struct Settings {
     host: String,
@@ -126,6 +132,7 @@ pub fn start(shared: Arc<Shared>) -> Result<Option<SocketAddr>, String> {
         Limits {
             clients: MAX_CLIENTS,
             login: LOGIN_WITHIN,
+            refused: REFUSED_PAUSE,
         },
         move |line| run_on_game(&game, line),
         move |message| note(&log, "WARN", message),
@@ -133,6 +140,12 @@ pub fn start(shared: Arc<Shared>) -> Result<Option<SocketAddr>, String> {
     .map_err(|e| format!("RCON: {e}"))?;
     note(&shared, "INFO", &format!("RCON running on {host}:{port}"));
     Ok(Some(address))
+}
+
+/// The control request that runs `line` as an RCON command: the console's, with the `Rcon` source
+/// (`RconConsoleSource`), so the operators hear of it when `broadcast-rcon-to-ops` is on.
+fn control_request(line: &str) -> String {
+    format!("rcon {}", line.trim_start_matches('/'))
 }
 
 /// What the game's console printed for `line`, or why it couldn't run it. The lines are joined as they are in
@@ -148,7 +161,7 @@ fn run_on_game(shared: &Shared, line: &str) -> Result<String, String> {
         return Err("the game isn't running right now".into());
     }
     let reply = engine::Control::connect(&shared.dir)
-        .and_then(|mut game| game.ask(&format!("console {}", line.trim_start_matches('/'))))
+        .and_then(|mut game| game.ask(&control_request(line)))
         .map_err(|e| format!("the game didn't answer: {e}"))?;
     if let Some(error) = reply["error"].as_str() {
         return Err(error.to_owned());
@@ -166,14 +179,56 @@ struct Limits {
     clients: usize,
     /// How long a connection may take to log in.
     login: Duration,
+    /// How long a refused login waits before its connection closes.
+    refused: Duration,
 }
 
 /// Frees a connection's place when its thread ends.
-struct Place(Arc<AtomicUsize>);
+/// A connection's place: one of the [`Limits::clients`], and one of its address's [`PER_ADDRESS`].
+struct Place {
+    open: Arc<AtomicUsize>,
+    per_address: Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
+    address: std::net::IpAddr,
+}
+
+impl Place {
+    fn take(
+        open: &Arc<AtomicUsize>,
+        per_address: &Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>>,
+        address: std::net::IpAddr,
+        clients: usize,
+    ) -> Option<Self> {
+        let mut per = per_address.lock().unwrap_or_else(|e| e.into_inner());
+        let mine = per.entry(address).or_default();
+        if *mine >= PER_ADDRESS {
+            return None;
+        }
+        if open.fetch_add(1, Ordering::SeqCst) >= clients {
+            open.fetch_sub(1, Ordering::SeqCst);
+            if *mine == 0 {
+                per.remove(&address);
+            }
+            return None;
+        }
+        *mine += 1;
+        Some(Self {
+            open: open.clone(),
+            per_address: per_address.clone(),
+            address,
+        })
+    }
+}
 
 impl Drop for Place {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.open.fetch_sub(1, Ordering::SeqCst);
+        let mut per = self.per_address.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = per.get_mut(&self.address) {
+            *n -= 1;
+            if *n == 0 {
+                per.remove(&self.address);
+            }
+        }
     }
 }
 
@@ -187,15 +242,17 @@ fn serve(
 ) -> io::Result<()> {
     let (password, run, warn) = (Arc::new(password), Arc::new(run), Arc::new(warn));
     let open = Arc::new(AtomicUsize::new(0));
+    let per_address = Arc::default();
     thread::Builder::new().name("rcon".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
-            if open.fetch_add(1, Ordering::SeqCst) >= limits.clients {
-                open.fetch_sub(1, Ordering::SeqCst);
+            let address = stream
+                .peer_addr()
+                .map_or(std::net::IpAddr::from([0, 0, 0, 0]), |a| a.ip());
+            let Some(place) = Place::take(&open, &per_address, address, limits.clients) else {
                 continue;
-            }
-            let place = Place(open.clone());
+            };
             let (password, run, warn) = (password.clone(), run.clone(), warn.clone());
-            let login = limits.login;
+            let (login, refused) = (limits.login, limits.refused);
             let _ = thread::Builder::new()
                 .name("rcon-client".into())
                 .spawn(move || {
@@ -206,7 +263,7 @@ fn serve(
                         .peer_addr()
                         .map_or_else(|_| "?".into(), |a| a.ip().to_string());
                     // The client going away, or sending what isn't RCON, ends its connection.
-                    let _ = client(&mut stream, &password, login, &*run, &|why| {
+                    let _ = client(&mut stream, &password, login, refused, &*run, &|why| {
                         warn(&format!("RCON {why} from {from}"));
                     });
                 });
@@ -216,10 +273,14 @@ fn serve(
 }
 
 /// One connection: login and commands until the client leaves, or sends what vanilla would close on.
+/// A refused login ends it (after `refused`): vanilla keeps the connection open for another guess,
+/// which made thousands of guesses a second possible with a few connections; standard RCON clients
+/// connect again after a refusal.
 fn client(
     stream: &mut TcpStream,
     password: &str,
     login: Duration,
+    refused: Duration,
     run: &dyn Fn(&str) -> Result<String, String>,
     warn: &dyn Fn(&str),
 ) -> io::Result<()> {
@@ -239,6 +300,9 @@ fn client(
                 } else {
                     warn("login refused");
                     send(stream, AUTH_FAILURE, AUTH_RESPONSE, "")?;
+                    // One guess per connection: another costs a new connection and its place.
+                    thread::sleep(refused);
+                    return Ok(());
                 }
             }
             EXEC if authed => {
@@ -328,15 +392,19 @@ fn send(stream: &mut TcpStream, id: i32, kind: i32, text: &str) -> io::Result<()
     stream.write_all(&encode(id, kind, text))
 }
 
-/// A command's output in packets of [`CHUNK`] characters: `sendCmdResponse` sends one, even when it is empty.
+/// A command's output in packets of [`CHUNK`] UTF-16 units: `sendCmdResponse` cuts the Java string
+/// with `substring`, so a character outside the BMP (two units) can straddle a cut, and
+/// `String.getBytes(UTF_8)` then writes each lone half as `?`. It sends one packet, even when the
+/// output is empty.
 fn send_output(stream: &mut TcpStream, id: i32, output: &str) -> io::Result<()> {
-    let mut rest = output;
+    let units: Vec<u16> = output.encode_utf16().collect();
+    let mut rest = units.as_slice();
     loop {
-        let end = rest
-            .char_indices()
-            .nth(CHUNK)
-            .map_or(rest.len(), |(i, _)| i);
-        send(stream, id, RESPONSE, &rest[..end])?;
+        let end = rest.len().min(CHUNK);
+        let text: String = char::decode_utf16(rest[..end].iter().copied())
+            .map(|unit| unit.unwrap_or('?'))
+            .collect();
+        send(stream, id, RESPONSE, &text)?;
         rest = &rest[end..];
         if rest.is_empty() {
             return Ok(());
@@ -347,6 +415,12 @@ fn send_output(stream: &mut TcpStream, id: i32, output: &str) -> io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_command_goes_to_the_game_as_an_rcon_one_without_its_slash() {
+        assert_eq!(control_request("/say hi"), "rcon say hi");
+        assert_eq!(control_request("time set day"), "rcon time set day");
+    }
 
     /// A reply: its request id, type and payload.
     fn reply(stream: &mut TcpStream) -> (i32, i32, String) {
@@ -373,6 +447,8 @@ mod tests {
             |line| match line {
                 "boom" => Err("it blew up".into()),
                 "long" => Ok("é".repeat(CHUNK + 5)),
+                // 4095 units, then a pair (a non-BMP character is two UTF-16 units), then one more.
+                "emoji" => Ok(format!("{}😀b", "a".repeat(CHUNK - 1))),
                 "silent" => Ok(String::new()),
                 line => Ok(format!("echo:{line}")),
             },
@@ -382,11 +458,23 @@ mod tests {
         (address, warned)
     }
 
+    /// The test pause after a refused login.
+    const PAUSE: Duration = Duration::from_millis(200);
+
     fn limits() -> Limits {
         Limits {
             clients: MAX_CLIENTS,
             login: LOGIN_WITHIN,
+            refused: PAUSE,
         }
+    }
+
+    /// Whether the server closed `stream` (reads end), and how long that took.
+    fn closed(stream: &mut TcpStream) -> (bool, Duration) {
+        let start = Instant::now();
+        let mut byte = [0; 1];
+        let ended = matches!(stream.read(&mut byte), Ok(0));
+        (ended, start.elapsed())
     }
 
     fn connect(address: SocketAddr) -> TcpStream {
@@ -415,22 +503,27 @@ mod tests {
     fn a_session_logs_in_and_runs_commands() {
         let (address, warned) = server(limits());
         let mut rcon = connect(address);
-        // A command before the login, and a wrong password: refused, and the connection stays open.
+        // A command before the login: refused, and the connection stays open.
         rcon.write_all(&encode(1, EXEC, "list")).unwrap();
         assert_eq!(
             reply(&mut rcon),
             (AUTH_FAILURE, AUTH_RESPONSE, String::new())
         );
-        rcon.write_all(&encode(2, AUTH, "hunter3")).unwrap();
-        assert_eq!(
-            reply(&mut rcon),
-            (AUTH_FAILURE, AUTH_RESPONSE, String::new())
-        );
-        rcon.write_all(&encode(3, AUTH, "")).unwrap();
-        assert_eq!(
-            reply(&mut rcon),
-            (AUTH_FAILURE, AUTH_RESPONSE, String::new())
-        );
+        // A wrong password, or an empty one: refused, and that connection closes after the pause.
+        for password in ["hunter3", ""] {
+            rcon.write_all(&encode(2, AUTH, password)).unwrap();
+            assert_eq!(
+                reply(&mut rcon),
+                (AUTH_FAILURE, AUTH_RESPONSE, String::new())
+            );
+            let (ended, after) = closed(&mut rcon);
+            assert!(ended, "a refused login ends its connection");
+            assert!(
+                after >= PAUSE / 2,
+                "closed after the pause, not at once: {after:?}"
+            );
+            rcon = connect(address);
+        }
         rcon.write_all(&encode(4, AUTH, "hunter2")).unwrap();
         assert_eq!(reply(&mut rcon), (4, AUTH_RESPONSE, String::new()));
         rcon.write_all(&encode(5, EXEC, "say hi")).unwrap();
@@ -448,11 +541,10 @@ mod tests {
             reply(&mut rcon),
             (8, RESPONSE, "Unknown request fffffffe".into())
         );
-        // A login that fails takes the login back.
+        // A login that fails takes the login back, and ends the connection.
         rcon.write_all(&encode(9, AUTH, "nope")).unwrap();
         assert_eq!(reply(&mut rcon).0, AUTH_FAILURE);
-        rcon.write_all(&encode(10, EXEC, "list")).unwrap();
-        assert_eq!(reply(&mut rcon).0, AUTH_FAILURE);
+        assert!(closed(&mut rcon).0);
         assert_eq!(
             warned.lock().unwrap().len(),
             3,
@@ -474,6 +566,21 @@ mod tests {
             (2, RESPONSE, CHUNK)
         );
         assert_eq!((second.0, second.2.chars().count()), (2, 5));
+    }
+
+    /// `sendCmdResponse` cuts the output with `String.substring` at 4096 UTF-16 units, so a pair that
+    /// straddles the cut is split, and `String.getBytes(UTF_8)` writes each lone half as `?`.
+    #[test]
+    fn an_output_is_cut_at_4096_utf16_units_and_a_split_pair_becomes_question_marks() {
+        let (address, _) = server(limits());
+        let mut rcon = connect(address);
+        rcon.write_all(&encode(1, AUTH, "hunter2")).unwrap();
+        reply(&mut rcon);
+        rcon.write_all(&encode(2, EXEC, "emoji")).unwrap();
+        let first = reply(&mut rcon);
+        let second = reply(&mut rcon);
+        assert_eq!(first, (2, RESPONSE, format!("{}?", "a".repeat(4095))));
+        assert_eq!(second, (2, RESPONSE, "?b".to_owned()));
     }
 
     #[test]
@@ -524,6 +631,7 @@ mod tests {
         let (address, _) = server(Limits {
             clients: 1,
             login: Duration::from_secs(1),
+            refused: PAUSE,
         });
         let mut idle = connect(address);
         // The only place is taken: the next connection is closed at once.
@@ -535,6 +643,39 @@ mod tests {
         let mut again = connect(address);
         again.write_all(&encode(1, AUTH, "hunter2")).unwrap();
         assert_eq!(reply(&mut again).0, 1);
+    }
+
+    #[test]
+    fn one_address_takes_only_its_share_of_places() {
+        let open = Arc::new(AtomicUsize::new(0));
+        let per_address = Arc::default();
+        let (a, b) = (
+            std::net::IpAddr::from([198, 51, 100, 1]),
+            std::net::IpAddr::from([198, 51, 100, 2]),
+        );
+        let held: Vec<_> = (0..10)
+            .filter_map(|_| Place::take(&open, &per_address, a, MAX_CLIENTS))
+            .collect();
+        assert_eq!(held.len(), PER_ADDRESS);
+        assert!(
+            Place::take(&open, &per_address, b, MAX_CLIENTS).is_some(),
+            "another address"
+        );
+        drop(held);
+        assert_eq!(open.load(Ordering::SeqCst), 0);
+        assert!(per_address.lock().unwrap().is_empty());
+        // The global cap still holds across addresses.
+        let many: Vec<_> = (0..40u8)
+            .filter_map(|n| {
+                Place::take(
+                    &open,
+                    &per_address,
+                    std::net::IpAddr::from([10, 0, 0, n]),
+                    3,
+                )
+            })
+            .collect();
+        assert_eq!(many.len(), 3);
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -593,7 +734,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The game's control endpoint, as far as `console` goes: it answers `say hi` and fails on `fail`.
+    /// The game's control endpoint, as far as `rcon` goes: it answers `say hi` and fails on `fail`.
     fn game(dir: &Path) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -609,7 +750,7 @@ mod tests {
                 while let Some(Ok(line)) = lines.next() {
                     let answer = match line.as_str() {
                         "auth t" => "{\"ok\":true}",
-                        "console say hi" => "{\"output\":[\"[Server] \",\"hi\"]}",
+                        "rcon say hi" => "{\"output\":[\"[Server] \",\"hi\"]}",
                         _ => "{\"error\":\"unknown request\"}",
                     };
                     let _ = writeln!(stream, "{answer}");
@@ -619,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn a_command_goes_to_the_game_as_cmd_sends_it() {
+    fn a_command_goes_to_the_game_as_an_rcon_request_that_says_what_the_console_says() {
         let dir = scratch("game");
         game(&dir);
         let shared = Shared::with_install(&dir, None);

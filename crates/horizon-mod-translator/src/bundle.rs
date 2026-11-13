@@ -381,7 +381,7 @@ fn level_host(krate: &str) -> String {
             Some(crate::game::native_mod_entities::next_mod_entity_id())
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.level.native_block_name_in_tag(block, tag)
+            self.level.native_block_name_has_tag(block, tag)
         }}
         // What a tag of the level's blocks, items and fluids holds, and every block or item.
         fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
@@ -481,7 +481,7 @@ fn level_read_host(c: &str) -> String {
             (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.level.native_block_name_in_tag(block, tag)
+            self.level.native_block_name_has_tag(block, tag)
         }}
         // What a tag of the level's blocks, items and fluids holds, and every block or item.
         fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
@@ -679,7 +679,7 @@ fn held_nbt(c: &str) -> String {
 /// A server host's sounds and particles: for the players near them in the level the game holds.
 fn server_effects(c: &str) -> String {
     format!(r#"        fn run_command(&mut self, run: &{c}::host::CommandRun) -> bool {{
-            self.game.native_run_command_as(&run.line, run.player, run.permission, run.at, run.rot, run.silent)
+            self.game.native_run_command_from(&run.line, run.player, run.permission, run.at, run.rot, run.silent)
         }}
         fn player_permission(&self, uuid: u128) -> Option<u8> {{
             let acting = self.game.native_acting_player().filter(|p| p.uuid == uuid);
@@ -755,7 +755,7 @@ fn server_send(c: &str) -> String {
 /// conversions (`to_nbt`).
 fn client_host(c: &str, id: &str) -> String {
     let reads = world_reads("self.game.get()", &c);
-    // The client's own player's attributes, effects, health and food (`native_attribute` of None),
+    // The client's own player's attributes, effects, health and food (`native_living_attribute` of None),
     // where the game is lent.
     let attributes = format!(
         "{}{}{}{}",
@@ -791,7 +791,7 @@ fn client_host(c: &str, id: &str) -> String {
             self.game.get().native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.get().native_block_name_in_tag(block, tag)
+            self.game.get().native_block_name_has_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.get().native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
@@ -898,7 +898,7 @@ fn client_host(c: &str, id: &str) -> String {
             }}
             let Some(g) = self.game.get_mut() else {{ return }};
             if let Some((options, _)) = g.native_particle_options(&p.kind, p.block.as_deref(), p.item.as_deref(), p.dust, p.at) {{
-                g.native_add_particle(&options, p.at, p.delta, p.force, p.always);
+                g.native_client_add_particle(&options, p.at, p.delta, p.force, p.always);
             }}
         }}
         // A mod's own particle is made as the game's are limited (a host that only reads makes none).
@@ -915,7 +915,7 @@ fn client_host(c: &str, id: &str) -> String {
             self.game.get().native_local_player().map(|(at, yaw, pitch, _)| (at, yaw, pitch))
         }}
         fn client_player(&self) -> Option<(String, u8)> {{
-            self.game.get().native_client_player()
+            self.game.get().native_window_player()
         }}
         fn client_player_id(&self) -> Option<i32> {{
             self.game.get().native_client_player_id()
@@ -1231,7 +1231,7 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_name_in_tag(block, tag)
+            self.game.native_block_name_has_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
@@ -1379,7 +1379,7 @@ fn client_helpers(id: &str, krate: &str) -> Vec<(&'static str, String)> {
             }}).collect();
             self.draw.push();
             self.draw.transform(text.pose);
-            self.game.native_draw_text(self.draw, &pieces, text.at, text.shadow, text.outline);
+            self.game.native_draw_text_pieces(self.draw, &pieces, text.at, text.shadow, text.outline);
             self.draw.pop();
             self.draw.light = saved;
             true
@@ -1849,7 +1849,7 @@ fn {id}_content(content: &mut horizon_mods::Content) {{
 // one property may decide (a sliding door is drawn by its renderer only while open, a rail's wire
 // is coloured by its power).
 fn {id}_content_block(block: &mut horizon_mods::content::Block) {{
-    use horizon_mods::content::{{BlockTints, RenderShapes, TintSource}};
+    use horizon_mods::content::{{BlockTints, RenderShape, RenderShapeStates, TintSource}};
     if !{krate}::ours(&block.id) {{
         return;
     }}
@@ -1866,7 +1866,13 @@ fn {id}_content_block(block: &mut horizon_mods::content::Block) {{
         let props: Vec<String> = own.iter().zip(values).map(|((k, _), v)| format!("{{k}}={{v}}")).collect();
         format!("{{}}[{{}}]", block.id, props.join(","))
     }};
-    if block.properties.render_shape.is_none() {{
+    // (`RenderShape`'s constant by the name the runtime gives it.)
+    let shape_of = |name: &str| match name {{
+        "entityblock_animated" => RenderShape::EntityblockAnimated,
+        "invisible" => RenderShape::Invisible,
+        _ => RenderShape::Model,
+    }};
+    if block.properties.render_shape.is_none() && block.properties.render_shape_states.is_none() {{
         let (default, varying) = {krate}::with_probe_runtime(|rt| {{
             let default = {c}::glue::render_shape(rt, &text(&base)).unwrap_or("model");
             let mut varying: Vec<(usize, Vec<(String, &'static str)>)> = Vec::new();
@@ -1883,23 +1889,26 @@ fn {id}_content_block(block: &mut horizon_mods::content::Block) {{
             }}
             (default, varying)
         }});
-        let all = (default != "model").then(|| RenderShapes::All(default.to_owned()));
-        let declared = match varying.as_slice() {{
+        // One property deciding it: its values drawn another way than the model (the others
+        // keep the model); else the default state's shape for every state.
+        let by_states = match varying.as_slice() {{
             [(i, by_value)] => {{
                 let off: Vec<&(String, &str)> = by_value.iter().filter(|(_, s)| *s != "model").collect();
                 match off.first() {{
-                    Some((_, shape)) if off.iter().all(|(_, s)| s == shape) => Some(RenderShapes::States {{
-                        shape: shape.to_string(),
+                    Some((_, shape)) if off.iter().all(|(_, s)| s == shape) => Some(RenderShapeStates {{
+                        shape: shape_of(shape),
                         property: own[*i].0.clone(),
                         values: off.iter().map(|(v, _)| v.clone()).collect(),
                     }}),
-                    _ => all,
+                    _ => None,
                 }}
             }}
-            _ => all,
+            _ => None,
         }};
-        if declared.is_some() {{
-            block.properties.render_shape = declared;
+        match by_states {{
+            Some(states) => block.properties.render_shape_states = Some(states),
+            None if default != "model" => block.properties.render_shape = Some(shape_of(default)),
+            None => {{}}
         }}
     }}
     // What its colour handler tints each index with (`RegisterColorHandlersEvent.Block`).
@@ -2671,7 +2680,7 @@ fn game_host(c: &str, server_send: &str) -> String {
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_name_in_tag(block, tag)
+            self.game.native_block_name_has_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
@@ -2778,7 +2787,7 @@ fn spawn_host(c: &str) -> String {
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_name_in_tag(block, tag)
+            self.game.native_block_name_has_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
@@ -2962,7 +2971,7 @@ fn entity_reads(c: &str) -> String {
         }}
         fn entities_in(&self, b: [f64; 6]) -> Vec<{c}::host::EntityView> {{
             let dim = self.game.native_dimension();
-            self.game.native_entities_in(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().filter_map(|id| {c}::host::Host::entity(self, id)).collect()
+            self.game.native_entity_ids_in(dim, [b[0], b[1], b[2]], [b[3], b[4], b[5]]).into_iter().filter_map(|id| {c}::host::Host::entity(self, id)).collect()
         }}
         fn entity(&self, id: i32) -> Option<{c}::host::EntityView> {{
             let t = self.game.level_entity(id)?;
@@ -2997,7 +3006,7 @@ fn world_writes(c: &str) -> String {
                     self.game.native_update_neighbors(&dimension, pos, block, skip);
                 }}
                 {c}::host::NeighborUpdate::One {{ pos, from }} => {{
-                    self.game.native_neighbor_changed(&dimension, pos, block, from);
+                    self.game.native_neighbor_changed_at(&dimension, pos, block, from);
                 }}
                 {c}::host::NeighborUpdate::Output {{ pos }} => {{
                     self.game.native_update_output_neighbors(&dimension, pos);
@@ -3233,7 +3242,7 @@ fn world_writes(c: &str) -> String {
                 }})
             }}
             let dimension = self.game.native_dimension().to_owned();
-            let saved = self.game.native_entity_nbt(&dimension, u32::try_from(id).ok()?)?;
+            let saved = self.game.native_level_entity_nbt(&dimension, u32::try_from(id).ok()?)?;
             Some(saved.iter().filter_map(|(k, v)| Some((k.to_string_lossy(), nbt(v)?))).collect())
         }}
         fn set_entity_health(&mut self, id: i32, health: f32) -> bool {{
@@ -3373,11 +3382,11 @@ const WORLD_METHODS: &str = r#"        fn world_dir(&self) -> Option<std::path::
 
 /// A host's living entities' attributes, through the game `game` gives (`Option<&mut Game>`):
 /// the player in place's whole map, a mob's plain values and the rest of its attributes
-/// (`native_attribute`, `native_change_attribute`).
+/// (`native_living_attribute`, `native_change_attribute`).
 fn attribute_methods(c: &str, game: &str) -> String {
     format!(
         r#"        fn attribute(&mut self, entity: Option<i32>, attribute: &str) -> Option<{c}::host::AttributeView> {{
-            let a = {game}?.native_attribute(entity, attribute)?;
+            let a = {game}?.native_living_attribute(entity, attribute)?;
             let modifiers = a.modifiers.into_iter().map(|m| {c}::host::AttributeModifierView {{ id: m.id, amount: m.amount, operation: m.operation, permanent: m.permanent }});
             Some({c}::host::AttributeView {{ value: a.value, base: a.base, modifiers: modifiers.collect() }})
         }}
@@ -3399,15 +3408,15 @@ fn attribute_methods(c: &str, game: &str) -> String {
 }
 
 /// A host's living entities' effects, through the game `game` gives (`Option<&mut Game>`): the
-/// player in place's and a mob's (`native_effects`, `native_add_effect`, `native_remove_effect`).
+/// player in place's and a mob's (`native_living_effects`, `native_living_add_effect`, `native_living_remove_effect`).
 fn effect_methods(c: &str, game: &str) -> String {
     format!(
         r#"        fn effects(&mut self, entity: Option<i32>) -> Option<Vec<{c}::host::EffectView>> {{
-            let effects = {game}?.native_effects(entity)?;
+            let effects = {game}?.native_living_effects(entity)?;
             Some(effects.into_iter().map(|e| {c}::host::EffectView {{ id: e.id, duration: e.duration, amplifier: e.amplifier, ambient: e.ambient, visible: e.visible, show_icon: e.show_icon }}).collect())
         }}
         fn add_effect(&mut self, entity: Option<i32>, effect: &{c}::host::EffectView, force: bool) -> bool {{
-            let effect = crate::game::native_effects::NativeEffect {{
+            let effect = crate::game::native_living_effects::NativeEffect {{
                 id: effect.id.clone(),
                 duration: effect.duration,
                 amplifier: effect.amplifier,
@@ -3415,10 +3424,10 @@ fn effect_methods(c: &str, game: &str) -> String {
                 visible: effect.visible,
                 show_icon: effect.show_icon,
             }};
-            {game}.is_some_and(|game| game.native_add_effect(entity, &effect, force))
+            {game}.is_some_and(|game| game.native_living_add_effect(entity, &effect, force))
         }}
         fn remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {{
-            {game}.is_some_and(|game| game.native_remove_effect(entity, effect))
+            {game}.is_some_and(|game| game.native_living_remove_effect(entity, effect))
         }}
 "#
     )
@@ -3747,7 +3756,7 @@ fn player_host(c: &str, server_effects: &str) -> String {
             self.game.native_state_text_at(pos)
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.game.native_block_name_in_tag(block, tag)
+            self.game.native_block_name_has_tag(block, tag)
         }}
         fn block_facts(&self, state: &str) -> Option<{c}::host::BlockFacts> {{
             self.game.native_state_facts(state).map(|(hardness, push, replaceable, sturdy)| {c}::host::BlockFacts {{ hardness, push, replaceable, sturdy }})
@@ -4770,7 +4779,7 @@ fn {id}_apply_effect_tick(game: &crate::game::Game<'_>, effect: &str, dimension:
 {player_host}        let mut host = Host {{ game }};
         let stays = {krate}::hook_runtime("apply_effect_tick", |rt| {c}::mob_effects::apply_tick(rt, &mut host, &effect, entity, amplifier));
         if stays == Some(false) {{
-            host.game.native_remove_effect(entity, &effect);
+            host.game.native_living_remove_effect(entity, &effect);
         }}
     }});
 }}
@@ -5369,7 +5378,7 @@ fn {id}_state_for_placement(
             (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.level.native_block_name_in_tag(block, tag)
+            self.level.native_block_name_has_tag(block, tag)
         }}
         // What a tag of the level's blocks, items and fluids holds, and every block or item.
         fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{
@@ -5470,7 +5479,7 @@ fn {id}_update_shape(
             (f32::from(u8::from(self.level.raining)), f32::from(u8::from(self.level.thundering)))
         }}
         fn block_in_tag(&self, block: &str, tag: &str) -> bool {{
-            self.level.native_block_name_in_tag(block, tag)
+            self.level.native_block_name_has_tag(block, tag)
         }}
         // What a tag of the level's blocks, items and fluids holds, and every block or item.
         fn holder_set(&self, registry: &str, set: &str) -> Option<Vec<String>> {{

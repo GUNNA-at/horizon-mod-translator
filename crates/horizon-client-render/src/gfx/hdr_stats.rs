@@ -31,19 +31,13 @@ impl EmissionStats {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
-        // The eight arrays the shader names, or sixteen for a game with more sprites than those
-        // hold (sprite_arrays.rs).
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Horizon HDR emission thresholds"),
-            source: wgpu::ShaderSource::Wgsl(super::sprite_arrays::source(
-                include_str!("../hdr_stats.wgsl"),
-                arrays,
-                super::sprite_arrays::STATS_FIRST,
-            )),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../hdr_stats.wgsl").into()),
         });
-        let mut entries: Vec<_> = (0..super::sprite_arrays::bound(arrays))
-            .map(|i| wgpu::BindGroupLayoutEntry {
-                binding: super::sprite_arrays::stats_binding(i),
+        let mut entries: Vec<_> = (0..super::SPRITE_ARRAYS)
+            .map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -54,7 +48,7 @@ impl EmissionStats {
             })
             .collect();
         entries.push(wgpu::BindGroupLayoutEntry {
-            binding: super::sprite_arrays::BASE,
+            binding: super::SPRITE_ARRAYS,
             visibility: wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
@@ -126,13 +120,13 @@ impl EmissionStats {
         let mut entries: Vec<_> = sprites
             .iter()
             .enumerate()
-            .map(|(i, view)| wgpu::BindGroupEntry {
-                binding: super::sprite_arrays::stats_binding(i as u32),
+            .map(|(binding, view)| wgpu::BindGroupEntry {
+                binding: binding as u32,
                 resource: wgpu::BindingResource::TextureView(view),
             })
             .collect();
         entries.push(wgpu::BindGroupEntry {
-            binding: super::sprite_arrays::BASE,
+            binding: super::SPRITE_ARRAYS,
             resource: self.params.as_entire_binding(),
         });
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {

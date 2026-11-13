@@ -34,7 +34,7 @@ pub(crate) struct NativeHitPlayer {
     pub(crate) sneaking: bool,
     /// The main hand's stack, then the off hand's; None for an empty hand.
     pub(crate) hands: [Option<NativeHitHand>; 2],
-    /// Their active effects (`native_effects`).
+    /// Their active effects (`native_living_effects`).
     pub(crate) effects: Vec<NativeEffect>,
 }
 
@@ -95,7 +95,7 @@ impl Game<'_> {
             player,
             sneaking,
             hands: [hand(Hand::Main), hand(Hand::Off)],
-            effects: self.native_effects(None).unwrap_or_default(),
+            effects: self.native_living_effects(None).unwrap_or_default(),
         })
     }
     fn hit_hand(&self, stack: &ItemStack) -> NativeHitHand {

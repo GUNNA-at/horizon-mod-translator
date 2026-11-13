@@ -5,7 +5,7 @@ use super::*;
 use horizon_world::{
     entity_fluid::{
         CurrentTarget, EntityFluidInteraction, FluidInteractionWorld, FluidMembership,
-        FluidSections, FluidTagId,
+        FluidSections, FluidTagId, ModFluidImmersion,
     },
     entity_fluid_tick::{self, EntityFluidTickWorld},
     fluid::{FluidHeightWorld, FluidKind, FluidState, FluidStateTable},
@@ -34,13 +34,21 @@ pub struct FluidResources {
 }
 impl FluidResources {
     pub fn new(assets: &Assets, facts: &crate::blocks::BlockFacts) -> Result<Self> {
+        Self::from_registry(assets.registry, facts, &assets.blocks_fluid_flow)
+    }
+    /// Build fluid queries from the same registry, block facts and flow tag as the scene.
+    pub fn from_registry(
+        registry: &horizon_world::registry::BlockRegistry,
+        facts: &crate::blocks::BlockFacts,
+        blocks_fluid_flow: &BTreeSet<String>,
+    ) -> Result<Self> {
         Ok(Self {
-            states: FluidStateTable::new(assets.registry)?,
+            states: FluidStateTable::new(registry)?,
             sturdy: facts.states.iter().map(|s| s.sturdy_full).collect(),
             blocks_flow: facts
                 .states
                 .iter()
-                .map(|s| assets.blocks_fluid_flow.contains(&*s.name))
+                .map(|s| blocks_fluid_flow.contains(&*s.name))
                 .collect(),
             ice: facts
                 .states
@@ -167,6 +175,26 @@ impl PlayerMotion {
     pub fn is_in_lava(&self) -> bool {
         !self.fluids.first_tick && self.fluids.interaction.is_in_fluid(&FluidTags, LAVA)
     }
+    /// The mod fluid the player is deepest in (`isInFluidType`), if any: the
+    /// player moves in it as in water, with its numbers.
+    pub fn mod_fluid(&self) -> Option<ModFluidImmersion> {
+        self.fluids
+            .interaction
+            .mod_fluids()
+            .filter(|m| m.height > 0.0)
+            .max_by(|a, b| a.height.total_cmp(&b.height))
+    }
+    /// That mod fluid when it `canSwim`: the player swims and rises in it.
+    pub fn swim_fluid(&self) -> Option<ModFluidImmersion> {
+        self.mod_fluid().filter(|m| m.fluid.info().entity.can_swim)
+    }
+    /// Whether the eyes are in a mod fluid that `canDrown`.
+    pub fn eye_in_drowning_fluid(&self) -> bool {
+        self.fluids
+            .interaction
+            .mod_fluids()
+            .any(|m| m.eyes_inside && m.fluid.info().entity.can_drown)
+    }
 }
 /// `BubbleColumnBlock.entityInside` for an entity that is not the player (a mob,
 /// a dropped item, an ender pearl): the bubble columns its box touches push it
@@ -181,25 +209,71 @@ pub fn bubble_column_push(
     bounds: Aabb,
     velocity: &mut Vec3,
 ) -> bool {
+    bubble_column_push_over(world, registry, facts, collision, bounds, velocity, |_| {})
+}
+/// [`bubble_column_push`], telling `surface` the position of each column block
+/// the entity is at the top of: `handleOnAboveBubbleColumn` sends the splash and
+/// bubble particles over it (`Entity.sendBubbleColumnParticles`).
+pub fn bubble_column_push_over(
+    world: &World,
+    registry: &horizon_world::registry::BlockRegistry,
+    facts: &crate::blocks::BlockFacts,
+    collision: &horizon_world::block_collision::BlockCollisionRegistry<'_>,
+    bounds: Aabb,
+    velocity: &mut Vec3,
+    mut surface: impl FnMut(BlockPos),
+) -> bool {
+    let mut reset_fall = false;
+    bubble_columns_touching(world, registry, facts, collision, bounds, |pos, column| {
+        reset_fall |= column.push(velocity);
+        if column.surface {
+            surface(pos);
+        }
+    });
+    reset_fall
+}
+/// The column blocks `bounds` touches that it is at the top of: where the
+/// particles of `Entity.sendBubbleColumnParticles` start.
+pub fn bubble_column_surfaces(
+    world: &World,
+    registry: &horizon_world::registry::BlockRegistry,
+    facts: &crate::blocks::BlockFacts,
+    collision: &horizon_world::block_collision::BlockCollisionRegistry<'_>,
+    bounds: Aabb,
+) -> Vec<BlockPos> {
+    let mut surfaces = Vec::new();
+    bubble_columns_touching(world, registry, facts, collision, bounds, |pos, column| {
+        if column.surface {
+            surfaces.push(pos);
+        }
+    });
+    surfaces
+}
+/// Every bubble column block the box touches (`Entity.getInsideBlockPoints`).
+fn bubble_columns_touching(
+    world: &World,
+    registry: &horizon_world::registry::BlockRegistry,
+    facts: &crate::blocks::BlockFacts,
+    collision: &horizon_world::block_collision::BlockCollisionRegistry<'_>,
+    bounds: Aabb,
+    mut each: impl FnMut(BlockPos, BubbleColumn),
+) {
     let b = bounds.deflate(Vec3::new(
         f64::from(1.0e-5f32),
         f64::from(1.0e-5f32),
         f64::from(1.0e-5f32),
     ));
     let (lo, hi) = (b.min_position(), b.max_position());
-    let mut reset_fall = false;
     for x in lo.x.floor() as i32..=(hi.x.ceil() as i32 - 1) {
         for y in lo.y.floor() as i32..=(hi.y.ceil() as i32 - 1) {
             for z in lo.z.floor() as i32..=(hi.z.ceil() as i32 - 1) {
-                if let Some(column) =
-                    bubble_column_at(world, registry, facts, collision, BlockPos::new(x, y, z))
-                {
-                    reset_fall |= column.push(velocity);
+                let pos = BlockPos::new(x, y, z);
+                if let Some(column) = bubble_column_at(world, registry, facts, collision, pos) {
+                    each(pos, column);
                 }
             }
         }
     }
-    reset_fall
 }
 /// A bubble column block as `BubbleColumnBlock.entityInside` sees it: whether
 /// it drags down (`DRAG_DOWN`), and whether it is the surface (nothing above it
@@ -275,18 +349,19 @@ impl MotionWorld<'_, '_, '_> {
         // the server's copy of a guest who boards a boat while swimming is not
         // left in the swimming box (eye 0.4) in the seat, at the waterline,
         // where the boat drowned and suffocated them (#4427).
+        // A mod fluid that `canSwim` keeps and starts a swim as water does.
+        let swim = self.player.swim_fluid();
+        let feet = self
+            .fluid_at(BlockPos::containing(self.player.position))
+            .kind();
         self.player.swimming = !self.player.flying
             && !self.player.is_passenger
             && self.player.sprinting
             && if self.player.swimming {
-                self.player.fluids.was_touching_water
+                self.player.fluids.was_touching_water || swim.is_some()
             } else {
-                self.player.is_under_water()
-                    && is_tagged(
-                        self.fluid_at(BlockPos::containing(self.player.position))
-                            .kind(),
-                        WATER,
-                    )
+                self.player.is_under_water() && is_tagged(feet, WATER)
+                    || swim.is_some_and(|m| m.eyes_inside && feet.source() == m.fluid)
             };
         self.tick_remaining_fire()?;
         if self.player.is_in_lava() {
@@ -409,6 +484,10 @@ impl EntityFluidTickWorld for MotionWorld<'_, '_, '_> {
         self.player.fall_distance = 0.0;
         Ok(())
     }
+    fn scale_fall_distance(&mut self, by: f32) -> Result<()> {
+        self.player.fall_distance *= f64::from(by);
+        Ok(())
+    }
     fn was_touching_water(&self) -> bool {
         self.player.fluids.was_touching_water
     }
@@ -416,6 +495,10 @@ impl EntityFluidTickWorld for MotionWorld<'_, '_, '_> {
         self.player.fluids.first_tick
     }
     fn water_splash(&mut self) -> Result<()> {
+        // `Player.doWaterSplashEffect`: spectators skip the effect (and its random draws).
+        if self.player.spectator {
+            return Ok(());
+        }
         water_splash::water_splash(self, 1_000_000).map_err(|e| e.to_string())?;
         Ok(())
     }

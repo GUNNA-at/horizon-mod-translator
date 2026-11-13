@@ -103,6 +103,14 @@ impl Game<'_> {
         hit.filter(|h| self.before_block(h.distance))
     }
 
+    /// Where the client's copy of a mod's entity `vehicle` seats the window's own player
+    /// (`native_client_mod_seat`): None when it isn't a mod's entity the client has.
+    pub(super) fn mod_seat_of(&mut self, vehicle: i32) -> Option<[f64; 3]> {
+        let me = self.remote.as_ref()?.entity_id;
+        let mut seat = None;
+        self.native_client_mod_seat(vehicle, me, &mut seat);
+        seat
+    }
     /// The translated mods' entity the crosshair targets (`Minecraft.hitResult`): the one the view
     /// meets before any block, unless one of the game's own entities is nearer.
     pub(super) fn mod_entity_targeted(&self) -> Option<ModEntityHit> {
@@ -117,7 +125,6 @@ impl Game<'_> {
             self.interaction_hit().map(|h| h.1),
             self.dragon_hit().map(|h| h.1),
             self.mob_hit().map(|h| h.1),
-            self.guest_hit().map(|h| h.1),
             self.redirectable_hit().map(|h| h.1),
             self.remote_object_hit(true).map(|h| h.distance),
         ]
@@ -296,7 +303,7 @@ impl Game<'_> {
             state: None,
             at,
             spread,
-            speed,
+            speed: [speed; 3],
             count,
             randomization: 0,
         });

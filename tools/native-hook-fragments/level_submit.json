@@ -3,7 +3,8 @@
     {
       "name": "level_submit",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_level_submit",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "a client draw hook for what a mod keeps in the level besides blocks, block entities and mobs (`native_level_submit`): a translated mod's own entities.",

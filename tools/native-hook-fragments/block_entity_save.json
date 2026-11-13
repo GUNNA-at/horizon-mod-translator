@@ -2,7 +2,8 @@
   "hooks": [
     {
       "name": "block_entity_save",
-      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_save"
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_save",
+      "mod_api": false
     }
   ],
   "rust_summary": "a mod block entity writing what it holds now into its saved data before its chunk saves or a `/data` command reads it (`native_block_entity_save`).",

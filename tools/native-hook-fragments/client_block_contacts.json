@@ -3,12 +3,14 @@
     {
       "name": "client_block_step_on",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_block_step_on",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     },
     {
       "name": "client_block_entity_inside",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_client_block_entity_inside",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "the window's own player's contacts with mod blocks on its client's level (`native_client_block_step_on`, `native_client_block_entity_inside`), their move and walking input for a client mod (`native_move_client_player`, `native_client_player_input`), and a client mod putting them somewhere, on the ground, where they stood as the tick began and what entities they collide with (`native_set_client_player_pos`, `native_set_client_player_on_ground`, `native_client_player_old_pos`, `native_client_entity_collisions`).",

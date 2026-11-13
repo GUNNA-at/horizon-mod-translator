@@ -118,7 +118,7 @@ impl Game<'_> {
         let Some(state) = state_from_text(self.pack.assets.registry, text) else {
             return Vec::new();
         };
-        let mut drops = self.block_loot_rolled(pos, state, tool);
+        let mut drops = self.block_loot_rolled(pos, state, tool, None);
         drops.retain(|d| &*d.item != "minecraft:air" && d.count > 0);
         for d in &mut drops {
             self.pending.attach(pos, d);

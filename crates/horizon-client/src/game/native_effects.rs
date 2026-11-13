@@ -40,7 +40,7 @@ impl Game<'_> {
     /// (`minecraft:speed`). None when it isn't a living entity of the level or has no effects to
     /// keep (an armour stand). API @API:effects@.
     #[allow(dead_code)]
-    pub(crate) fn native_effects(&self, entity: Option<i32>) -> Option<Vec<NativeEffect>> {
+    pub(crate) fn native_living_effects(&self, entity: Option<i32>) -> Option<Vec<NativeEffect>> {
         match self.living(entity)? {
             Living::Player => Some(
                 self.potions
@@ -81,13 +81,13 @@ impl Game<'_> {
         }
     }
 
-    /// Gives the living entity `entity` (as [`Game::native_effects`] names it) the effect
+    /// Gives the living entity `entity` (as [`Game::native_living_effects`] names it) the effect
     /// `effect` (`LivingEntity.addEffect`: one of the same effect there already is updated, a
     /// stronger one taking over, one as strong lasting as long as the longer; with `force`,
     /// `forceAddEffect`, replaced). Whether it was added or changed what was there: not for an
     /// effect the game doesn't know, nor one the mob can't have. API @API:effects@.
     #[allow(dead_code)]
-    pub(crate) fn native_add_effect(&mut self, entity: Option<i32>, effect: &NativeEffect, force: bool) -> bool {
+    pub(crate) fn native_living_add_effect(&mut self, entity: Option<i32>, effect: &NativeEffect, force: bool) -> bool {
         let Some(def) = brewing::effect(&effect.id) else {
             return false;
         };
@@ -132,7 +132,7 @@ impl Game<'_> {
     /// Takes the effect `effect` (`minecraft:speed`) off the living entity `entity`
     /// (`LivingEntity.removeEffect`): whether it had it. API @API:effects@.
     #[allow(dead_code)]
-    pub(crate) fn native_remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {
+    pub(crate) fn native_living_remove_effect(&mut self, entity: Option<i32>, effect: &str) -> bool {
         let Some(def) = brewing::effect(effect) else {
             return false;
         };

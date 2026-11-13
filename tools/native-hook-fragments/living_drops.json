@@ -2,7 +2,8 @@
   "hooks": [
     {
       "name": "living_drops",
-      "target": "horizon_client::game::native_hooks::Game<'_>::native_living_drops"
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_living_drops",
+      "mod_api": false
     }
   ],
   "rust_summary": "a dead mob's drops a mod can change, add to, take from or cancel before they join the level (`native_living_drops`).",

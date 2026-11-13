@@ -1,6 +1,6 @@
 # Benchmark: Horizon vs vanilla 26.3
 
-`tools/perf_bench.py` measures Horizon, the vanilla 26.3 client and vanilla with performance mods on the same machine, the same world and the same camera path, and computes every number with the same code. This page says what it measures, how it keeps the comparison fair, what it can't control, and how to reproduce it. The results are in [Results](#results).
+`tools/perf_bench.py` measures Horizon, the vanilla 26.3 client, and vanilla with performance mods on the same machine, world, and camera path, computing every number with the same code. This page says what it measures, how it keeps the comparison fair, what it can't control, and how to reproduce it. The results are in [Results](#results).
 
 ## What is measured
 
@@ -42,11 +42,40 @@ horizon-client --benchmark standard --render-distance 16
 
 It starts at the title screen, creates the world `horizon-benchmark` (seed 1234, creative; the next run replaces it, and it never touches a world it didn't create), flies the four scenes as above, writes a report to `benchmarks/` in the game folder and quits. `--benchmark village` (or `forest`, `ocean`, `mountain`) flies one scene. For the run only, VSync is off, the frame rate unlimited and the game doesn't pause or slow down without focus; your options are not changed. Your other settings (render distance unless given, graphics, window size) are used as they are, and stored in the report, so compare reports with the same conditions.
 
+### A fixed trip
+
+`horizon-client --benchmark travel` measures what a spawn-only run cannot: the renderer after travel. GPU culling's slowdown only showed after a few hundred blocks, because section ids and arena pages scramble as chunks unload and reload. The run is deterministic: the same seed, path and speed, with the time frozen at noon and the weather clear (`gamerule advance_time` and `advance_weather` off, `weather clear`, `time 6000`), so two runs, or two machines, are comparable. The player is placed at (-960, 150, -176), the view loads, then the camera flies to (-960, 150, 336) in 32 seconds (512 blocks at 16 blocks per second, pitch 30), reported as phase `travel`. It then holds at the end, waits for the view to load and measures four 4-second `hold` blocks. The report's scenario is `travel` and its `repeats` is 4. Besides the figures of the scenes it has `cpu.<phase>.p50_ms` and `gpu.<phase>.p50_ms` for `travel` and `hold` (the median over the hold blocks), so a regression that grows with travel shows in `hold` against a fresh spawn.
+
+`--benchmark-set SWITCH=VALUE` (only with `--benchmark travel`) sets a graphics switch before the world opens: `gpu-culling` (`off`, `on`), `section-cull` (`on`, `off`), `section-sides` (`on`, `off`) or `section-draws` (`flat`, `indirect`), the first value being the default. A switch the device does not offer (`gpu-culling on` where it is not) ends the run with the game's reason and no report. To time a block yourself in any world, `horizon-ctl bench SECONDS raw` replies with the summary and every frame time.
+
+`--profile` (with `--benchmark`) also records a performance capture of the run, `reports/profile-<time>Z.hzperf` in the game home, with the render thread's call trees, and embeds the report in it verbatim; the game prints both paths. `horizon-perf query bench FILE` lists the report's metrics and frames from the capture, and `horizon-perf summary` and `diff` take a bare `benchmarks/*.json` wherever they take a capture ([perf-platform.md](perf-platform.md)). A run longer than the capture's 10 minute window (`standard` on a slow machine) ends the capture early and keeps the report out of it.
+
+### Compare a setting
+
+`horizon-client --benchmark ab:SWITCH` tells whether one renderer setting changes the frame time, or only the noise of the machine. It runs the trip of `travel` with the switch's B value set before the world opens, then measures 8 pairs of 4-second blocks in the order B A A B B A A B..., each after 2 seconds at that arm that are discarded and with the time reset to noon before each pair. Neighbouring blocks are in different arms and the order alternates, so drift (heat, streaming finishing, other programs) cancels. Afterwards each arm's render passes are timed once (`gpu_pass.ab_a.<pass>_ms`, `gpu_pass.ab_b.<pass>_ms`), and the setting is put back to what it was before the run, also when the run fails. It takes about 3 minutes.
+
+| `SWITCH` | A (the default) | B |
+| --- | --- | --- |
+| `gpu-culling` | `off` | `on` |
+| `section-cull` | `on` | `off` |
+| `section-sides` | `on` | `off` |
+| `section-draws` | `flat` | `indirect` |
+
+```sh
+horizon-client --benchmark ab:gpu-culling --render-distance 12
+horizon-ctl --socket $PWD/ctl.sock launch --offscreen --benchmark ab:gpu-culling
+python3 tools/bench_stats.py benchmarks/game-*-ab_gpu-culling.json
+```
+
+The game quits when it is done, so `launch` without `--wait` is enough; the report is under `benchmarks/` in the game folder.
+
+The report's scenario is `ab:SWITCH`, its `repeats` the number of blocks (16) and its `warmup_s` 2. The blocks are `frames` entries with phase `ab.a` or `ab.b`, and the report's `ab` field holds the result for the GPU, CPU and frame time of a frame: B minus A, a 95% interval and a verdict (`slower`, `faster`, `negligible`, `within_noise`), computed as described in [the report format](benchmark-report.md). A difference inside the interval around 0 is noise. `ab.first_block_outside_range` is true when the first B block, the only one measured before any switch, lies outside the later B blocks: switching reset part of what the trip built (turning GPU culling on rebuilds its records from the renderer's resident order, which can undo the scrambled ids of the trip), so the comparison may understate the difference. A switch the device does not offer (`gpu-culling on` where it is not) ends the run with the game's reason and no report.
+
 The report is the [benchmark report format](benchmark-report.md): startup to the title screen and to in-world, each scene's chunk load time, chunks generated and section meshes built, every flight's frame figures and histogram, resident and GPU memory, the binary's size, and the machine (OS, CPU, RAM, GPU, driver, backend, display), the load average before the run and whether it ran on battery. If you allowed benchmark uploads (the launcher's data collection choices, [docs/telemetry.md](telemetry.md)), the same report, dated to the day and without local fields, is kept for the launcher to send; otherwise it stays on your machine.
 
 ## Reproduce it
 
-You need Horizon built (`cargo build --release -p horizon-client -p horizon-client-lib --bins`) and its resources prepared from your own copy of 26.3 (which also provides `.local/minecraft/26.3`, the vanilla client the driver starts), Java 25 with `javac`, and Python 3.10 or newer.
+You need Horizon built (`cargo build --release -p horizon-client -p horizon-client-lib --bins`) and its resources prepared from your own copy of 26.3 (which also provides `.local/minecraft/26.3`, the vanilla client the driver starts), Java 25 with `javac`, and Python 3.11 or newer.
 
 ```sh
 python3 tools/perf_bench.py --game horizon --label horizon-mine
@@ -55,9 +84,41 @@ python3 tools/perf_bench.py --game vanilla-mods --label mods-mine
 python3 tools/perf_bench.py --table horizon-mine vanilla-mine mods-mine
 ```
 
-Options: `--distances 8,16`, `--sizes 1920x1080`, `--scenes village,ocean`, `--seconds 20`, `--repeats 5`, `--heap 4G` (vanilla), `--offscreen` (Horizon, for locked or headless sessions). Results go to `benchmarks/perf/<label>-rd<N>.json` at 1280x720 and `<label>-1080p-rd<N>.json` at 1920x1080 (other sizes `<label>-<W>x<H>-rd<N>.json`; `--table` takes those labels), one [benchmark report](benchmark-report.md) per window size and render distance (the same format the game's `--benchmark` and the launcher write), with the load average before each game; each game's log, and the vanilla driver's event log, stay in `.local/perf-bench/`. Keep the machine otherwise idle, plugged in, and the window on a screen.
+Options: `--distances 8,16`, `--sizes 1920x1080`, `--scenes village,ocean`, `--seconds 20`, `--repeats 5`, `--heap 4G` (vanilla), `--offscreen` (Horizon, for locked or headless sessions). Results go to `benchmarks/perf/<label>-rd<N>.json` at 1280x720 and `<label>-1080p-rd<N>.json` at 1920x1080 (other sizes `<label>-<W>x<H>-rd<N>.json`; `--table` takes those labels), one [benchmark report](benchmark-report.md) per window size and render distance (the same format the game's `--benchmark` and the launcher write), with the load average before each game; each game's log, and the vanilla driver's event log, stay in `.local/perf-bench/`. Keep the machine otherwise idle, plugged in, and the window on a screen. `PERF_BENCH_TRACE=<file>` appends each load's timeline to that file, one JSON line per sample: Horizon's status every 50 ms after a line for each teleport (resident and generated chunks, chunks still pending, stage counts), and the vanilla driver's loaded chunk count and the chunks it holds within the render distance minus one; compare when the columns arrive with when the load ends.
+
+### Many-entity stress scenes
+
+`--scenes stress` (or some of `stress_empty`, `stress_mobs`, `stress_items`, `stress_frames`, `stress_armor_stands`, `stress_chests`, `stress_signs`, `stress_banners`, `stress_particles`) runs the scenes of `tools/stress_scenes.py` instead of flying: 1000 still mobs of 8 kinds, 2000 dropped items, 512 item frames, 500 armoured armor stands, 800 chests and shulker boxes, a wall of 687 written signs, 300 banners, and steady particles from repeating command blocks (flames, smoke, end rods, firework bursts, TNT in the air). Each is built high above the terrain by the same vanilla commands in every game (Horizon through `horizon-ctl command`, vanilla and vanilla-mods through the driver mod), settles 6 seconds and is held still for `--seconds`; `stress_empty` is the same camera and floor without them. Entities are drawn only within a distance that grows with the render distance up to 20 (`Entity.shouldRenderAtSqrDistance`), so run them at 16 or more:
+
+```sh
+python3 tools/perf_bench.py --game horizon --scenes stress --distances 16 --label stress-horizon
+python3 tools/perf_bench.py --game vanilla --scenes stress --distances 16 --label stress-vanilla
+python3 tools/perf_bench.py --table stress-horizon stress-vanilla
+```
+
+Besides the FPS table, `--table` then gives each scene's median frame CPU time (Horizon), client tick time and resident memory. Chests stay closed: opening them needs a player, which neither driver has. The stress scenes use 26.3's command syntax, so they are not for `--game neoforge`.
 
 On Windows, run `python tools\perf_bench.py ...` the same way. Horizon's control endpoint there is a localhost TCP port, which the game writes to a `.json` file in the temporary folder. `--build` can point at an installed release (`%APPDATA%\horizon-launcher\versions\vX.Y.Z`, with `--resources` its `.local\horizon-client\26.3`), and the report then gives that release's version.
+
+## Frame pacing
+
+`tools/pacing_bench.py` measures smoothness rather than throughput: every frame of the sessions where players see
+hitches, a fast flight (64 blocks a second over new terrain), eight long teleports, trips to the Nether and back, and
+the inventory and pause menu opened and closed twenty times. For each it reports the median, p99 and p99.9 frame
+times, the slowest frame, the 1% and 0.1% lows and the frames over 33 ms. The game runs with `HORIZON_SPIKES`, so
+its slow ring keeps every slow frame's timed spans (wall and thread CPU time), and a client capture (`profile client start`) records each scenario: the report keeps the 12
+slowest frames' spans, read with `horizon-perf query ticks`, next to the figures, which says whether a hitch was work (a
+span's CPU time) or waiting (the GPU, a lock, a file). Build `horizon-perf` beside the game first
+(`cargo build --profile fast -p horizon-perf`, or pass `--perf`). The ring holds 256 frames, and the threshold (`--spike-ms`, 20 by default) is on the frame's wall time.
+`Renderer`'s frame and `entity_geometry` time their steps as spans too (`spans::laps`).
+
+```sh
+python3 tools/pacing_bench.py --build target/fast --label main --distances 32
+python3 tools/pacing_bench.py --compare main mybranch
+```
+
+`--size 320x180` keeps a software renderer (Mesa's lavapipe on a machine with no GPU) from hiding the CPU side; there
+only the spans' CPU times mean anything.
 
 ## Results
 

@@ -116,7 +116,7 @@ fn entity_state(mob: &mut Mob, species: Species, case: &Value) {
                 for (i, flags) in ticks.iter().enumerate() {
                     mob.age = i as u32 + 1;
                     bat::set_resting(mob, flags.as_i64().unwrap_or(0) & 1 != 0);
-                    if flag("@batInFrame") {
+                    if flag("@batServerTick") {
                         bat::tick(mob);
                     } else {
                         bat::setup_animation_states(mob);
@@ -227,7 +227,7 @@ fn entity_state(mob: &mut Mob, species: Species, case: &Value) {
             mob.anim.flap_speed_o = num("flapSpeed");
         }
         Species::Wolf => {
-            mob.extra.sitting = flag("isSitting");
+            mob.extra.sitting_pose = flag("isSitting");
             mob.extra.anger = if flag("isAngry") { 100 } else { 0 };
             mob.anim.v[tame::SHAKE] = num("shakeAnim");
             mob.anim.vo[tame::SHAKE] = num("shakeAnim");
@@ -275,7 +275,7 @@ fn entity_state(mob: &mut Mob, species: Species, case: &Value) {
             }
         }
         Species::HappyGhast => {
-            mob.extra.head = case["bodyItem"].as_str().map(Into::into);
+            mob.extra.body = case["bodyItem"].as_str().map(Into::into);
             if flag("isRidden") {
                 mob.rider = Some(Default::default());
             }

@@ -2,7 +2,8 @@
   "hooks": [
     {
       "name": "block_entity_components",
-      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_components"
+      "target": "horizon_client::game::native_hooks::Game<'_>::native_block_entity_components",
+      "mod_api": false
     }
   ],
   "rust_summary": "what a mod block entity gives the item its block drops (`native_block_entity_components`).",

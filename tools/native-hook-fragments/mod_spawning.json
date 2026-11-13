@@ -4,25 +4,29 @@
       "name": "mod_spawn_types",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_types",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "mod_spawn_rules",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_rules",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "mod_spawn_mob",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_mob",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     },
     {
       "name": "mod_spawn_census",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_mod_spawn_census",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "a native mod's entity types in the game's natural spawning and chunk generation: their facts (`native_mod_spawn_types`), their spawn rules (`native_mod_spawn_rules`), the mob itself where the spawner placed it (`native_mod_spawn_mob`) and the mod's own entities as the spawn caps count them (`native_mod_spawn_census`); `native_valid_spawn` answers `BlockState.isValidSpawn` for a mod's rules.",

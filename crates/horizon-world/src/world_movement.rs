@@ -1,7 +1,9 @@
 //! Entity.collide collection order and step resolution over a collision world.
 //! Travel, velocity, grounded flags and inside-block effects remain caller work.
 use crate::{
-    block_collision_scan::{BlockCollisionScan, BlockCollisionWorld, CollisionScanError},
+    block_collision_scan::{
+        BlockCollisionScan, BlockCollisionWorld, CollisionScanError, scan_cells,
+    },
     collision_context::CollisionContext,
     entity_obstruction::EntityIdentity,
 };
@@ -56,26 +58,38 @@ where
             entity_collision_bounds(request.movement, request.bounds, request.max_step),
         )
         .map_err(CollisionScanError::World)?;
+    // Vanilla walks the whole box a movement expands to with no candidate
+    // counter, so a movement big enough to pass the caller's budget is slow
+    // there, never fatal (#6124: a legal movement_speed of 400 crossed more
+    // than a million cells on a diagonal and aborted the game). The budget
+    // only has to cover the cells both queries of a step can visit: the
+    // sweep, and the step's own box raised by max_step.
+    let sweep = request
+        .bounds
+        .expand_towards(request.movement)
+        .expand_towards(Vec3::new(0.0, f64::from(request.max_step.max(0.0)), 0.0));
+    let candidate_budget = scan_cells(sweep).map_or(request.candidate_budget, |cells| {
+        cells.max(request.candidate_budget)
+    });
     try_resolve_step_movement(
         request.movement,
         request.bounds,
         request.max_step,
         request.on_ground,
         |bounds| {
-            let mut shapes = entities.clone();
+            // A box's blocks are a few dozen shapes at most: one allocation,
+            // not the doubling a push-by-push list makes.
+            let mut shapes = Vec::with_capacity(entities.len() + 16);
+            shapes.extend_from_slice(&entities);
             if let Some(border) = world
                 .movement_border(request.entity, bounds)
                 .map_err(CollisionScanError::World)?
             {
                 shapes.push(border);
             }
-            for hit in BlockCollisionScan::new(
-                world,
-                request.context,
-                bounds,
-                false,
-                request.candidate_budget,
-            )? {
+            for hit in
+                BlockCollisionScan::new(world, request.context, bounds, false, candidate_budget)?
+            {
                 shapes.push(hit?.shape);
             }
             Ok(shapes)
@@ -99,16 +113,14 @@ pub fn no_world_collision<W, E>(
 where
     W: BlockCollisionWorld<Error = E> + EntityMovementWorld<Error = E>,
 {
-    for hit in BlockCollisionScan::new(
+    if BlockCollisionScan::any_collision(
         world,
         request.context,
         request.bounds,
         false,
         request.candidate_budget,
     )? {
-        if !hit?.shape.is_empty() {
-            return Ok(false);
-        }
+        return Ok(false);
     }
     if !world
         .entity_collisions(request.entity, request.bounds)

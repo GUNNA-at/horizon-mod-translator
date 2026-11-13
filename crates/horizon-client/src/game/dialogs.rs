@@ -4,6 +4,7 @@
 //! connecting screen in configuration), its inputs, and the actions its
 //! buttons send back.
 use super::Game;
+use super::remote_chat::Behind;
 use horizon_client::{
     Result,
     clipboard::EditShortcut,
@@ -34,6 +35,9 @@ struct Open {
     /// The multiline input the pointer is selecting in.
     selecting: Option<usize>,
 }
+
+/// A dialog a clicked command closed, kept for its confirmation's no.
+pub(super) struct ClosedDialog(Box<Open>);
 
 /// A text input's control: `EditBox`, or `MultiLineEditBox` for a multiline one.
 enum Field {
@@ -86,6 +90,22 @@ pub(super) struct DialogState {
     warning: bool,
 }
 
+impl DialogState {
+    /// `Minecraft.pause` over these screens: `DialogScreen.isPauseScreen` is
+    /// the dialog's own `pause` (`CommonDialogData.pause`, true by default),
+    /// `WaitingForResponseScreen` overrides it false, and the warning above
+    /// the dialog is a `ConfirmScreen`, which inherits `Screen`'s true.
+    pub(super) fn pauses_world(&self) -> bool {
+        if self.warning {
+            return true;
+        }
+        if self.waiting.is_some() {
+            return false;
+        }
+        self.open.as_ref().is_some_and(|open| open.dialog.pause)
+    }
+}
+
 /// `CycleButton.cycleValue`: the next option (`delta` 1) or the one before
 /// it, wrapping.
 fn cycle(open: &mut Open, input: usize, delta: i32) {
@@ -111,6 +131,35 @@ impl Game<'_> {
     pub(super) fn dialog_open(&self) -> bool {
         let d = &self.dialogs;
         d.open.is_some() || d.waiting.is_some() || d.warning
+    }
+    /// What tells one dialog screen from another for a controller's focus: a new dialog is a
+    /// new screen, and so are the warning and waiting screens.
+    pub(super) fn dialog_screen_key(&self) -> (bool, bool, Option<String>) {
+        let d = &self.dialogs;
+        (
+            d.warning,
+            d.waiting.is_some(),
+            d.open.as_ref().map(|o| o.dialog.title.plain()),
+        )
+    }
+    /// The warning icon in the dialog's corner, while the dialog itself shows.
+    pub(super) fn dialog_warning_icon(&self) -> Option<[f32; 4]> {
+        let d = &self.dialogs;
+        if d.warning || d.waiting.is_some() {
+            return None;
+        }
+        self.dialog_layout().map(|layout| layout.warning)
+    }
+    /// The dialog itself shows, with a text input to start on.
+    pub(super) fn dialog_starts_typing(&self) -> bool {
+        !self.dialogs.warning && self.dialogs.waiting.is_none() && self.dialog_has_text_field()
+    }
+    /// The dialog's focus is a text input of many lines, where Enter is a new line.
+    pub(super) fn dialog_typing_lines(&self) -> bool {
+        self.dialogs.open.as_ref().is_some_and(|o| {
+            let field = o.focus.and_then(|f| o.fields.get(f));
+            matches!(field, Some(Some(Field::Multi(_))))
+        })
     }
     /// Whether the dialog's focus is one of its text inputs, which takes the
     /// keys.
@@ -149,7 +198,11 @@ impl Game<'_> {
                     } else {
                         format!("minecraft:{name}")
                     };
-                    let ids = r.registries.dialog_tags.get(&name).into_iter().flatten();
+                    let ids = r
+                        .registries
+                        .tag("minecraft:dialog", &name)
+                        .into_iter()
+                        .flatten();
                     ids.filter_map(|&i| list?.get(usize::try_from(i).ok()?)?.1.clone())
                         .collect()
                 };
@@ -252,6 +305,12 @@ impl Game<'_> {
         }
     }
 
+    /// The confirmation's no: the dialog again, with what was typed in it.
+    pub(super) fn reopen_dialog(&mut self, dialog: ClosedDialog) {
+        self.dialogs.open = Some(*dialog.0);
+        self.dialogs.waiting = None;
+    }
+
     /// `DialogScreen.runAction`: the click event, then the screen the dialog's
     /// `after_action` leaves.
     fn run_dialog_action(&mut self, click: Option<Click>, after: AfterAction) -> Result<()> {
@@ -266,6 +325,14 @@ impl Game<'_> {
             }
             return Ok(());
         }
+        // openSendConfirmationWindow's `currentScreen`: a command that asks
+        // first still has this dialog to go back to.
+        let closing = match (&click, &after) {
+            (Some(Click::RunCommand(_)), AfterAction::Close | AfterAction::WaitForResponse) => {
+                self.dialogs.open.take()
+            }
+            _ => None,
+        };
         match after {
             AfterAction::None => {}
             AfterAction::Close => self.dialogs.open = None,
@@ -284,6 +351,11 @@ impl Game<'_> {
                 // In configuration there is nothing to run it (vanilla warns).
                 if self.player.is_some() {
                     self.send_unattended_command(&command);
+                    if let Some(open) = closing {
+                        self.command_prompt_returns_to(Behind::Dialog(ClosedDialog(Box::new(
+                            open,
+                        ))));
+                    }
                 } else {
                     log::warn!(
                         "Horizon: commands are not supported in configuration, trying to run '{command}'"
@@ -377,14 +449,11 @@ impl Game<'_> {
         if !self.dialog_open() {
             return;
         }
+        widgets::cover_frame();
         let (w, h) = (batch.width, batch.height);
         let cursor = self.cursor;
         let atlas = &self.gui.atlas;
-        if self.player.is_none() {
-            // In place of the connecting screen, on its background.
-            batch.fill(atlas, 0.0, 0.0, w, h, rgba(20, 20, 20, 255));
-        }
-        ui::menu_background(batch, atlas, 0.0, 0.0, w, h, self.player.is_some());
+        draw_background(batch, atlas, self.player.is_some());
         if self.dialogs.warning {
             let (title, message, [disconnect, back]) = warning_texts();
             // DialogScreen.WarningScreen, a ConfirmScreen: its title and its
@@ -395,12 +464,9 @@ impl Game<'_> {
                     widgets::join_for_narration(&[&title.plain(), &message.plain()]),
                 )
             });
-            Confirm::new(&atlas.font, (w, h), &title, &message).draw(
-                batch,
-                atlas,
-                cursor,
-                [&disconnect, &back],
-            );
+            let mut confirm = Confirm::new(&atlas.font, (w, h), &title, &message);
+            confirm.declare_no();
+            confirm.draw(batch, atlas, cursor, [&disconnect, &back]);
             return;
         }
         if let Some(since) = self.dialogs.waiting {
@@ -427,7 +493,18 @@ impl Game<'_> {
             if visible {
                 let (bx, by) = (((w - 200.0) / 2.0).trunc(), top + 33.0);
                 let hover = ui::hovered(cursor, bx, by, 200.0, 20.0);
-                ui::button(batch, atlas, bx, by, 200.0, 20.0, &label, active, hover);
+                ui::action_button(
+                    batch,
+                    atlas,
+                    widgets::Action::Back,
+                    bx,
+                    by,
+                    200.0,
+                    20.0,
+                    &label,
+                    active,
+                    hover,
+                );
             }
             return;
         }
@@ -484,15 +561,38 @@ impl Game<'_> {
         let mut tooltip = None;
         let mut item_tip = None;
         let mut start = None;
+        let mut mark = None;
         for (part, clipped) in layout.placed(open.scroll.amount) {
             if clipped && start.is_none() {
                 start = Some(batch.vertices.len());
+                mark = Some(widgets::frame_mark());
             } else if !clipped && let Some(s) = start.take() {
                 batch.clip_since(s, ax, ay, ax + aw, ay + ah);
+                if let Some(mark) = mark.take() {
+                    widgets::clip_frame(mark, ay, ay + ah);
+                }
             }
             match part {
                 Part::Line(text, x, y) => {
                     batch.text_styled(atlas, &text, x, y, u32::MAX, true);
+                    // AbstractStringWidget: only the styled glyph under the
+                    // pointer requests a hand, not the whole message widget.
+                    let under = |wanted: fn(&horizon_client::text::Style) -> bool| {
+                        horizon_client::dialog_screen::line_style_at(
+                            &atlas.font,
+                            &text,
+                            x,
+                            y,
+                            cursor,
+                            wanted,
+                        )
+                    };
+                    if !clipped || in_area(cursor.1) {
+                        widgets::widget_cursor(under(|s| s.click.is_some()).is_some(), true);
+                        if let Some(hover) = under(|s| s.hover.is_some()).and_then(|s| s.hover) {
+                            tooltip = Some(*hover);
+                        }
+                    }
                 }
                 Part::Field { input, rect } => {
                     let focused = open.focus == Some(input);
@@ -633,7 +733,14 @@ impl Game<'_> {
                     let hover =
                         (!clipped || in_area(cursor.1)) && ui::hovered(cursor, x, y, bw, bh);
                     let b = buttons[index];
-                    ui::button(batch, atlas, x, y, bw, bh, &b.label, true, hover);
+                    if open.dialog.escape_button() == Some(index) {
+                        let action = widgets::Action::Cancel;
+                        ui::action_button(
+                            batch, atlas, action, x, y, bw, bh, &b.label, true, hover,
+                        );
+                    } else {
+                        ui::button(batch, atlas, x, y, bw, bh, &b.label, true, hover);
+                    }
                     if let Some(t) = &b.tooltip {
                         widgets::last_narratable(|n| n.hint = Some(t.plain()));
                     }
@@ -646,7 +753,12 @@ impl Game<'_> {
         if let Some(s) = start {
             batch.clip_since(s, ax, ay, ax + aw, ay + ah);
         }
+        if let Some(mark) = mark {
+            widgets::clip_frame(mark, ay, ay + ah);
+        }
         if layout.content > ah {
+            // A controller's focus step goes through the body's hidden parts before it leaves.
+            widgets::scroll_area(layout.area, open.scroll.amount, layout.content - ah);
             ui::scrollbar(
                 batch,
                 atlas,
@@ -801,20 +913,16 @@ impl Game<'_> {
                 }
                 // AbstractStringWidget.setComponentClickHandler: the click event
                 // of the styled text under a centred message line.
-                Part::Line(line, x, y)
-                    if text_click.is_none()
-                        && cursor.0 >= x
-                        && (0.0..9.0).contains(&(cursor.1 - y)) =>
-                {
-                    let content = line.resolve_legacy();
-                    let mut left = cursor.0 - x;
-                    for (c, style) in content.chars() {
-                        left -= self.gui.atlas.font.advance(c, style);
-                        if left < 0.0 {
-                            text_click = style.click.clone();
-                            break;
-                        }
-                    }
+                Part::Line(line, x, y) if text_click.is_none() => {
+                    text_click = horizon_client::dialog_screen::line_style_at(
+                        &self.gui.atlas.font,
+                        &line,
+                        x,
+                        y,
+                        cursor,
+                        |style| style.click.is_some(),
+                    )
+                    .and_then(|style| style.click);
                 }
                 _ => {}
             }
@@ -828,7 +936,8 @@ impl Game<'_> {
                 Some(ClickEvent::RunCommand(command)) => Click::RunCommand(command),
                 Some(ClickEvent::CopyToClipboard(value)) => Click::CopyToClipboard(value),
                 Some(ClickEvent::ShowDialog(dialog)) => Click::ShowDialog(dialog),
-                Some(ClickEvent::OpenFile(_)) | None => return Ok(()),
+                Some(ClickEvent::Custom { id, payload }) => Click::Custom { id, payload },
+                Some(ClickEvent::OpenFile(_) | ClickEvent::Profiler(_)) | None => return Ok(()),
             };
             let after = open.dialog.after_action;
             return self.run_dialog_action(Some(click), after);
@@ -857,6 +966,9 @@ impl Game<'_> {
             return;
         };
         let cursor = self.cursor;
+        let stick_scroll = self.pad_stick_scroll();
+        // A focus step past the body's edge scrolls the body, not a box it's leaving.
+        let step_scroll = self.pad_step_scroll();
         if let Some(open) = self.dialogs.open.as_mut() {
             let [_, ay, _, ah] = layout.area;
             if delta != 0.0 && cursor.1 >= ay && cursor.1 < ay + ah {
@@ -870,7 +982,7 @@ impl Game<'_> {
                             } if ui::hovered(cursor, x, y, w, h) => Some(input),
                             _ => None,
                         });
-                if let Some(input) = hovered_cycle {
+                if let Some(input) = hovered_cycle.filter(|_| !stick_scroll) {
                     // CycleButton.mouseScrolled: up goes back.
                     cycle(open, input, if delta > 0.0 { -1 } else { 1 });
                     return;
@@ -895,7 +1007,10 @@ impl Game<'_> {
                         },
                         _ => None,
                     });
-                if let Some(Some(Field::Multi(edit))) = text.and_then(|i| open.fields.get_mut(i)) {
+                if let Some(Some(Field::Multi(edit))) = text
+                    .filter(|_| !step_scroll)
+                    .and_then(|i| open.fields.get_mut(i))
+                {
                     edit.wheel(delta);
                     return;
                 }
@@ -1099,5 +1214,120 @@ impl Game<'_> {
             open.dialog.json(&values)
         });
         serde_json::json!({ "open": open, "screen": screen })
+    }
+}
+
+fn draw_background(batch: &mut HudBatch, atlas: &horizon_client::hud::HudAtlas, in_world: bool) {
+    let (w, h) = (batch.width, batch.height);
+    // Screen.extractBackground draws the panorama and blur before this menu overlay.
+    // The frame renderer already supplies them while a server is configuring.
+    ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
+}
+
+#[cfg(test)]
+mod background_tests {
+    use super::*;
+    use horizon_client::hud::{HudAtlas, Rect};
+
+    #[test]
+    fn a_configuration_dialog_keeps_the_panorama_visible() {
+        let mut atlas = HudAtlas::build(std::path::Path::new(
+            "/nonexistent-horizon-dialog-background-test",
+        ))
+        .unwrap();
+        atlas.sprites.remove("gui/menu_background");
+        let mut batch = HudBatch::new([640, 480]);
+        draw_background(&mut batch, &atlas, false);
+        assert_eq!(
+            batch.vertices.len(),
+            6,
+            "only the menu overlay covers the panorama"
+        );
+        assert!(batch.vertices.iter().all(|v| v.color >> 24 == 160));
+    }
+
+    #[test]
+    fn dialogs_keep_the_menu_and_in_world_pack_backgrounds() {
+        let mut atlas = HudAtlas::build(std::path::Path::new(
+            "/nonexistent-horizon-dialog-background-test",
+        ))
+        .unwrap();
+        for (name, u) in [
+            ("gui/menu_background", 0.1),
+            ("gui/inworld_menu_background", 0.6),
+        ] {
+            atlas.sprites.insert(
+                name.into(),
+                Rect {
+                    u0: u,
+                    v0: 0.2,
+                    u1: u + 0.1,
+                    v1: 0.3,
+                    w: 32,
+                    h: 32,
+                },
+            );
+        }
+        for (in_world, u) in [(false, 0.1), (true, 0.6)] {
+            let mut batch = HudBatch::new([640, 480]);
+            draw_background(&mut batch, &atlas, in_world);
+            assert!(!batch.vertices.is_empty());
+            assert!(
+                batch
+                    .vertices
+                    .iter()
+                    .all(|v| v.uv[0] >= u && v.uv[0] <= u + 0.1)
+            );
+            assert!(batch.vertices.iter().all(|v| v.color == u32::MAX));
+        }
+    }
+}
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+
+    fn dialog(pause: bool) -> Dialog {
+        let s = |value: &str| Tag::String(value.into());
+        Dialog::parse(&Tag::compound([
+            ("type", s("notice")),
+            ("title", s("Hi")),
+            ("pause", Tag::Byte(i8::from(pause))),
+        ]))
+        .unwrap()
+    }
+
+    fn state(pause: bool) -> DialogState {
+        DialogState {
+            open: Some(Open {
+                dialog: dialog(pause),
+                values: Vec::new(),
+                fields: Vec::new(),
+                focus: None,
+                scroll: ui::Scroll::default(),
+                dragging: None,
+                selecting: None,
+            }),
+            waiting: None,
+            warning: false,
+        }
+    }
+
+    /// `DialogScreen.isPauseScreen` is `dialog.common().pause()`, true by
+    /// default, so a server's dialog stops a single-player world unless it
+    /// asks otherwise. The waiting screen and the warning override it.
+    #[test]
+    fn a_dialog_pauses_the_world_only_while_its_pause_says_so() {
+        assert!(state(true).pauses_world());
+        assert!(!state(false).pauses_world());
+        // No dialog screen at all.
+        assert!(!DialogState::default().pauses_world());
+        // DialogScreen.WarningScreen extends ConfirmScreen: true.
+        let mut warning = state(false);
+        warning.warning = true;
+        assert!(warning.pauses_world());
+        // WaitingForResponseScreen.isPauseScreen is false.
+        let mut waiting = state(true);
+        waiting.waiting = Some(Instant::now());
+        assert!(!waiting.pauses_world());
     }
 }

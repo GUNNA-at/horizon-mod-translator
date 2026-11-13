@@ -5,7 +5,8 @@
       "target": "horizon_client::game::native_hooks::GameLevel<'_>::native_block_neighbor_changed",
       "neoforge": "BlockBehaviour.neighborChanged",
       "side": "server",
-      "cancellable": false
+      "cancellable": false,
+      "mod_api": false
     }
   ],
   "rust_summary": "a mod's block hearing a neighbour change on the server, where it may change the level (`native_block_neighbor_changed`: 1.21.1's\n`BlockBehaviour.neighborChanged`, with where the update comes from).",

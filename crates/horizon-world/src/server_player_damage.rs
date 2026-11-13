@@ -63,13 +63,12 @@ pub trait ServerDamageEnvironment<A: HealthAttributes = EntityAttributes>:
     fn level_is_client(&mut self) -> Result<bool, EnvError<Self>>;
     fn record_damage(&mut self, amount: f32) -> Result<(), EnvError<Self>>;
     fn damage_event(&mut self) -> Result<(), EnvError<Self>>;
-    /// [`DamageWorld::damage_pre`]: the damage on its way past absorption; vanilla leaves it.
-    fn damage_pre(&mut self, damage: f32) -> Result<f32, EnvError<Self>> {
-        Ok(damage)
+    /// [`DamageWorld::damage_pre`]. The default does nothing.
+    fn damage_pre(&mut self, _damage: &mut f32) -> Result<(), EnvError<Self>> {
+        Ok(())
     }
-    /// [`DamageWorld::damage_post`]: what reached the health.
-    fn damage_post(&mut self, damage: f32) -> Result<(), EnvError<Self>> {
-        let _ = damage;
+    /// [`DamageWorld::damage_post`]. The default does nothing.
+    fn damage_post(&mut self, _damage: f32) -> Result<(), EnvError<Self>> {
         Ok(())
     }
 }
@@ -125,6 +124,21 @@ impl<'a, A: HealthAttributes, E: ServerDamageEnvironment<A>> ServerPlayerDamage<
         damage: f32,
     ) -> Result<(), ServerDamageError<EnvError<E>, A::Error>> {
         living_damage::actually_hurt_after_immunity_check(self, damage, true)
+    }
+    pub(crate) fn apply_after_equipment(
+        &mut self,
+        damage: f32,
+        bypass_armor: bool,
+    ) -> Result<(), ServerDamageError<EnvError<E>, A::Error>> {
+        use crate::damage_reduction::DamageReductionWorld;
+        let damage = if bypass_armor {
+            damage
+        } else {
+            let armor = self.armor_value()? as f32;
+            let toughness = self.toughness_attribute()? as f32;
+            crate::combat_rules::after_armor(self, damage, armor, toughness)?
+        };
+        living_damage::actually_hurt_after_armor(self, damage, true)
     }
 }
 impl<A: HealthAttributes, E: ServerDamageEnvironment<A>> ArmorWorld
@@ -291,7 +305,7 @@ impl<A: HealthAttributes, E: ServerDamageEnvironment<A>> DamageWorld
             .damage_event()
             .map_err(ServerDamageError::Environment)
     }
-    fn damage_pre(&mut self, damage: f32) -> Result<f32, Self::Error> {
+    fn damage_pre(&mut self, damage: &mut f32) -> Result<(), Self::Error> {
         self.environment
             .damage_pre(damage)
             .map_err(ServerDamageError::Environment)

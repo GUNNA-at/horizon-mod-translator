@@ -1,6 +1,8 @@
 //! `Level.setBlock`, `LevelChunk.setBlockState` and the
 //! `CollectingNeighborUpdater` that orders neighbour and shape updates.
-use super::{LevelAccess, LevelEvent, Sim, classes::Class, flags, states::BlockId};
+use super::{
+    LevelAccess, LevelEvent, Sim, classes::Class, flags, orientation::Orientation, states::BlockId,
+};
 use crate::{fluid::FluidState, registry::BlockStateId};
 use horizon_core::{
     geometry::Direction,
@@ -61,18 +63,21 @@ enum Update {
     Simple {
         pos: BlockPos,
         block: BlockId,
-        from: BlockPos,
+        from: Option<BlockPos>,
+        orientation: Option<Orientation>,
     },
     Full {
         state: BlockStateId,
         pos: BlockPos,
         block: BlockId,
-        from: BlockPos,
+        from: Option<BlockPos>,
+        orientation: Option<Orientation>,
         moved: bool,
     },
     Multi {
         source: BlockPos,
         block: BlockId,
+        orientation: Option<Orientation>,
         skip: Option<Direction>,
         index: usize,
     },
@@ -91,7 +96,8 @@ enum Step {
         state: Option<BlockStateId>,
         pos: BlockPos,
         block: BlockId,
-        from: BlockPos,
+        from: Option<BlockPos>,
+        orientation: Option<Orientation>,
         moved: bool,
     },
 }
@@ -101,11 +107,16 @@ pub(crate) struct NeighborUpdater {
     stack: Vec<Update>,
     added: Vec<Update>,
     count: i32,
+    /// Where a neighbour update comes from, which 1.21.1's `neighborChanged` takes as
+    /// `fromPos` and 26.3 dropped for the orientation: said for the next update asked for
+    /// ([`Sim::from`]), then that of the update being told ([`Sim::neighbor_from`]). A
+    /// translated mod's block hears it; vanilla's own blocks never ask.
+    pub(crate) from: Option<BlockPos>,
 }
 
 impl Update {
     /// `runNext`: the update to execute now and whether more remain.
-    fn next(&mut self) -> (Step, bool) {
+    fn next(&mut self, level: &mut (impl LevelAccess + ?Sized)) -> (Step, bool) {
         match *self {
             Self::Shape {
                 direction,
@@ -125,12 +136,18 @@ impl Update {
                 },
                 false,
             ),
-            Self::Simple { pos, block, from } => (
+            Self::Simple {
+                pos,
+                block,
+                from,
+                orientation,
+            } => (
                 Step::Neighbor {
                     state: None,
                     pos,
                     block,
                     from,
+                    orientation,
                     moved: false,
                 },
                 false,
@@ -140,6 +157,7 @@ impl Update {
                 pos,
                 block,
                 from,
+                orientation,
                 moved,
             } => (
                 Step::Neighbor {
@@ -147,6 +165,7 @@ impl Update {
                     pos,
                     block,
                     from,
+                    orientation,
                     moved,
                 },
                 false,
@@ -155,19 +174,32 @@ impl Update {
                 source,
                 block,
                 skip,
+                ref mut orientation,
                 ref mut index,
             } => {
                 let direction = UPDATE_ORDER[*index];
+                let state = level.block_state(rel(source, direction));
+                let context = if level.redstone_experiments() {
+                    let initial = orientation.get_or_insert_with(|| {
+                        let initial = Orientation::random(level.random())
+                            .with_side_bias(super::orientation::SideBias::Left);
+                        skip.map_or(initial, |d| initial.with_front(d.opposite()))
+                    });
+                    Some(initial.with_front(direction))
+                } else {
+                    None
+                };
                 *index += 1;
                 if *index < UPDATE_ORDER.len() && Some(UPDATE_ORDER[*index]) == skip {
                     *index += 1;
                 }
                 (
                     Step::Neighbor {
-                        state: None,
+                        state: Some(state),
                         pos: rel(source, direction),
                         block,
-                        from: source,
+                        from: Some(source),
+                        orientation: context,
                         moved: false,
                     },
                     *index < UPDATE_ORDER.len(),
@@ -321,12 +353,19 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         self.level.observe_block_changed(pos, old, state);
         let new_block = self.block_of(state);
         let block_changed = self.block_of(old) != new_block;
+        if block_changed && self.b.instance_of(old, super::classes::Class::Comparator) {
+            // LevelChunk removes the old ComparatorBlockEntity with its output.
+            self.ticks.comparator_outputs.remove(&pos);
+        }
         if block_changed && self.block_of(old) == self.b.named.moving_piston {
             // PistonMovingBlockEntity.preRemoveSideEffects -> finalTick; the
-            // block is already replaced, so only the entity goes away.
+            // block is already replaced, so only the entity goes away. The
+            // extended base is MovingPistonBlock.destroy's, which only the
+            // player-break path calls (player_destroy).
             self.remove_moving_piston(pos);
         } else if block_changed
             && (self.b.has_flag(old, super::data::state_flags::BLOCK_ENTITY)
+                || self.level.has_native_block_entity(old)
                 || self.level.has_mod_block_entity(pos))
             && !self.keeps_block_entity(state, old)
         {
@@ -357,6 +396,10 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         if update_flags & flags::UPDATE_SKIP_ON_PLACE == 0 {
             self.on_place(state, pos, old, moved);
         }
+        let landed = self.state(pos);
+        if self.block_of(landed) == new_block {
+            self.level.ensure_block_entity(pos, landed);
+        }
         Some(old)
     }
     /// `BlockState.shouldChangedStateKeepBlockEntity(oldState)`: copper chests
@@ -367,6 +410,22 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
         (tags.copper_chests.contains(new) && tags.copper_chests.contains(old))
             || (tags.copper_golem_statues.contains(new) && tags.copper_golem_statues.contains(old))
     }
+    /// `MovingPistonBlock.destroy`: a `moving_piston` that goes away takes the
+    /// piston base behind it with it when that base is extended (a head that was
+    /// still moving over a base that finished extending). An unextended base, or
+    /// no piston base at all, stays.
+    pub(crate) fn destroy_moving_piston_base(&mut self, pos: BlockPos, state: BlockStateId) {
+        let b = self.b;
+        let Some(facing) = b.table.dir(state, b.props.facing) else {
+            return;
+        };
+        let base = rel(pos, facing.opposite());
+        let base_state = self.state(base);
+        if b.data(base_state).is(Class::PistonBase) && b.table.bool(base_state, b.props.extended) {
+            self.remove_block(base, false);
+        }
+    }
+
     /// `Level.removeBlock`.
     pub fn remove_block(&mut self, pos: BlockPos, moved_by_piston: bool) -> bool {
         let fluid = self.fluid_at(pos);
@@ -471,40 +530,94 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
 
     // ---- neighbour updater ----
     pub fn update_neighbors_at(&mut self, pos: BlockPos, block: BlockId) {
+        let orientation = self.initial_orientation(None, None);
+        self.update_neighbors_at_oriented(pos, block, orientation);
+    }
+    pub fn update_neighbors_at_oriented(
+        &mut self,
+        pos: BlockPos,
+        block: BlockId,
+        orientation: Option<Orientation>,
+    ) {
         self.add_and_run(Update::Multi {
             source: pos,
             block,
+            orientation,
             skip: None,
             index: 0,
         });
     }
-    pub fn update_neighbors_at_except(&mut self, pos: BlockPos, block: BlockId, skip: Direction) {
+    pub fn update_neighbors_at_except_oriented(
+        &mut self,
+        pos: BlockPos,
+        block: BlockId,
+        skip: Direction,
+        orientation: Option<Orientation>,
+    ) {
         let index = usize::from(UPDATE_ORDER[0] == skip);
         self.add_and_run(Update::Multi {
             source: pos,
             block,
+            orientation,
             skip: Some(skip),
             index,
         });
     }
-    /// `Level.neighborChanged(pos, block, fromPos)`: `from` is where the update
-    /// comes from (1.21.1 hands it to `neighborChanged`; 26.3 dropped it).
-    pub fn neighbor_changed_at(&mut self, pos: BlockPos, block: BlockId, from: BlockPos) {
-        self.add_and_run(Update::Simple { pos, block, from });
+    /// Names where the neighbour update asked for next comes from (`Level.neighborChanged(pos,
+    /// block, fromPos)` in 1.21.1): `self.from(source).neighbor_changed_at(pos, block)`. An
+    /// update asked for without it comes from nowhere said, and is told as coming from its own
+    /// position.
+    pub fn from(&mut self, from: BlockPos) -> &mut Self {
+        self.ticks.updater.from = Some(from);
+        self
+    }
+    /// Where the neighbour update being told comes from ([`Sim::from`]; a block's six
+    /// neighbours hear of it from the block), `pos` itself where nothing was said. Taken: the
+    /// next update says its own.
+    pub(crate) fn neighbor_from(&mut self, pos: BlockPos) -> BlockPos {
+        self.ticks.updater.from.take().unwrap_or(pos)
+    }
+    pub fn neighbor_changed_at(&mut self, pos: BlockPos, block: BlockId) {
+        self.neighbor_changed_at_oriented(pos, block, None);
+    }
+    pub fn neighbor_changed_at_oriented(
+        &mut self,
+        pos: BlockPos,
+        block: BlockId,
+        orientation: Option<Orientation>,
+    ) {
+        let from = self.ticks.updater.from.take();
+        self.add_and_run(Update::Simple {
+            pos,
+            block,
+            from,
+            orientation,
+        });
     }
     pub fn neighbor_changed_full(
         &mut self,
         state: BlockStateId,
         pos: BlockPos,
         block: BlockId,
-        from: BlockPos,
         moved: bool,
     ) {
+        self.neighbor_changed_full_oriented(state, pos, block, None, moved);
+    }
+    pub fn neighbor_changed_full_oriented(
+        &mut self,
+        state: BlockStateId,
+        pos: BlockPos,
+        block: BlockId,
+        orientation: Option<Orientation>,
+        moved: bool,
+    ) {
+        let from = self.ticks.updater.from.take();
         self.add_and_run(Update::Full {
             state,
             pos,
             block,
             from,
+            orientation,
             moved,
         });
     }
@@ -552,7 +665,7 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 updater.stack.push(update);
             }
             while let Some(top) = self.ticks.updater.stack.last_mut() {
-                let (step, more) = top.next();
+                let (step, more) = top.next(self.level);
                 self.execute(step);
                 if !more {
                     self.ticks.updater.stack.pop();
@@ -592,10 +705,12 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
                 pos,
                 block,
                 from,
+                orientation,
                 moved,
             } => {
                 let state = state.unwrap_or_else(|| self.state(pos));
-                self.neighbor_changed(state, pos, block, from, moved);
+                self.ticks.updater.from = from;
+                self.neighbor_changed_oriented(state, pos, block, orientation, moved);
             }
         }
     }
@@ -608,12 +723,14 @@ impl<L: LevelAccess + ?Sized> Sim<'_, L> {
             }
             let mut state = self.state(relative);
             if self.b.table.is(state, self.b.named.comparator) {
-                self.neighbor_changed_full(state, relative, block, pos, false);
+                self.from(pos)
+                    .neighbor_changed_full(state, relative, block, false);
             } else if self.is_redstone_conductor(state, relative) {
                 relative = rel(relative, direction);
                 state = self.state(relative);
                 if self.b.table.is(state, self.b.named.comparator) {
-                    self.neighbor_changed_full(state, relative, block, pos, false);
+                    self.from(pos)
+                        .neighbor_changed_full(state, relative, block, false);
                 }
             }
         }

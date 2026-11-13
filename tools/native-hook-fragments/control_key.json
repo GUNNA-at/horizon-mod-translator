@@ -4,7 +4,8 @@
       "name": "control_key",
       "target": "horizon_client::game::native_hooks::Game<'_>::native_control_key",
       "neoforge": "InputEvent.Key",
-      "side": "client"
+      "side": "client",
+      "mod_api": false
     }
   ],
   "rust_summary": "a key the control socket pressed (`native_control_key`).",
