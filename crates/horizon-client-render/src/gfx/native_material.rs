@@ -397,7 +397,8 @@ fn shader_source(
     )
 }
 
-/// The material's naga module, its errors in the stage's file.
+/// The material's naga module, its errors in the stage's file. `arrays` is how many arrays the
+/// game's block sprites fill: past eight, the terrain's text binds sixteen (sprite_arrays.rs).
 fn module(
     stage: &CheckedStage,
     tags: &[(u32, u32)],
@@ -405,8 +406,10 @@ fn module(
     vertex: bool,
     displaced: bool,
     line: (horizon_shader_api::Api, bool),
+    arrays: u32,
 ) -> Result<naga::Module, String> {
     let text = shader_source(&stage.source, tags, materials, (vertex, displaced), line);
+    let text = super::sprite_arrays::source(&text, arrays, super::sprite_arrays::TERRAIN_FIRST);
     naga::front::wgsl::parse_str(&text)
         .map_err(|e| format!("{}: {}", stage.file, e.emit_to_string(&text)))
 }
@@ -431,6 +434,7 @@ impl NativeMaterial {
             vertex,
             displaced.is_some(),
             (frame.api, frame.linear),
+            shape.sprites[0] as u32,
         )?;
         let mut constants = present_constants(&module, constants);
         let sprite_names = [
@@ -695,7 +699,8 @@ mod tests {
         let tags = [(7, 1), (3, 1), (9, 2)];
         let materials = [(5, 1000)];
         assert!(layer_table("t", &tags).contains("case 3u, 7u: { return 1u; }"));
-        let module = module(&stage, &tags, &materials, false, false, (Api::V0_1, false)).unwrap();
+        let module =
+            module(&stage, &tags, &materials, false, false, (Api::V0_1, false), 1).unwrap();
         let info = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -751,7 +756,7 @@ mod tests {
         .into();
         let report = check(&Pack::from_files(files).unwrap()).unwrap();
         let stage = report.stages.iter().find(|s| s.kind == StageKind::Material);
-        let module = module(stage.unwrap(), &[], &[], true, false, (Api::V0_2, false)).unwrap();
+        let module = module(stage.unwrap(), &[], &[], true, false, (Api::V0_2, false), 1).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
@@ -774,7 +779,8 @@ mod tests {
         let mut report = check(&Pack::from_files(files).unwrap()).unwrap();
         let stage = report.stages.remove(0);
         let materials = [(5, 1000)];
-        let module = module(&stage, &[], &materials, false, true, (Api::V0_1, false)).unwrap();
+        let module =
+            module(&stage, &[], &materials, false, true, (Api::V0_1, false), 1).unwrap();
         naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
             naga::valid::Capabilities::all(),
