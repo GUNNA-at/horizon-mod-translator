@@ -11505,6 +11505,111 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     eight sprite arrays, which no translated bundle uses; `docs/api` still says a shape has
     at most 16 boxes; a mod's background threads still run on the game's thread, five seconds
     at a time.
+- [x] 2026-11-13 Part 195: the launcher's path on the new base, what a 1.21.1 model names of the game that 26.3
+  dropped, and events of NeoForge's made by their own code.
+  - The launcher's whole path, run on the new base, was broken in three places before it reached the compiler.
+    - The bundles named the horizon-mixins fork's commit from before its merge with the revision upstream's
+      launcher pins; they name the merged one, the one the pack's rounds are applied with.
+    - Upstream's build now tries the installed version's own commit first and moves to the mods' pin only for a
+      mod it left out there. A translated mod's hook points are in the fork it names alone, and the fork may not
+      even have that commit: its build starts on the commit it pins (`starts_on_pin`). A mod of Horizon's own
+      repository tries the base first as before, and the player's Rebuild on Horizon stays on the base.
+    - `native-build` stopped at once: "waddles_translated: ids.txt is not a source a native mod may carry." The
+      translator keeps the ids it gave a mod's classes beside the bundle, for the next translation into the
+      folder (since Part 150, after the launcher was last run); the launcher took the file for one of the build
+      and refused it. It is left out, as the bundle's content folders are.
+    - Then, on a scratch launcher home: Nightly 2026-11-13 installed (its resources cloned from this checkout's
+      prepared ones: the Minecraft folder here has 26.3's json but not its jar), `mods add-java
+      Waddles-neoforge-1.21-0.11.1.jar` (0.1 s), `native-build --trust-native-code`: Rust 1.99.1 downloaded, the
+      fork's source at the pinned `9ab76b0` downloaded and its catalog completed, horizon-mixins built from the
+      merged fork, the bundle applied, 468 crates compiled, installed as `native-9ab76b0-d52162251ce6` and
+      selected, 3 min 48 s in all (4 min 32 s and 341 crates on the old base). That game, started on the
+      instance's folder: three `/summon waddles:adelie_penguin` answer "Summoned new Adélie Penguin", and the
+      penguins stand there with the mod's model and texture.
+  - That screenshot showed the spawn egg in the hotbar as an empty slot with a count. A 1.21.1 spawn egg's
+    model has the game's `item/template_spawn_egg` for its parent, drawn in the egg's two colours; 26.3 has no
+    such model (each of its eggs has a texture of its own).
+    - Measured over the pack: of 122,661 model and block state files of its mods, 106 of the game's own names
+      are ones 26.3 lacks, 33 of them in the 1.21.1 game. The template is named by 142 item models of 15 mods
+      (every spawn egg of the pack), `block/chain` by 41 of 8. Between the two games, 757 of 1.21.1's 3,891
+      models are gone (730 item models: a block's item draws the block's model now) and 248 of its textures.
+    - `vanilla_assets` (translator): a model or block state that names a model or texture 26.3 lacks gets the
+      file 1.21.1 had, from the player's own NeoForge install (the jar of the game's resources, beside its
+      classes), copied into the mod's namespace (`<mod>:item/minecraft_1_21_template_spawn_egg`) with what a
+      copied model names in its turn, and names the copy. Which names those are is a table read from both games
+      (`tools/vanilla_dropped_assets.py`): names only, no file of the game's is in the repository. With no such
+      install a model stays as it was. The translator's own content mods and port-pack's carry both do it.
+    - The egg's two colours are its constructor's: the runtime declares them with the item (`tints`), the
+      content schema takes them, and the game writes them into the item's definition as constant tints, where
+      the definition is one model without tints of its own.
+  - Upstream's catalog now names the NeoForge event each hook point stands for, and its tool counted this pack
+    (Part 194): 135 of the 293 events the mods listen to have a hook point. Counted against the runtime
+    (`evcover.py`: the pack's events against the events the runtime posts, read from its source), 85 events
+    with a hook point were never posted: a listener for one was simply never called.
+    - An event of NeoForge's is a small class: a constructor, the fields it sets, their getters. Until now each
+      was modelled by hand in the runtime (its fields under names of the runtime's, its getters answered one by
+      one). `code_events`: the event is made by its own code instead. The translator already carries the game's
+      own classes as far as the mods reach into them; an event the runtime makes is one no mod's code
+      constructs, so the classes of a list (`code_event_classes`) are created with their constructors, and
+      with the methods the runtime reads back, for a program that has a method taking one (a listener,
+      whatever it asks of its event). The runtime makes the event through that constructor, posts it, and reads
+      what a listener set through the class's own getter. The named event classes those stand on (the entity's
+      event, the living entity's, the player's, the level's) keep what a constructor hands them and hand it
+      back, for the game's events and a mod's own alike.
+    - Ten events at upstream's hook points, 81 listeners of the pack's mods: a player in another dimension
+      (18 mods), a player beginning and ending to be told of an entity (12 and 2), a chunk coming into a level
+      and leaving it (10 and 12), a crafted item taken (8), a living entity's changed equipment (7, with
+      upstream's hook that says whether anyone listens, which the game reads every mob's equipment for), an
+      entity getting on or off another (5, cancellable), an advancement made (4), a night slept through (3,
+      with the time a listener sets).
+    - One class made the same way is no event: who plays. `Minecraft.getUser()` had no answer, and nine mods
+      ask it (FTB Teams told at every join that it "will not be able to function correctly" without its own
+      player's id). The game's `User` is made by its own constructor: the window's player's name, the acting
+      player's UUID (before a world, the one the game gives a name without an account, `OfflinePlayer:<name>`'s),
+      no token.
+    - A trap this met: the translator takes every class name in the runtime's source for a class the runtime
+      models, and such a class is no longer carried from the game. The list of these classes is left out of
+      that reading, the module names them by the end of their names, and a test holds that each stays the
+      game's own code.
+  - Round 38: 795 s, 23 crates, 2,067,276,368 bytes (0.7 MB more). The pack's content holds 84 files of the
+    1.21.1 game's now, 35 names in 24 mods: the egg's template with its two textures in 15 mods, the chain's
+    texture in 9 files and its model, 22 sign models, the farmland's template, the sides of the quartz and
+    purpur pillars, a lead's knot, a shield's empty slot, a chicken and a hanging sign as entities draw them.
+  - Launch 38: ready after 420 s (420), resources in 246.1 s (246.3), the same content. The eggs of three mods
+    (Waddles' penguin, Cataclysm's Ender Guardian, Creeper Overhaul's jungle creeper) lie in the hotbar in their
+    colours, beside a cow's. The new events are heard: Collective's and Curios' listeners for a player
+    beginning to be told of an entity (103 times in one 20 s, 1.5 ms each, nearly all of it Collective's),
+    Lootr's, Simulated's, PolyLib's and Scena's for a chunk coming in (840 times as the world starts, 53 µs
+    each). The player goes to the Nether (there after 5 s, "We Need to Go Deeper") and back. The server's
+    thread is 3.8 to 5.7 s of every 20 in the mods' code (3.9 to 5.9). 106 other uncaught (105: KubeJS's stages
+    payload, left with KubeJS for later, fails once more at each change of dimension, and Create Stuff &
+    Additions' grapple drawing meets no player while the level changes), 771 unmapped lines (769:
+    `LivingEvent.getEntity()` is answered; a chunk event's listener asks `LevelChunk.getFullStatus()`), the
+    mods' own errors 508 lines of 480 kinds (505 of 480).
+  - Coverage run 56 (the events and the game's files in; who plays and the advancement not yet): 122,194 of
+    132,312 API methods (92.4%, was 92.0%), 363,095 of 376,875 call sites (96.3%, was 96.1%); of the methods,
+    8,060 by the game's own code (6.1%, was 5.7%); the libraries 69,316 of 76,713 methods (90.4%, was 90.0%).
+  - Round 39 (who plays, the advancement): 782 s, 15 crates, 2,067,546,464 bytes. Launch 39: ready after 373 s,
+    resources in 246.1 s, the same scenario through, the Nether and back. `Minecraft.getUser()` is answered,
+    and FTB Teams showed that the answer was wrong: "Local player id a01e3843-… was not found in the known
+    players list [ae417920-…]". The first is the offline UUID of "Player", the second of the player's own name:
+    a mod had asked before any world, when the window's player is not there to name, and that user was kept.
+    The game now tells the profile its window plays under, in a world or not (`native_window_profile`: the
+    signed-in account's name and UUID, else the offline name and the UUID a server gives it), and a user made
+    where no game is at hand to tell is not kept. That last step is tested, and type-checked with the game;
+    it has not been in a launch. 107 other uncaught (106: a gun mod's death effect met no entity three times
+    instead of once), 771 unmapped lines, the mods' own errors 508 lines of 480 kinds.
+  - Tests: runtime 914 and 23 (3 new: an event made by its own code and heard above it, the named classes
+    handing back what they were handed, who plays); translator 41 (1 new: the game's dropped files) with game
+    code 9 (2 new), differential, gson, hook, joml, weave; port-pack 169 (1 new); horizon-mods 46;
+    horizon-client-lib mod_content 61 (1 new); the API generator 19; launcher native_mods 108 (2 new).
+  - Not done yet: 69 of the pack's events that have a hook point are still posted by nobody (338 listeners).
+    The screens' and the renderers' events lead them (they need the game's screens and renderers as objects a
+    mod can hold); `EntityTickEvent` (11 and 9 mods) waits for a measurement of what a listener at every
+    entity's tick costs; `RecipesUpdatedEvent` and the villagers' trades wait for their data on the client.
+    A hook that is a free function with no game at hand (a fall, a heal, a jump) gives its helper nothing to
+    make a host of. A mod's item colours other than a spawn egg's (`RegisterColorHandlersEvent.Item`) are not
+    the item's tints. Collective's listener for an entity a player begins to be told of costs 1.5 ms a call.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.

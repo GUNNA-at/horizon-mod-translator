@@ -14,7 +14,7 @@ runtime written in Rust answers their calls into Minecraft, NeoForge and Java. I
 a list of supported ones. Create and its addons are the test case.
 
 <!-- progress:headline -->
-**92.0%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **96.1%** of their call sites. Java's libraries: **96.9%** of the calls. Create alone: **98.2%** of its call sites. Run 55, 11 November 2026.
+**92.4%** of the Minecraft and NeoForge methods that the pack's 367 jars call are answered natively, and **96.3%** of their call sites. Java's libraries: **97.0%** of the calls. Create alone: **98.2%** of its call sites. Run 56, 13 November 2026.
 <!-- /progress -->
 
 | If you were shown this | If you work on Horizon |
@@ -39,13 +39,13 @@ game's own code: a method the runtime doesn't have counts when the game's own me
 player's NeoForge install, can answer it.</sub>
 
 <!-- progress:table -->
-| Run 55, 367 jars | Methods answered | Call sites answered |
+| Run 56, 367 jars | Methods answered | Call sites answered |
 |---|---:|---:|
-| Minecraft and NeoForge API | **92.0%**<br><sub>121,668 of 132,304</sub> | **96.1%**<br><sub>362,284 of 376,864</sub> |
-| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **5.7%**<br><sub>7,597 of 132,304</sub> | **2.8%**<br><sub>10,639 of 376,864</sub> |
-| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **90.0%**<br><sub>69,022 of 76,713</sub> | **96.9%**<br><sub>361,768 of 373,410</sub> |
-| Create 6.0.10, its API calls | **90.7%**<br><sub>3,608 of 3,976</sub> | **98.2%**<br><sub>24,783 of 25,245</sub> |
-| Create 6.0.10, its library calls | **86.0%**<br><sub>1,377 of 1,602</sub> | **97.9%**<br><sub>14,111 of 14,416</sub> |
+| Minecraft and NeoForge API | **92.4%**<br><sub>122,194 of 132,312</sub> | **96.3%**<br><sub>363,095 of 376,875</sub> |
+| …of it by the game's own code<br><sub>translated from the player's NeoForge install</sub> | **6.1%**<br><sub>8,060 of 132,312</sub> | **3.0%**<br><sub>11,333 of 376,875</sub> |
+| Java libraries<br><sub>JDK, Guava, Gson, fastutil, JOML and the rest</sub> | **90.4%**<br><sub>69,316 of 76,713</sub> | **97.0%**<br><sub>362,185 of 373,410</sub> |
+| Create 6.0.10, its API calls | **90.9%**<br><sub>3,618 of 3,979</sub> | **98.2%**<br><sub>24,800 of 25,248</sub> |
+| Create 6.0.10, its library calls | **86.1%**<br><sub>1,379 of 1,602</sub> | **97.9%**<br><sub>14,114 of 14,416</sub> |
 <!-- /progress -->
 
 <picture>
@@ -63,6 +63,7 @@ jar's number of game calls on a log scale, the checkered top the share not answe
 <!-- progress:history -->
 | Run | Date | API methods | Call sites | Create, call sites |
 |---:|---|---:|---:|---:|
+| 56 | 2026-11-13 | 92.4% | 96.3% | 98.2% |
 | 55 | 2026-11-11 | 92.0% | 96.1% | 98.2% |
 | 54 | 2026-11-10 | 91.1% | 95.6% | 98.0% |
 | 53 | 2026-11-10 | 91.0% | 95.6% | 98.0% |
@@ -169,9 +170,10 @@ result comes from a scene set up by command, read back from the world's data and
   starts it, with no developer flags, summons the penguins and hatches them from their egg. Create took 16
   seconds to translate and 4 minutes to build the same way, and its shafts turn in that game. A folder with
   Create and Waddles became an instance of its own (`--new-instance`, or a modpack dropped on the window) and
-  played both mods in one world.
+  played both mods in one world. On 13 November the same path ran on the new Horizon: Waddles translated,
+  the game built from this repository's source in 3 minutes 48 seconds, the penguins summoned in it.
 
-Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (367 jars) translates and builds into one game, in about 40 minutes (a quarter of an hour after a change to the mapping alone), and it plays: at its latest launch (the 37th) the game was ready 420 seconds after it started, with all but one of the mods constructed, the content of 320 mods in it with their data (728,041 block states, 29,115 items, 28,596 recipe files, 24,729 block textures), and the server ticking with a quarter of its time in the mods' code. Create works in it past rotation: a mechanical press over a depot, turned by a creative motor, pressed an iron ingot into an iron sheet, a recipe found in the mod's data and run by the mod's own machine. A player who joins gets what the mods send them at that moment (quests, claimed chunks, waystones, configs). Since 13 November that game is Horizon as it stood that day: upstream had moved 16,781 commits in the twelve days since this branch forked, and the translator followed it (the same pack came through the same test on both, with the same figures within two errors). Not everything in it works: 105 of the mods' handlers ended with an error at that launch, 87 of them one mod's colour asked for too early, and what they would have done is missing; the mods' own logs hold 505 errors (17,853 five launches earlier, nearly all of them one map mod's, whose images and files work now); that map mod still draws no tiles: it draws them on threads of its own, and work a mod gives to another thread runs on the game's thread here, where it is stopped once it holds the window for five seconds; the window's own thread is slow (15 to 17 seconds of every 20 go to the mods' code); and the game's memory peaks at 19 GB while it loads.
+Not working yet: NeoForge's config screens, and part of the client's rendering. See [open gaps](#open-gaps). The whole pack (367 jars) translates and builds into one game, in about 40 minutes (a quarter of an hour after a change to the mapping alone), and it plays: at its latest launch (the 39th) the game was ready 373 seconds after it started, with all but one of the mods constructed, the content of 320 mods in it with their data (728,041 block states, 29,115 items, 28,596 recipe files, 24,729 block textures), and the server ticking with a quarter of its time in the mods' code. Create works in it past rotation: a mechanical press over a depot, turned by a creative motor, pressed an iron ingot into an iron sheet, a recipe found in the mod's data and run by the mod's own machine. A player who joins gets what the mods send them at that moment (quests, claimed chunks, waystones, configs), and goes to the Nether and back. The mods' spawn eggs lie in the hotbar in their own colours: their models stand on a template the new Minecraft dropped, and the translator takes such a file, 35 of them over the pack, from the player's own 1.21.1 game. Of the 293 NeoForge events the pack's mods listen to, the runtime posts 126; the ten newest (a player in another dimension, a chunk loaded, changed equipment and others, 81 listeners) are made by NeoForge's own event classes, carried from the player's install, at hook points upstream Horizon added. Since 13 November that game is Horizon as it stood that day: upstream had moved 16,781 commits in the twelve days since this branch forked, and the translator followed it (the same pack came through the same test on both, with the same figures within two errors). Not everything in it works: 107 of the mods' handlers ended with an error at that launch, 87 of them one mod's colour asked for too early, and what they would have done is missing; the mods' own logs hold 508 errors (17,853 five launches earlier, nearly all of them one map mod's, whose images and files work now); that map mod still draws no tiles: it draws them on threads of its own, and work a mod gives to another thread runs on the game's thread here, where it is stopped once it holds the window for five seconds; the window's own thread is slow (15 to 17 seconds of every 20 go to the mods' code); and the game's memory peaks at 19 GB while it loads.
 
 ## Try it
 
