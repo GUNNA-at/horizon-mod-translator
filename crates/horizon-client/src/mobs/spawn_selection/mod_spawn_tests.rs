@@ -85,8 +85,8 @@ impl SpawnLevel for Meadow<'_, '_> {
     fn peaceful(&self) -> bool {
         false
     }
-    fn dimension(&self) -> spawn_rules::Dimension {
-        spawn_rules::Dimension::Overworld
+    fn dimension_type(&self) -> &horizon_world::dimension_type::DimensionFacts {
+        horizon_world::dimension_type::DimensionFacts::overworld()
     }
     fn surface_slime_chance(&self, _: i32, _: i32, _: i32) -> f32 {
         0.0

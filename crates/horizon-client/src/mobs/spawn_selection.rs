@@ -1776,8 +1776,9 @@ fn top_non_colliding_at<L: NaturalLevel>(
     [x, y, z]
 }
 
+/// A translated mod's mobs in natural spawning.
 #[cfg(test)]
-mod tests;
+mod mod_spawn_tests;
 
 #[cfg(test)]
 mod tests {

@@ -2414,7 +2414,7 @@ fn place_in_biomes(
     let placed: BTreeSet<String> = bundle(placed, PLACED_FEATURES)?.into_keys().collect();
     let feature_tags = bundle(None, FEATURE_TAGS)?;
     let entities_path = out_path(overlay, "entity-types.json");
-    let entity_categories: BTreeMap<String, String> = match entities_path.exists() {
+    let mut entity_categories: BTreeMap<String, String> = match entities_path.exists() {
         true => match read_json(&entities_path)? {
             J::Obj(entries) => entries
                 .into_iter()
@@ -2431,6 +2431,9 @@ fn place_in_biomes(
         },
         false => BTreeMap::new(),
     };
+    // The translated mods' own entity types, which their code registers (a spawn modifier
+    // names Waddles' penguin).
+    entity_categories.extend(horizon_world::worldgen::foreign::entity_types());
     let mut entity_tags = BTreeMap::new();
     let vanilla_entity_tags = base.join("data/minecraft/tags/entity_type");
     if vanilla_entity_tags.is_dir() {
@@ -2473,48 +2476,6 @@ fn place_in_biomes(
     }
     overlay.write(MODIFIERS, &serde_json::to_vec(&saved)?)?;
     overlay.write(BIOMES, &serde_json::to_vec(&doc)?)
-}
-
-/// The entity types the spawn modifiers name, each with its category: the
-/// root's (`entity-types.json` with the mods' rows) and the translated mods'
-/// own; and the entity type tags (`data/<ns>/tags/entity_type/`, with the
-/// mods' entries merged), by tag id.
-fn entity_types_for_spawns(
-    overlay: &Overlay<'_>,
-) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>)> {
-    let mut categories = BTreeMap::new();
-    let table = out_path(overlay, "entity-types.json");
-    if table.exists()
-        && let J::Obj(rows) = read_json(&table)?
-    {
-        for (id, row) in rows {
-            if let Some(J::Str(category)) = row.get("category") {
-                categories.insert(id, category.clone());
-            }
-        }
-    }
-    categories.extend(horizon_world::worldgen::foreign::entity_types());
-    let mut tags = BTreeMap::new();
-    for ns in fs::read_dir(out_path(overlay, "data")).into_iter().flatten().flatten() {
-        let root = ns.path().join("tags/entity_type");
-        let ns = ns.file_name().to_string_lossy().into_owned();
-        let mut dirs = vec![root.clone()];
-        while let Some(dir) = dirs.pop() {
-            for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    dirs.push(path);
-                    continue;
-                }
-                let rel = path.strip_prefix(&root).ok().and_then(|r| r.to_str());
-                if let Some(rel) = rel.and_then(|r| r.strip_suffix(".json")) {
-                    let id = format!("{ns}:{}", rel.replace('\\', "/"));
-                    tags.insert(id, fs::read_to_string(&path)?);
-                }
-            }
-        }
-    }
-    Ok((categories, tags))
 }
 
 /// In a content root with biome modifiers: what applying them again over a
