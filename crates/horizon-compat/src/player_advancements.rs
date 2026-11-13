@@ -260,7 +260,7 @@ fn dropped_exception(rt: &mut Rt) -> bool {
 }
 
 /// The holder of the advancement `id`: one an advancement, so it compares as vanilla's do (by id).
-fn holder(rt: &mut Rt, id: &str) -> V {
+pub(crate) fn holder(rt: &mut Rt, id: &str) -> V {
     rt.intern(format!("compat:advancement/{id}"), |rt| {
         let rl = rt.string(id);
         crate::records::make(rt, HOLDER, &[rl, V::NULL])

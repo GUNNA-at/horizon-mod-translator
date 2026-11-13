@@ -1543,6 +1543,13 @@ pub fn player_changed_dimension(rt: &mut Rt, host: &mut dyn Host, player: u128, 
     rt.with_host(host, |rt| crate::code_events::changed_dimension(rt, player, from, to));
 }
 
+/// `native_player_advancement_done` (server): `player` made the advancement `advancement`
+/// ([`crate::code_events::advancement_earned`]).
+pub fn player_advancement_done(rt: &mut Rt, host: &mut dyn Host, player: u128, advancement: &str) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::advancement_earned(rt, player, advancement));
+}
+
 /// `native_player_start_tracking` and `native_player_stop_tracking` (server): `player` begins
 /// (`start`) or ends to be told of the game's entity `entity` ([`crate::code_events::tracking`]).
 pub fn player_tracking(rt: &mut Rt, host: &mut dyn Host, player: u128, entity: i32, kind: &str, start: bool) {

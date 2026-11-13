@@ -4580,6 +4580,12 @@ fn {id}_server_data_loaded(game: &mut crate::game::Game<'_>, reload: bool) {{
             "a player came to another dimension (`PlayerEvent.PlayerChangedDimensionEvent`)",
             &format!("let _ = name;\n    {krate}::hook_runtime(\"player_changed_dimension\", |rt| {c}::glue::player_changed_dimension(rt, &mut host, player, from, to));"),
         )),
+        ("player_advancement_done", level_event(
+            "player_advancement_done",
+            "player: u128, name: &str, advancement: &str",
+            "a player made an advancement (`AdvancementEvent.AdvancementEarnEvent`)",
+            &format!("let _ = name;\n    {krate}::hook_runtime(\"player_advancement_done\", |rt| {c}::glue::player_advancement_done(rt, &mut host, player, advancement));"),
+        )),
         ("player_start_tracking", level_event(
             "player_start_tracking",
             "player: u128, name: &str, entity: u32, uuid: u128, kind: &str",
@@ -5658,7 +5664,7 @@ const CLIENT_BINDINGS: [(&str, &str); 51] = [
     ("camera_shake", "    { name = \"game\", ty = \"&crate::game::Game<'_>\", value = \"self\" },\n    { name = \"partial\", ty = \"f32\", value = \"partial\" },\n    { name = \"shake\", ty = \"&mut crate::game::native_hooks::NativeShake\", value = \"&mut *shake\" },\n"),
 ];
 
-const BLOCK_ENTITY_BINDINGS: [(&str, &str); 87] = [
+const BLOCK_ENTITY_BINDINGS: [(&str, &str); 88] = [
     ("entity_types", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"types\", ty = \"&mut Vec<(String, bool)>\", value = \"&mut *types\" },\n"),
     ("load_entity", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"tag\", ty = \"&horizon_world::nbt::Tag\", value = \"tag\" },\n    { name = \"finalize\", ty = \"bool\", value = \"finalize\" },\n    { name = \"from_disk\", ty = \"bool\", value = \"from_disk\" },\n    { name = \"made\", ty = \"&mut Option<bool>\", value = \"&mut *made\" },\n"),
     ("save_entities", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"chunks\", ty = \"&[(i32, i32)]\", value = \"chunks\" },\n    { name = \"remove\", ty = \"bool\", value = \"remove\" },\n    { name = \"saved\", ty = \"&mut Vec<((i32, i32), horizon_world::nbt::Tag)>\", value = \"&mut *saved\" },\n"),
@@ -5682,6 +5688,7 @@ const BLOCK_ENTITY_BINDINGS: [(&str, &str); 87] = [
     ("player_logged_out", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n"),
     ("player_respawned", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n"),
     ("player_changed_dimension", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n    { name = \"from\", ty = \"&str\", value = \"from\" },\n    { name = \"to\", ty = \"&str\", value = \"to\" },\n"),
+    ("player_advancement_done", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n    { name = \"advancement\", ty = \"&str\", value = \"advancement\" },\n"),
     ("player_start_tracking", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n    { name = \"entity\", ty = \"u32\", value = \"entity\" },\n    { name = \"uuid\", ty = \"u128\", value = \"uuid\" },\n    { name = \"kind\", ty = \"&str\", value = \"kind\" },\n"),
     ("player_stop_tracking", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"name\", ty = \"&str\", value = \"name\" },\n    { name = \"entity\", ty = \"u32\", value = \"entity\" },\n    { name = \"uuid\", ty = \"u128\", value = \"uuid\" },\n    { name = \"kind\", ty = \"&str\", value = \"kind\" },\n"),
     ("item_crafted", "    { name = \"game\", ty = \"&mut crate::game::Game<'_>\", value = \"&mut *self\" },\n    { name = \"player\", ty = \"u128\", value = \"player\" },\n    { name = \"recipe\", ty = \"&str\", value = \"recipe\" },\n    { name = \"stack\", ty = \"&horizon_client::items::ItemStack\", value = \"stack\" },\n"),

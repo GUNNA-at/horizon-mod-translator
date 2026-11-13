@@ -237,7 +237,7 @@ pub(crate) fn uuid_text(msb: i64, lsb: i64) -> String {
 }
 
 /// `UUID.nameUUIDFromBytes(name)`: the name's MD5, as version 3 (name-based) of the IETF variant.
-fn name_uuid(name: &[u8]) -> (i64, i64) {
+pub(crate) fn name_uuid(name: &[u8]) -> (i64, i64) {
     let mut h = md5(name);
     h[6] = (h[6] & 0x0f) | 0x30;
     h[8] = (h[8] & 0x3f) | 0x80;

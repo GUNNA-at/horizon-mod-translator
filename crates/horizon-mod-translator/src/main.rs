@@ -1107,6 +1107,8 @@ fn main() -> ExitCode {
             );
         }
         game.extend(found.iter().map(|p| p.as_path()));
+        // The same install's resources, for what the mods' models name of the game's.
+        horizon_mod_translator::vanilla_assets::use_game(&game);
         // With the game's own code, the Java runtime's: the classes of it that are plain code
         // (`jdk_code`), from the runtime a launcher installed for the game.
         let java = if game.is_empty() {

@@ -205,11 +205,25 @@ pub fn keep_dropped(content: &Path, ns: &str, game: &mut dyn FnMut(&str) -> Opti
     keeper.taken.into_values().flatten().collect()
 }
 
+/// The jars of the install a caller translates with ([`use_game`]).
+static GAME: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+
+/// Names the install whose game [`player_game`] reads: the jars the mods are translated with (a
+/// `--game` the caller was given), so that their models take the same game's files. The first
+/// call counts; with none, or jars without the game's resources beside them, it is the install a
+/// launcher keeps ([`crate::find_game_assets`]).
+pub fn use_game(jars: &[&Path]) {
+    let _ = GAME.set(jars.iter().map(|j| j.to_path_buf()).collect());
+}
+
 /// The player's 1.21.1 game's resources, for [`keep_dropped`]: its files read from the jar a
-/// NeoForge install keeps them in ([`crate::find_game_assets`]). Answers None for every file
-/// where no such install is found.
+/// NeoForge install keeps them in ([`use_game`]'s, else [`crate::find_game_assets`]). Answers
+/// None for every file where no such install is found.
 pub fn player_game() -> impl FnMut(&str) -> Option<Vec<u8>> {
-    let mut jar = crate::find_game_assets()
+    let mut jar = GAME
+        .get()
+        .and_then(|jars| crate::game_assets_of(jars))
+        .or_else(crate::find_game_assets)
         .and_then(|path| fs::File::open(path).ok())
         .and_then(|file| zip::ZipArchive::new(file).ok());
     move |name: &str| {

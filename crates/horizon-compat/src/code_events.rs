@@ -11,6 +11,9 @@
 //! that is its own code, the game's or a mod's: the constructor keeps the entity or the level,
 //! the getter hands it back.
 //!
+//! One class made the same way is no event: who plays (`Minecraft.getUser()`), whose name and
+//! UUID nine of the pack's mods ask (FTB Teams finds its own player by it).
+//!
 //! The hooks that post these are upstream Horizon's (its catalog names the NeoForge event each
 //! stands for): the game tells of a player in another dimension, an entity a player begins to be
 //! told of, a mob's changed equipment, and the runtime hands that on as the event.
@@ -48,16 +51,23 @@ pub(crate) fn heard(rt: &mut Rt, short: &str) -> bool {
     class(short).is_some_and(|class| !crate::neo::hearing(rt, class).is_empty())
 }
 
+/// An object of the list's class `short`, made by its own constructor (`desc`, with `args`).
+/// None when no mod carries the class's code (none names it, or the mods were translated without
+/// the game's own code).
+fn make(rt: &mut Rt, short: &str, desc: &str, args: &[V]) -> Option<V> {
+    let class = class(short)?;
+    rt.reflect(class, &["<init>.", desc].concat(), args).filter(|made| made.r() != 0)
+}
+
 /// Makes the event `short` by its own constructor (`desc`, with `args`) and posts it. The event,
 /// for what its listeners left in it. None when nobody listens, or when no mod carries the
-/// class's code (the listener is of a mod translated without the game's own code).
+/// class's code.
 pub(crate) fn post(rt: &mut Rt, short: &str, desc: &str, args: &[V]) -> Option<V> {
     if !heard(rt, short) {
         return None;
     }
-    let class = class(short)?;
-    let ev = rt.reflect(class, &["<init>.", desc].concat(), args).filter(|ev| ev.r() != 0)?;
-    crate::neo::post(rt, class, ev);
+    let ev = make(rt, short, desc, args)?;
+    crate::neo::post(rt, class(short)?, ev);
     rt.report_thrown(short);
     Some(ev)
 }
@@ -82,16 +92,50 @@ fn canceled(rt: &Rt, ev: V) -> bool {
 
 /// The keys [`call`] may answer.
 pub(crate) fn claims(owner: &str, name: &str, _desc: &str) -> bool {
-    (matches!(owner, ENTITY_EVENT | LIVING_EVENT | PLAYER_EVENT) && matches!(name, "<init>" | "getEntity")) || (owner == LEVEL_EVENT && matches!(name, "<init>" | "getLevel"))
+    (matches!(owner, ENTITY_EVENT | LIVING_EVENT | PLAYER_EVENT) && matches!(name, "<init>" | "getEntity"))
+        || (owner == LEVEL_EVENT && matches!(name, "<init>" | "getLevel"))
+        || (owner == MINECRAFT && name == "getUser")
+}
+
+const MINECRAFT: &str = "net/minecraft/client/Minecraft";
+/// Who plays, once made ([`user`]).
+const USER: &str = "compat:user";
+
+/// `Minecraft.getUser()`: who plays, as the game's own class holds them, which the mods that ask
+/// carry: their name, their UUID (the acting player's; else the one the game gives a name without
+/// an account, `OfflinePlayer:<name>`'s), no token, a Microsoft account's kind. The same object
+/// from then on. Null when no mod carries the class.
+fn user(rt: &mut Rt) -> V {
+    if let Some(&user) = rt.interned.get(USER) {
+        return user;
+    }
+    let name = rt.host().and_then(|h| h.client_player()).map_or_else(|| "Player".to_owned(), |(name, _)| name);
+    let (high, low) = match rt.host().and_then(|h| h.player_id()) {
+        Some(id) => ((id >> 64) as i64, id as i64),
+        None => crate::tags::name_uuid(["OfflinePlayer:", &name].concat().as_bytes()),
+    };
+    let uuid = crate::tags::uuid(rt, high, low);
+    let (name, token) = (rt.string(&name), rt.string(""));
+    let none = crate::api::call(rt, "java/util/Optional.empty.()Ljava/util/Optional;", &[]);
+    let kind = crate::records::enum_constant(rt, "net/minecraft/client/User$Type.MSA").unwrap_or(V::NULL);
+    let desc = "(Ljava/lang/String;Ljava/util/UUID;Ljava/lang/String;Ljava/util/Optional;Ljava/util/Optional;Lnet/minecraft/client/User$Type;)V";
+    let Some(user) = make(rt, "User", desc, &[name, uuid, token, none, none, kind]) else {
+        return V::NULL;
+    };
+    rt.interned.insert(USER.into(), user);
+    user
 }
 
 /// The named event classes' part of an event that is its own code: `super(entity)` keeps the
-/// entity (the level), `getEntity()` hands it back. An event another module made keeps its entity
-/// under that module's name and has none here: that module answers.
+/// entity (the level), `getEntity()` hands it back, null where no constructor kept one. An event
+/// another module made is answered there: those modules are asked before this one.
 pub(crate) fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
     let (owner, name, desc) = crate::parts(key)?;
     if !claims(owner, name, desc) {
         return None;
+    }
+    if owner == MINECRAFT {
+        return Some(user(rt));
     }
     let ev = *args.first()?;
     let field = if owner == LEVEL_EVENT { "$level" } else { "$entity" };
@@ -100,7 +144,7 @@ pub(crate) fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             rt.put_field(ev, field, args.get(1).copied().unwrap_or(V::NULL));
             Some(V::Void)
         }
-        _ => Some(rt.get_field(ev, field)).filter(|kept| kept.r() != 0),
+        _ => Some(rt.get_field(ev, field)).map(|kept| if kept.r() != 0 { kept } else { V::NULL }),
     }
 }
 
@@ -119,6 +163,18 @@ pub(crate) fn changed_dimension(rt: &mut Rt, player: u128, from: &str, to: &str)
     let p = crate::menus::server_player(rt, player);
     let (from, to) = (rt.string(&["dimension#", from].concat()), rt.string(&["dimension#", to].concat()));
     post(rt, event, &["(", PLAYER, KEY, KEY, ")V"].concat(), &[p, from, to]);
+}
+
+/// `AdvancementEvent.AdvancementEarnEvent`: server player `player` made the advancement
+/// `advancement` (its id).
+pub(crate) fn advancement_earned(rt: &mut Rt, player: u128, advancement: &str) {
+    let event = "AdvancementEvent$AdvancementEarnEvent";
+    if !heard(rt, event) {
+        return;
+    }
+    let p = crate::menus::server_player(rt, player);
+    let holder = crate::player_advancements::holder(rt, advancement);
+    post(rt, event, &["(", PLAYER, "Lnet/minecraft/advancements/AdvancementHolder;)V"].concat(), &[p, holder]);
 }
 
 /// `PlayerEvent.StartTracking` and `StopTracking`: server player `player` begins (`start`) or
@@ -307,10 +363,82 @@ mod tests {
         assert!(!heard(&mut rt, "ChunkEvent$Load"));
     }
 
-    /// The level's event class keeps the level its constructor is handed, and an event made
-    /// elsewhere, with no entity kept here, is left to the module that made it.
+    /// The window's player, and the acting player's UUID when the game has one.
+    struct Window(Option<u128>);
+    impl crate::host::Host for Window {
+        fn block_state(&self, _pos: [i32; 3]) -> String {
+            "minecraft:air".into()
+        }
+        fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+            false
+        }
+        fn game_time(&self) -> i64 {
+            0
+        }
+        fn client_player(&self) -> Option<(String, u8)> {
+            Some(("Notch".into(), 0))
+        }
+        fn player_id(&self) -> Option<u128> {
+            self.0
+        }
+    }
+
+    /// The class of who plays, as the translator carries it: its constructor keeps what it is
+    /// handed.
+    fn user_code(rt: &mut Rt, class: &str, what: &str, args: &[V]) -> Option<V> {
+        if Some(class) != super::class("User") || !what.starts_with("<init>.(Ljava/lang/String;Ljava/util/UUID;") {
+            return None;
+        }
+        let user = rt.new_object_id(super::class("User")?, 8);
+        for (field, v) in ["name", "uuid", "accessToken", "xuid", "clientId", "type"].into_iter().zip(args) {
+            rt.put_field(user, field, *v);
+        }
+        Some(user)
+    }
+
+    /// `Minecraft.getUser()` is who plays, made once by the class's own constructor: the window's
+    /// player's name and the acting player's UUID, or with no player yet the UUID the game gives a
+    /// name without an account (Java's `UUID.nameUUIDFromBytes("OfflinePlayer:Notch")`), no token,
+    /// a Microsoft account's kind. Null while no mod carries the class.
     #[test]
-    fn the_named_classes_answer_only_for_what_a_constructor_handed_them() {
+    fn who_plays_is_made_by_the_games_own_class() {
+        crate::install();
+        // (The key's return type spelled whole would make the class one the runtime names.)
+        let key = |rt: &mut Rt| rt.static_key(&[MINECRAFT, ".getUser.()L", super::class("User").unwrap(), ";"].concat());
+        let uuid_text = |rt: &mut Rt, user: V| {
+            let id = rt.get_field(user, "uuid");
+            let text = api::call(rt, "java/util/UUID.toString.()Ljava/lang/String;", &[id]);
+            rt.str_of(text).unwrap_or("").to_owned()
+        };
+        let mut rt = Rt::new();
+        let get = key(&mut rt);
+        let mut host = Window(None);
+        assert_eq!(rt.with_host(&mut host, |rt| api::call(rt, get, &[])), V::NULL, "no code of the class");
+
+        rt.reflect = Some(user_code);
+        let user = rt.with_host(&mut host, |rt| api::call(rt, get, &[]));
+        assert_eq!(rt.str_of(rt.get_field(user, "name")), Some("Notch"));
+        assert_eq!(uuid_text(&mut rt, user), "b50ad385-829d-3141-a216-7e7d7539ba7f");
+        assert_eq!(rt.str_of(rt.get_field(user, "accessToken")), Some(""));
+        let kind = rt.get_field(user, "type");
+        assert_eq!(rt.str_of(rt.get_field(kind, "$name")), Some("MSA"));
+        // The same object from then on, whoever acts.
+        let mut host = Window(Some(7));
+        assert_eq!(rt.with_host(&mut host, |rt| api::call(rt, get, &[])), user);
+
+        // In a world: the acting player's own UUID.
+        let mut rt = Rt::new();
+        rt.reflect = Some(user_code);
+        let get = key(&mut rt);
+        let mut host = Window(Some(0x0123_4567_89ab_cdef_0011_2233_4455_6677));
+        let user = rt.with_host(&mut host, |rt| api::call(rt, get, &[]));
+        assert_eq!(uuid_text(&mut rt, user), "01234567-89ab-cdef-0011-223344556677");
+    }
+
+    /// The level's event class keeps the level its constructor is handed; an event no constructor
+    /// handed an entity has none (null, as the field would be).
+    #[test]
+    fn the_named_classes_hand_back_what_a_constructor_handed_them() {
         crate::install();
         let mut rt = Rt::new();
         let (ev, level) = (rt.new_object("example/NightEvent"), rt.new_object("net/minecraft/server/level/ServerLevel"));
@@ -319,7 +447,7 @@ mod tests {
         let get = rt.static_key(&[LEVEL_EVENT, ".getLevel.()Lnet/minecraft/world/level/LevelAccessor;"].concat());
         assert_eq!(call(&mut rt, get, &[ev]), Some(level));
         let other = rt.new_object("example/OtherEvent");
-        assert_eq!(call(&mut rt, LIVING_GET, &[other]), None);
+        assert_eq!(call(&mut rt, LIVING_GET, &[other]), Some(V::NULL));
         assert!(claims(LIVING_EVENT, "getEntity", "") && claims(PLAYER_EVENT, "<init>", "") && !claims(LIVING_EVENT, "getAmount", ""));
     }
 }
