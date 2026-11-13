@@ -69,6 +69,29 @@ impl<'a> Walk<'a> {
                 self.run(&i, "<init>", "()V");
             }
         }
+        self.make_posted(class);
+    }
+
+    /// An event of the game's the runtime makes by its own code and posts
+    /// (`horizon_compat::code_event_classes`): no mod's code names its constructor, and the
+    /// runtime calls it, so the class is created with each of them, and the methods the runtime
+    /// asks of the event afterwards run too. What the mods' listeners ask of it runs as any call
+    /// on a created class does.
+    fn make_posted(&mut self, class: &str) {
+        let Some((_, asked)) = horizon_compat::code_event_classes::CLASSES.iter().find(|c| c.0 == class) else {
+            return;
+        };
+        if !self.is_library(class) || self.created.contains(class) {
+            return;
+        }
+        self.create(class);
+        let inits: Vec<String> = self.by_name[class].methods.iter().filter(|m| m.name == "<init>").map(|m| m.desc.clone()).collect();
+        for d in inits {
+            self.run(class, "<init>", &d);
+        }
+        for (name, desc) in asked.iter().filter_map(|m| m.split_once('.')) {
+            self.run_resolved(class, name, desc);
+        }
     }
 
     /// The method runs, if `class` declares it with code.
@@ -439,6 +462,21 @@ impl<'a> Walk<'a> {
     }
 }
 
+/// The classes a method's descriptor names (`(Lfoo/Bar;I)V`: `foo/Bar`), its return type's too.
+fn object_types(desc: &str) -> Vec<&str> {
+    let (mut out, mut rest) = (Vec::new(), desc);
+    // A type starts where the last ended: `L` there opens a class name, up to its `;` (an `L`
+    // inside a name is the name's own).
+    while let Some(at) = rest.find(|c: char| !matches!(c, '(' | ')' | '[' | 'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 'V')) {
+        let Some((class, after)) = rest[at..].strip_prefix('L').and_then(|r| r.split_once(';')) else {
+            break;
+        };
+        out.push(class);
+        rest = after;
+    }
+    out
+}
+
 /// The library classes (`library`, less what the runtime provides) the program's other classes
 /// reach, with the methods of each that can run ([`Reached`]).
 pub fn reach(classes: &[ClassFile], library: &HashSet<String>, services: &BTreeMap<String, Vec<String>>, provided: &dyn Fn(&str) -> bool) -> Reached {
@@ -518,6 +556,16 @@ pub fn reach_with(
         w.create(&c.name);
         for sup in c.superclass.iter().chain(&c.interfaces) {
             w.keep(sup);
+        }
+    }
+    // A listener is a method of the mods' that takes its event, whatever it does with it (one
+    // that only counts ticks asks nothing of the event): the events the runtime makes by their
+    // own code are created for it.
+    for c in &roots {
+        for m in &c.methods {
+            for class in object_types(&m.desc) {
+                w.make_posted(class);
+            }
         }
     }
     for c in roots {

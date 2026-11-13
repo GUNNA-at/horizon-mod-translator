@@ -32,6 +32,9 @@ fn named_classes() {
     /// row's other text and say nothing of who models them (`com/mojang/math/Transformation`
     /// was the runtime's for being a model state's component, with nothing to answer for it).
     const ROWS: &str = "vanilla_records.rs";
+    /// The runtime's list of the game's events it makes by their own code: a class there is
+    /// carried from the game, the opposite of modelled.
+    const OWN_CODE: &str = "code_event_classes.rs";
     let Ok(here) = std::env::var("CARGO_MANIFEST_DIR") else {
         return;
     };
@@ -45,7 +48,7 @@ fn named_classes() {
                 let p = e.path();
                 if p.is_dir() {
                     todo.push(p);
-                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with(EVERY_CLASS) {
+                } else if p.extension().is_some_and(|x| x == "rs") && !p.ends_with(EVERY_CLASS) && !p.ends_with(OWN_CODE) {
                     let text = std::fs::read_to_string(&p).unwrap_or_default();
                     if p.ends_with(ROWS) {
                         rows_in(&text, &mut names);

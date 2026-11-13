@@ -41,6 +41,8 @@ pub mod block_breaking;
 pub mod loot_params;
 pub mod breaks;
 pub mod brigadier;
+pub mod code_event_classes;
+pub mod code_events;
 pub mod codecs;
 pub mod char_sinks;
 pub mod collectors;

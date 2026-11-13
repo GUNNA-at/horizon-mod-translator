@@ -169,6 +169,97 @@ fn the_games_own_code_joins_the_program_as_far_as_it_is_reached() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// An event the runtime makes by its own code and posts (`horizon_compat::code_event_classes`):
+/// a class of the game's with a constructor no mod names.
+const SLEPT: &str = "package net.neoforged.neoforge.event.level;
+public class SleepFinishedTimeEvent {
+    private long newTime;
+    private final long minTime;
+    public SleepFinishedTimeEvent(Object level, long newTime, long minTime) { this.newTime = newTime; this.minTime = minTime; }
+    public long getNewTime() { return newTime; }
+    public boolean setTimeAddition(long to) { if (minTime > to) return false; newTime = to; return true; }
+    public long unused() { return 0L; }
+}";
+
+/// An event of the same package no list names.
+const OTHER_EVENT: &str = "package net.neoforged.neoforge.event.level;
+public class HzOtherEvent {
+    public HzOtherEvent(int x) {}
+    public int get() { return 1; }
+}";
+
+const LISTENS: &str = "package example;
+import net.neoforged.neoforge.event.level.HzOtherEvent;
+import net.neoforged.neoforge.event.level.SleepFinishedTimeEvent;
+public class Listens {
+    public static void slept(SleepFinishedTimeEvent e) { e.setTimeAddition(5L); }
+    public static int other(HzOtherEvent e) { return e.get(); }
+}";
+
+/// A mod that only takes such an event (a listener) and never counts on it otherwise.
+const QUIET: &str = "package example;
+import net.neoforged.neoforge.event.level.SleepFinishedTimeEvent;
+public class Quiet {
+    public static int nights;
+    public static void slept(SleepFinishedTimeEvent e) { nights++; }
+}";
+
+/// The list of those events is no model of them: each stays the game's own code to the
+/// translator (a class the runtime's source names anywhere else would not be carried).
+#[test]
+fn an_event_made_by_its_own_code_is_no_class_the_runtime_names() {
+    for (class, _) in horizon_compat::code_event_classes::CLASSES {
+        assert!(!horizon_mod_translator::runtime_names(class), "{class}");
+        assert!(horizon_mod_translator::game_code(class), "{class}");
+    }
+}
+
+/// A mod that listens to an event the runtime makes carries the event's class with its
+/// constructor and the method the runtime reads back, though the mod's code names neither, and
+/// what its listener asks of the event; not the methods nobody calls. A listener that asks
+/// nothing of its event gets the class too. An event no list names is no object anybody makes:
+/// only its name is there.
+#[test]
+fn an_event_the_runtime_makes_is_carried_with_its_constructor() {
+    if !has("javac") {
+        eprintln!("skipped: no javac");
+        return;
+    }
+    let dir = scratch("posted");
+    let (game, classes) = jar(
+        &dir,
+        "game",
+        &[
+            ("net/neoforged/neoforge/event/level/SleepFinishedTimeEvent.java", SLEPT),
+            ("net/neoforged/neoforge/event/level/HzOtherEvent.java", OTHER_EVENT),
+        ],
+        None,
+    );
+    let code_of = |source: (&str, &str), name: &str, class: &str| -> Option<Vec<String>> {
+        let (mods, _) = jar(&dir, name, &[source], Some(&classes));
+        let (program, _, _) = program_with(&[&mods], &[], &[&game]).unwrap();
+        let c = program.iter().find(|c| c.name == class)?;
+        let mut methods: Vec<String> = c.methods.iter().filter(|m| m.code.is_some()).map(|m| m.name.clone()).collect();
+        methods.sort_unstable();
+        Some(methods)
+    };
+    let slept = "net/neoforged/neoforge/event/level/SleepFinishedTimeEvent";
+    let listens = ("example/Listens.java", LISTENS);
+    assert_eq!(
+        code_of(listens, "listens", slept).expect("the event's class is in the program"),
+        ["<init>", "getNewTime", "setTimeAddition"]
+    );
+    assert_eq!(
+        code_of(listens, "listens-again", "net/neoforged/neoforge/event/level/HzOtherEvent"),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        code_of(("example/Quiet.java", QUIET), "quiet", slept).expect("a listener that asks nothing still hears it"),
+        ["<init>", "getNewTime"]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A method of a modelled class stands where its code asks only what is mapped: `sum` calls two
 /// mapped getters. `secret` reads a field nothing answers and `both` calls it: each is blocked,
 /// by the member to map. `again` has code in the class below too: the call stands with both, each

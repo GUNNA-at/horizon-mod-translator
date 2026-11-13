@@ -2059,7 +2059,7 @@ fn pos_seed(rt: &mut Rt, pos: V) -> V {
 
 /// The modules a call is offered to, in order, when no arm above takes its key: the first that
 /// answers does.
-const CHAIN: [Module; 99] = [
+const CHAIN: [Module; 100] = [
     crate::diodes::call,
     crate::rails::call,
     crate::fake_players::call,
@@ -2154,6 +2154,7 @@ const CHAIN: [Module; 99] = [
     crate::entity_render::call,
     crate::camera::call,
     crate::render::call,
+    crate::code_events::call,
     world,
     crate::palette::call,
     crate::nio::call,
@@ -2164,7 +2165,7 @@ const CHAIN: [Module; 99] = [
 /// Which keys each module of [`CHAIN`] may answer, in the same order ([`crate::sounds::claims`]...):
 /// a pure function of the key, so its answer is kept per key.
 type Claims = fn(&str, &str, &str) -> bool;
-const CLAIMS: [Claims; 99] = [
+const CLAIMS: [Claims; 100] = [
     crate::diodes::claims,
     crate::rails::claims,
     crate::fake_players::claims,
@@ -2259,6 +2260,7 @@ const CLAIMS: [Claims; 99] = [
     crate::entity_render::claims,
     crate::camera::claims,
     crate::render::claims,
+    crate::code_events::claims,
     // The world's calls end in `api_common`'s, which take most of vanilla's classes.
     |_, _, _| true,
     crate::palette::claims,
@@ -2267,7 +2269,7 @@ const CLAIMS: [Claims; 99] = [
     crate::records::claims,
 ];
 
-const MODULE_NAMES: [&str; 99] = [
+const MODULE_NAMES: [&str; 100] = [
     "diodes",
     "rails",
     "fake_players",
@@ -2362,6 +2364,7 @@ const MODULE_NAMES: [&str; 99] = [
     "entity_render",
     "camera",
     "render",
+    "code_events",
     "world",
     "palette",
     "nio",
@@ -2948,7 +2951,7 @@ fn chunk_status_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
 }
 
 /// The chunk of `level` at chunk coordinates `x`, `z`: a `LevelChunk` its level answers for.
-fn level_chunk(rt: &mut Rt, level: V, x: i32, z: i32) -> V {
+pub(crate) fn level_chunk(rt: &mut Rt, level: V, x: i32, z: i32) -> V {
     let c = rt.new_object(LEVEL_CHUNK);
     rt.put_field(c, "$level", level);
     rt.put_field(c, "$x", V::I(x));

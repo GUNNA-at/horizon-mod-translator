@@ -1536,6 +1536,63 @@ pub fn player_respawned(rt: &mut Rt, host: &mut dyn Host, player: u128, name: &s
     rt.with_host(host, |rt| crate::events::respawned(rt, player, name));
 }
 
+/// `native_player_changed_dimension` (server): `player` came from dimension `from` to `to`
+/// ([`crate::code_events::changed_dimension`]).
+pub fn player_changed_dimension(rt: &mut Rt, host: &mut dyn Host, player: u128, from: &str, to: &str) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::changed_dimension(rt, player, from, to));
+}
+
+/// `native_player_start_tracking` and `native_player_stop_tracking` (server): `player` begins
+/// (`start`) or ends to be told of the game's entity `entity` ([`crate::code_events::tracking`]).
+pub fn player_tracking(rt: &mut Rt, host: &mut dyn Host, player: u128, entity: i32, kind: &str, start: bool) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::tracking(rt, player, entity, kind, start));
+}
+
+/// `native_item_crafted` (server): `player` took `stack` out of a crafting grid
+/// ([`crate::code_events::item_crafted`]).
+pub fn item_crafted(rt: &mut Rt, host: &mut dyn Host, player: u128, stack: crate::host::HandStack) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::item_crafted(rt, player, stack));
+}
+
+/// `native_living_equipment_listened` (server): whether a mod listens to equipment changes, which
+/// the game reads every mob's equipment for only then.
+pub fn living_equipment_listened(rt: &mut Rt) -> bool {
+    crate::code_events::equipment_heard(rt)
+}
+
+/// `native_living_equipment_change` (server): living entity `entity` holds or wears `to` in `slot`
+/// where it had `from` ([`crate::code_events::equipment_change`]).
+pub fn living_equipment_change(rt: &mut Rt, host: &mut dyn Host, entity: i32, kind: &str, slot: &str, from: Option<crate::host::HandStack>, to: Option<crate::host::HandStack>) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::equipment_change(rt, entity, kind, slot, from, to));
+}
+
+/// `native_entity_mount` (server): entity `entity` gets on (`mounting`) or off entity `vehicle`
+/// ([`crate::code_events::mount`]). Whether a mod canceled it.
+pub fn entity_mount(rt: &mut Rt, host: &mut dyn Host, dimension: &str, entity: i32, kind: &str, vehicle: i32, vehicle_kind: &str, mounting: bool) -> bool {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::mount(rt, dimension, entity, kind, vehicle, vehicle_kind, mounting))
+}
+
+/// `native_sleep_finished_time` (server): `dimension`'s night was slept through and its time,
+/// `current`, is about to be `new` ([`crate::code_events::sleep_finished`]). The time a mod set
+/// instead, if one did.
+pub fn sleep_finished_time(rt: &mut Rt, host: &mut dyn Host, dimension: &str, current: i64, new: i64) -> Option<i64> {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::sleep_finished(rt, dimension, current, new))
+}
+
+/// `native_chunk_load` and `native_chunk_unload` (server): the chunk at chunk coordinates `chunk`
+/// of `dimension` came into the level (`new`: made just now) or left it
+/// ([`crate::code_events::chunk`]).
+pub fn chunk_changed(rt: &mut Rt, host: &mut dyn Host, dimension: &str, chunk: [i32; 2], loaded: bool, new: bool) {
+    rt.safe_point();
+    rt.with_host(host, |rt| crate::code_events::chunk(rt, dimension, chunk, loaded, new));
+}
+
 /// `native_destroy_block` (server): the acting player breaks the block `state` at `pos`, the game
 /// having allowed it: the mods hear it ([`crate::world_events::block_break`]), then a mod block
 /// does its own part before the game removes it ([`crate::block_breaking::player_breaks`]).
