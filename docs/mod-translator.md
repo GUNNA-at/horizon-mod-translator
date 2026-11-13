@@ -11277,6 +11277,234 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     - Handlers that run now that their payloads arrive: Balm's config reads a null where an
       `Integer` was written, Ars Nouveau's documentation counts its potion recipes wrong.
     - `Codec.BYTE_BUFFER` is not answered: Create Ore Excavation reads none of its 15 veins.
+- [x] 2026-11-13 Part 193: what launches 32 to 35 showed: keys by what they hold, the game's own lists, files written in place, work that holds the window.
+  - What launch 32 left, taken in its order. A mod's own image class (`ComparableNativeImage
+    extends NativeImage`) has an address as `NativeImage` itself has: JourneyMap's 17,088
+    "STB resize failed" are gone. Every payload goes inside one of the runtime's own, on a
+    channel the game carries, and one that waits at the head of a player's queue is given up
+    after twenty ticks, not six hundred: no message is given up any more (launch 32: 4). A tag
+    of a mod's own registry is its files' (`tag_files.rs`: the copies of every mod added up,
+    `replace` and `#tag` followed): Mekanism's 69 "Empty tag" recipes are gone. A vanilla
+    item's durability is told while the mods load. `Codec.BYTE_BUFFER`; a fluid ingredient's
+    fluids by tag. A mod's log line is traced with its exception, and a line repeated is
+    printed 200 times, then every 10,000th.
+  - A table's rows name their own classes only. The generated table of vanilla's records
+    names 153 classes of the game's as the type of some component, and a class named in the
+    runtime's sources is the runtime's: its own code was not carried and nothing answered
+    it. `build.rs` now takes a row's own class alone (4,181 named classes became 3,981), and
+    vanilla's rotation groups (`OctahedralGroup`, `SymmetricGroup3`, `BlockModelRotation`) are
+    carried whole (3,978): the loop that asked `BlockModelRotation.getRotation()` 300,000
+    times a hook is gone with them.
+  - The carried groups found three faults in what carried code meets, each a general one:
+    - DataFixerUpper's `Pair` was made with its halves under one pair of names and compared
+      and hashed under another: every pair equalled every other and hashed to 0, so a map
+      keyed by pairs held one entry ("Duplicate key" in `OctahedralGroup`'s static
+      initialiser).
+    - A list, a set and a map were hashed as objects are, by themselves, while `equals` went
+      by what they hold: one was never found again by an equal one made anew. They are keys
+      by content now (`AbstractList`, `AbstractSet`, `AbstractMap`), pairs by their halves as
+      each library has it, queues and deques that are no lists by themselves alone; an
+      `IdentityHashMap`, fastutil's `Reference*` tables and Guava's identity sets keep
+      collections and the code's own objects by identity.
+    - A carried game class's field that hides one above it (an enum's own `name` over
+      `Enum.name`) was written under `name@Class` and read under the plain name:
+      `getSerializedName()` was null. Six such classes in AE2's bundle alone.
+    The expected values are Java's: `OctahedralGroup`'s 48 compositions and
+    `BlockModelRotation`'s 16 rotations with their matrices, run on the game's own jar, and a
+    fixture case of seven parts beside the JVM.
+  - The game lists its registries and its tags. A walk over a registry (`keySet`, `stream`,
+    `holders`, `forEach`...) gave the mods' entries alone; a block, item, fluid or entity
+    type tag gave its members only where a mod had read the file. The host's holder-set
+    question, which was there for world generation, is answered by the client now (an id, a
+    `#tag`, a list, NeoForge's `any`, `or`, `and`, `not`), so a walk has the game's entries
+    with the mods' and a tag its loaded members: Sable's 48 "Unknown tag" and Lootr's 14
+    "Tag Error" are gone. The tags that hold an entry (`Holder.tags()`, `ItemStack.getTags()`,
+    `BlockState.getTags()`, 18 and 15 of the pack's mods) are asked through the same door, in
+    a form of Horizon's own. No change to the runtime's core, so no crate of the mods' code
+    was built again.
+  - Java's and Guava's collections, as launch 32 asked: `Collections.min`, `max`,
+    `disjoint`; `Iterables.concat`, `Streams.stream` and `concat`, `Iterators.filter`,
+    `ImmutableList.sortedCopyOf`, `Splitter.limit`, `Ordering`; `Stream.flatMapToInt` and
+    `mapMulti`; `AccessController.doPrivileged`. My first `Splitter.limit` was wrong where
+    empty pieces are left out, and Guava's own run said so: expected values are taken from
+    the library, never worked out from the code under test.
+  - Launch 33 (1633 s, 199 crates: the naming rule touched 196 of 571; 2,037,665,936 bytes)
+    stood still, and the script that asks the game stood with it for two and a half hours:
+    no question to the game had a limit. JourneyMap, its image class working, went on to keep
+    its chunks in files it writes through `FileChannel.write(buffer, position)` "until the
+    buffer is empty". No file channel was answered, so the loop never ended; the runtime
+    stopped it after ten seconds, and the mod began it again at the next tick. Ten seconds a
+    tick on the window's thread.
+    - Every question the launch script asks has a limit now (three minutes, or three seconds
+      a tick waited for); one left unanswered samples the game's threads, stops it and keeps
+      the log. The watch beside it kills a game still up after forty minutes.
+    - `channels.rs`: `FileChannel` (opened with Java's options; read and written in turn and
+      at a place, scattering and gathering; `truncate`, `transferTo`, `transferFrom`, locks, a
+      part mapped to be read), what `Files.newByteChannel` opens, `RandomAccessFile` with
+      `DataInput`'s and `DataOutput`'s values, a stream as a channel. A file opened in place
+      keeps its path and where it is, and each read or write opens the file for itself:
+      nothing is held between calls. Folders: `Files.newDirectoryStream` (all, by a glob, by
+      a filter), `Files.walkFileTree` with a visitor's four answers, `Files.find`,
+      `readAttributes`, glob matchers, temporary files and folders, `toRealPath`,
+      `getCanonicalPath`. JourneyMap and some ten more of the pack's mods ask them. Java 21
+      ran the same calls first; three of my answers were not its own (`position(-1)` has no
+      message, `transferFrom` past the end writes there, `skipBytes` from past the end tells a
+      negative count), and the fixture's `files` case runs them translated beside the JVM.
+    - A hook stopped as stuck on a call nothing answers is stopped after ten thousand such
+      calls the next time it makes that call, not after ten seconds.
+    - `TomlFormat.newConfig()`: Moonlight makes a config entry's default of one; unanswered,
+      the default was null and Amendments' config could not be written.
+  - Launch 34 (698 s, 6 crates, 2,037,732,448 bytes) stood still at another place. JourneyMap
+    gives the drawing of its map tiles to a pool, and work given to a pool runs on the game's
+    thread here. A piece of a mod's code that held that thread past ninety seconds was stopped
+    with a `java.lang.Error`, which the mod's own log formatter walks for ever. A piece stopped
+    for its time is stopped with a `StackOverflowError` now (what Java itself gives code that
+    does not come back) and stays stopped: every call it makes afterwards throws again. In a
+    world, work given to a pool has five seconds; a kind of work that passes them twice is run
+    no more, and one line says so. This keeps the game going; it does not draw JourneyMap's
+    tiles. Work a mod gives to a pool or to a thread of its own needs a thread beside the
+    game's, which the runtime does not have yet.
+  - What the mods asked next, each answer taken from the library's or Java's own run:
+    - Night Config by the mod itself: TOML read and written (`TomlFormat`'s parser and writer,
+      from a string, a reader, a stream, a file or a path, into a new config or a given one),
+      a file config's `load` and `save` in both its kinds (the default one reads into a new
+      config and puts it over its own, and is emptied when the file is gone; `sync()` reads
+      into itself), what a missing file does (`CREATE_EMPTY`, `READ_NOTHING`, `THROW_ERROR`, a
+      mod's own answer), `putAll`, `addAll`, `removeAll`, `putAllComments`, a watcher that
+      watches nothing. Seven of my first answers were not NightConfig 3.8.3's: the order of
+      entries needs `Config.setInsertionOrderPreserved(true)`, `addAll` is shallow, a plain
+      config is written inline, `validate(null)` is true.
+    - The game's own files are read while the mods load (`--resources`), where no host is at
+      hand yet.
+    - Sorted sets' and maps' neighbours and parts (`floor`, `ceiling`, `higher`, `lower`,
+      `headSet`, `tailSet`, `subMap`, `descendingMap`, `pollFirst`), `HexFormat`,
+      `java.util.logging.Level`, `CRC32`, `CRC32C`, `Adler32`, `Collections.EMPTY_LIST`, Guava's
+      `Charsets`.
+    - `String.format("%s", object)` asks the object for its text, as `Formatter` does; it
+      printed `Class@hash`. A fixture case of seven parts beside the JVM.
+  - Launch 35 (709 s, 11 crates, 2,037,748,544 bytes): the game is ready after 427 s and the
+    test runs to its end. The shaft turns at the motor's speed, and the press makes an iron
+    sheet of the ingot on the depot. JourneyMap's tile work was stopped at five seconds twice
+    and run no more. 0 "stopped a loop", 0 "STB resize failed", 0 payloads given up, 1 "Not a
+    map", 87 `getTintMethod` (Amendments' colour probe), 103 other uncaught, 760 unmapped
+    lines (launch 32: 163 uncaught).
+  - Tests: 911 in the runtime, 23 in its core, 40 in the translator, the fixtures beside the
+    JVM.
+- [x] 2026-11-13 Part 194: onto upstream's Horizon of 2026-11-13.
+  - Upstream had moved 16,781 commits past the commit this branch forked from (2026-11-01),
+    and the translator stood on a base nobody else ran any more. What changed there, as far
+    as a translator meets it: 434 hook points (108 at the fork), 157 of them named after a
+    NeoForge event; a typed mod API generated at build time from the hook catalog
+    (`horizon-mod-api-gen`: a `Hooks` trait, a `Host`, mods linked into the executable);
+    `game.rs` split over some 580 files and new crates under and over it (the layers);
+    `horizon-port-pack events`, which counts a pack's NeoForge listeners against the catalog.
+    Upstream's own position on Java mods has not changed: they are not run, and "Convert to
+    Rust" is on its roadmap, not started.
+  - Measured on this pack with upstream's own tool: 367 mods, 288 of which listen to NeoForge
+    events or use its capabilities, 293 different ones in all; 135 have a hook point of
+    upstream's (46%), 18 another phase's, 136 none. The ones with none are led by the loading
+    events (`FMLCommonSetupEvent` 143 mods, `FMLClientSetupEvent` 140,
+    `RegisterPayloadHandlersEvent` 118, `RegisterCapabilitiesEvent` 79): what a mod loader
+    does, which is the translated runtime's own work here and needs no hook of the game.
+  - The merge. 94 files conflicted in 323 places. Where both sides had only added, both
+    stand. Where upstream had rewritten or moved the code, upstream's stands, and my side of
+    each place was kept as a note and applied again where the code is now, by its own text
+    (a tool for the next merge: exact places, code moved to another file, whole items,
+    single changes) and then by hand. Several things this branch had built were upstream's
+    by now in their own form, and upstream's are used: OBJ and composite models, block
+    textures in arrays, `LivingDamageEvent`'s two hooks (with this branch's signature),
+    shapes by state, content declared in code, text in the world.
+  - What stays the translator's own on the new base:
+    - Its hook points are not part of the typed API: their fragments say `"mod_api": false`
+      and the generator leaves those out. A staged build stamps the fragments into the
+      catalog as a release does.
+    - Natives whose names upstream took for its own were renamed, mine by what they take
+      (an entity's id where upstream's takes a player's UUID): `native_living_add_effect`,
+      `native_living_attribute`, `native_entity_ids_in`, `native_level_entity_nbt`,
+      `native_run_command_from`, `native_client_add_particle`, `native_block_name_has_tag`,
+      `native_window_player`, `native_draw_text_pieces`, `native_neighbor_changed_at`,
+      `native_living_death_source` (the death with the blow's source, beside upstream's
+      `native_living_death`).
+    - Content: upstream's schema, with tints, `copy`, `collision` and the states drawn
+      another way (`render_shape_states`) added, and a mod's blocks and items declared one
+      by one, so that one refused declaration costs that block alone. The runtime writes
+      shapes as upstream reads them (`default` alone; `property` and `values`; `properties`
+      and `values` by their values).
+    - horizon-mixins: the fork merged with the revision upstream's launcher pins.
+    - A mod's data: upstream's `horizon-port-pack check` now sets aside the recipes a content
+      port cannot use (those of the mod's own types and of types the game doesn't have, and
+      those for blocks the port leaves out: 488 of Create's 1,884). A translated mod has its
+      code for them, so `install::merge_data` takes the mod's own data back from what was set
+      aside. The pack has its 28,596 recipes again; without this it had 24,661.
+    - A mod's own biome modifier types (Farmer's Delight's, Waddles') on upstream's
+      `mod_content_biomes`: upstream wrote the spawn modifiers itself in the meantime, so its
+      file stands, and the mods' code runs on it in each of NeoForge's five phases, after the
+      files of that phase. The translated mods' own entity types are among those a spawn
+      modifier may name.
+    - The renderer's sixteen arrays of block sprites: upstream's terrain binds eight (16,384
+      sprites), the pack has 24,729, and this branch's commit that gives such a game eight
+      more had not come through the merge. The first launch on the new base ended as its
+      world opened, without a word: the game stops as a player's quit does when a fatal error
+      comes, its control socket goes first, and the launch script, finding no socket, ended
+      the run before the game had said why. Run again with nothing to end it, it said so
+      ("24729 block textures need more than the 8 arrays of 2048") and wrote a crash report.
+  - The pack on the new base. Round 36: 801 s, 175 crates (the game's own and the engine;
+    the mods' 571 code crates link the runtime's core alone and were not built again),
+    2,066,549,504 bytes, 28.8 MB more than on the old base. Round 37, with the sprite arrays:
+    759 s, 22 crates, 2,066,584,688 bytes. Launch 37: content from 320 mods (728,041 block
+    states, 29,115 items, 28,596 recipe files), 24,729 block textures in 16 arrays, resources
+    loaded in 246 s (296 s on the old base), ready after 420 s (427 s). `/create trains`
+    answers, the shaft turns at the motor's speed, and the press makes an iron sheet of the
+    ingot on the depot. 105 other uncaught (103 at launch 35, the old base's last), 769
+    unmapped lines (760), the mods' own errors 505 lines of 480 kinds (the same), the server's
+    thread 4.7 to 5.9 s of every 20 in the mods' code and the window's 15.3 to 16.7 s (as
+    before).
+  - The tests of the merged base, run whole for the first time, found what the merge of two
+    sides' tests leaves behind, and one thing of the code's:
+    - Atlases: both sides had learned to append a mod's sprite sources to an atlas, and the
+      merged loader did it twice, upstream's way for `assets/minecraft/atlases/` alone and
+      this branch's for any namespace, while the copy that skips reading (upstream's, for the
+      10,000 textures of a mod) took another namespace's atlas file as a plain one. One path
+      now: any namespace's atlas is read, a source of a kind the game doesn't read is left out
+      with a warning, and upstream's `merge_atlas` writes each atlas once.
+    - Two tests of this branch used the scratch folder of a test of upstream's
+      (`horizon-mod-atlas-<pid>`, `horizon-mod-copy-<pid>`): run in one process, each deleted
+      the other's files. A test of `LivingDamageEvent`'s hooks set the process-wide hook that
+      upstream's own test of the same hooks sets; upstream's covers it, mine is gone. A block's
+      shapes in a test still had this branch's old form (a list; upstream's is `default` or
+      values by state).
+    - `horizon-port-pack`: a tag for a mod that is not in the pack is carried here as any tag
+      addition is (upstream sets it aside); the namespace is still not claimed, which is what
+      upstream's test is about, and the test now says both.
+    - `native_hooks.rs` is formatted as `cargo fmt` formats it: the generator of the typed API
+      writes the file back through rustfmt when it fills a hook, and its test compares the
+      result with the file.
+  - The launcher (a workspace of its own, not compiled since the merge) builds on the new
+    base. A translated bundle is a folder with a `horizon-mixin.toml` that pins the fork's
+    commit and names no hook points' version, so upstream's new check of a pin against the
+    catalog of its revision (`with_hooks`) does not concern it; the hook points' version and
+    the commit's date are asked of the repository the bundle names. A downloaded source gets
+    its pending hook points stamped into its catalog with everything their fragments say of
+    them (`mod_api` too), and the fragments keep their texts alone, as after a release: the
+    game's build script reads both and refuses a name it finds in both. horizon-mixins reads
+    the catalog only, so without the stamp no hook point added since the last release, this
+    branch's or upstream's 103, could be injected at. Upstream now ships the launcher in 86
+    languages (10 at the fork); the six sentences of the translation flow are in the ten the
+    fork had and in English in the others, and the sentence about a Java modpack being
+    imported on the Modpacks page, which the launcher no longer says, is gone from all.
+  - Tests on the new base: horizon-world 510, horizon-items 130, horizon-assets 54,
+    horizon-mods 46, horizon-port-pack 168, horizon-mod-api-gen 19 (with a rustfmt on the
+    path), horizon-client-render 2,268, horizon-client-lib 2,829, the gameplay library 1,430
+    (644 more need prepared resources), the runtime 911 and 23, the translator's own, the
+    launcher 680 of 681. The one that fails, `an_app_bundle_updates_in_place`, copies
+    `/usr/bin/true`, signs the copy and runs it, and this machine kills a re-signed copy of a
+    system program (exit 137), with or without the launcher.
+  - Not done yet: the launcher's whole flow (a jar dropped, translated, the game built from
+    the fork's source and started) has not been run on the new base, only its parts; the
+    renderer's entry points for a native mod's own draws (`gfx/native_render.rs`) still assume
+    eight sprite arrays, which no translated bundle uses; `docs/api` still says a shape has
+    at most 16 boxes; a mod's background threads still run on the game's thread, five seconds
+    at a time.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
