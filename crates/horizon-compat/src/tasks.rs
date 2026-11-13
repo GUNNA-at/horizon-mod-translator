@@ -99,19 +99,74 @@ pub(crate) fn cancel(rt: &mut Rt, future: V) -> bool {
 /// waits for something itself) leaves it where it is, for the call running it to take out.
 const RUNNING: &str = "$taskRunning";
 
-/// Runs the work of `future`, which waits no longer whatever comes of it. The work is a
-/// piece of the mods' code on a clock of its own, as a listener is: one that never ends is
-/// stopped as any other piece is.
-fn run(rt: &mut Rt, future: V) {
-    rt.put_field(future, RUNNING, V::I(1));
-    let outer = crate::api::timed_start();
-    run_timed(rt, future);
-    crate::api::timed_end(outer);
-    rt.put_field(future, RUNNING, V::Void);
+/// How long one piece of a pool's work may run once the window is in a world. A pool's own
+/// thread would run it beside the game; here the game's thread runs it, and stands still
+/// meanwhile. (JourneyMap draws its map in such work, all the chunks around the player in one
+/// piece: 82 s for the first, more than the 90 a piece has for the second, and the window
+/// answered nothing for either.)
+const IN_WORLD_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+thread_local! {
+    /// [`IN_WORLD_TIME`] on this thread (a test's is shorter).
+    static WORLD_TIME: std::cell::Cell<std::time::Duration> = const { std::cell::Cell::new(IN_WORLD_TIME) };
+}
+/// How many times work of one kind may be stopped for that before no more of its kind is run.
+const OVERRUNS: u32 = 2;
+
+thread_local! {
+    /// How many times this thread stopped work of each kind (its class: a lambda's names the
+    /// method it runs) for running past [`IN_WORLD_TIME`].
+    static OVERRAN: std::cell::RefCell<std::collections::HashMap<&'static str, u32>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-fn run_timed(rt: &mut Rt, future: V) {
+/// Whether work run now holds the window's thread in a world: where it has [`IN_WORLD_TIME`].
+fn in_world(rt: &Rt) -> bool {
+    crate::neo::is_client(rt)
+        && !crate::neo::loading(rt)
+        && crate::world_events::client_in_world(rt)
+}
+
+/// Runs the work of `future`, which waits no longer whatever comes of it. The work is a
+/// piece of the mods' code on a clock of its own, as a listener is: one that never ends is
+/// stopped as any other piece is. In a world it has [`IN_WORLD_TIME`], and work of a kind
+/// stopped [`OVERRUNS`] times for that is run no more: its future is cancelled. The mod's
+/// background work is then off (said once), and the game goes on.
+fn run(rt: &mut Rt, future: V) {
     let work = rt.get_field(future, TASK);
+    // (The runtime's own functions are no kind of a mod's work: each stands for many.)
+    let kind = rt.class_of(work);
+    let timed = in_world(rt) && !kind.starts_with("compat:");
+    if timed && OVERRAN.with(|o| o.borrow().get(kind).copied().unwrap_or(0)) >= OVERRUNS {
+        cancel(rt, future);
+        return;
+    }
+    rt.put_field(future, RUNNING, V::I(1));
+    let outer = if timed {
+        crate::api::timed_start_within(WORLD_TIME.get())
+    } else {
+        crate::api::timed_start()
+    };
+    run_timed(rt, future, work);
+    let stopped = crate::api::timed_out();
+    crate::api::timed_end(outer);
+    rt.put_field(future, RUNNING, V::Void);
+    if timed && stopped {
+        let times = OVERRAN.with(|o| {
+            let mut o = o.borrow_mut();
+            let times = o.entry(kind).or_insert(0);
+            *times += 1;
+            *times
+        });
+        if times == OVERRUNS {
+            eprintln!(
+                "horizon-compat: work given to a pool ({kind}) held the window's thread past {} s {OVERRUNS} times and is run no more: a pool's own thread would run it beside the game, and here the game's thread does",
+                WORLD_TIME.get().as_secs()
+            );
+        }
+    }
+}
+
+fn run_timed(rt: &mut Rt, future: V, work: V) {
     rt.put_field(future, TASK, V::Void);
     let value = match rt.get_field(future, KIND).i() {
         SUPPLY => rt.call_functional(
@@ -264,6 +319,69 @@ mod tests {
         );
         let task = crate::functions::bound(rt, COUNT_DOWN, latch);
         (latch, task)
+    }
+
+    /// In a world, a pool's work holds the window's thread while it runs: past its time it is
+    /// stopped, and work of a kind stopped twice is run no more (its future is cancelled),
+    /// while other work, and that kind outside a world, goes on.
+    #[test]
+    fn work_that_holds_the_window_is_stopped_then_run_no_more() {
+        thread_local!(static RAN: std::cell::Cell<[u32; 2]> = const { std::cell::Cell::new([0; 2]) });
+        // Lambda 1 asks the game something and counts when it was answered; lambda 2 counts.
+        fn lambda(rt: &mut Rt, id: u32, _args: &[V]) -> Option<V> {
+            if id == 1 {
+                call(rt, "java/lang/Math.abs.(I)I", &[V::I(-1)]);
+                if rt.thrown.is_some() {
+                    return Some(V::Void);
+                }
+            }
+            RAN.with(|r| {
+                let mut ran = r.get();
+                ran[(id - 1) as usize] += 1;
+                r.set(ran);
+            });
+            Some(V::Void)
+        }
+        let mut rt = runtime();
+        rt.vcall = Some(vcall);
+        rt.lambda_call = Some(lambda);
+        rt.interned.insert("side:client".into(), V::I(1));
+        assert!(in_world(&rt));
+        let give = |rt: &mut Rt, id: u32, class: &'static str| {
+            let work = rt.lambda_id(class, id, Vec::new());
+            later(rt, work, RUN, V::NULL)
+        };
+        // With time, it runs.
+        let first = give(&mut rt, 1, "t/Map.draw");
+        round(&mut rt);
+        assert_eq!(RAN.get(), [1, 0]);
+        assert!(!waits(&rt, first));
+        // With none left, it is stopped at the call it makes: twice, and a line says so.
+        WORLD_TIME.set(std::time::Duration::ZERO);
+        for _ in 0..OVERRUNS {
+            give(&mut rt, 1, "t/Map.draw");
+            crate::api::next_call_reads_the_clock();
+            round(&mut rt);
+            assert!(
+                rt.thrown.is_none(),
+                "what stopped it is the work's, not the game's"
+            );
+        }
+        assert_eq!(RAN.get(), [1, 0]);
+        // Its kind is run no more: cancelled, as a future whose work never ran.
+        WORLD_TIME.set(IN_WORLD_TIME);
+        let dropped = give(&mut rt, 1, "t/Map.draw");
+        round(&mut rt);
+        assert_eq!(RAN.get(), [1, 0]);
+        assert_eq!(rt.get_field(dropped, CANCELLED), V::I(1));
+        // Work of another kind goes on, and so does that kind where no world is open.
+        give(&mut rt, 2, "t/Cache.save");
+        round(&mut rt);
+        assert_eq!(RAN.get(), [1, 1]);
+        rt.interned.remove("side:client");
+        give(&mut rt, 1, "t/Map.draw");
+        round(&mut rt);
+        assert_eq!(RAN.get(), [2, 1]);
     }
 
     /// A pool's work doesn't run inside the call that gave it, nor inside anything that call
