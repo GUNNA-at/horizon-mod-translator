@@ -919,6 +919,9 @@ fn client_host(c: &str, id: &str) -> String {
         fn client_player(&self) -> Option<(String, u8)> {{
             self.game.get().native_window_player()
         }}
+        fn client_profile(&self) -> Option<(String, u128)> {{
+            Some(self.game.get().native_window_profile())
+        }}
         fn client_player_id(&self) -> Option<i32> {{
             self.game.get().native_client_player_id()
         }}

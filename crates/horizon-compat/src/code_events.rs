@@ -102,19 +102,22 @@ const MINECRAFT: &str = "net/minecraft/client/Minecraft";
 const USER: &str = "compat:user";
 
 /// `Minecraft.getUser()`: who plays, as the game's own class holds them, which the mods that ask
-/// carry: their name, their UUID (the acting player's; else the one the game gives a name without
-/// an account, `OfflinePlayer:<name>`'s), no token, a Microsoft account's kind. The same object
-/// from then on. Null when no mod carries the class.
+/// carry: the name and UUID of the profile the window plays under (the game tells them in a
+/// world or not), no token, a Microsoft account's kind. The same object from then on. Where no
+/// game is at hand to tell (a mod asks while it loads) it is a player without an account named
+/// "Player", made anew at each asking, so that the profile is right once the game tells it.
+/// Null when no mod carries the class.
 fn user(rt: &mut Rt) -> V {
     if let Some(&user) = rt.interned.get(USER) {
         return user;
     }
-    let name = rt.host().and_then(|h| h.client_player()).map_or_else(|| "Player".to_owned(), |(name, _)| name);
-    let (high, low) = match rt.host().and_then(|h| h.player_id()) {
-        Some(id) => ((id >> 64) as i64, id as i64),
-        None => crate::tags::name_uuid(["OfflinePlayer:", &name].concat().as_bytes()),
-    };
-    let uuid = crate::tags::uuid(rt, high, low);
+    let told = rt.host().and_then(|h| h.client_profile());
+    let known = told.is_some();
+    let (name, id) = told.unwrap_or_else(|| {
+        let (high, low) = crate::tags::name_uuid(b"OfflinePlayer:Player");
+        ("Player".to_owned(), (u128::from(high as u64) << 64) | u128::from(low as u64))
+    });
+    let uuid = crate::tags::uuid(rt, (id >> 64) as i64, id as i64);
     let (name, token) = (rt.string(&name), rt.string(""));
     let none = crate::api::call(rt, "java/util/Optional.empty.()Ljava/util/Optional;", &[]);
     let kind = crate::records::enum_constant(rt, "net/minecraft/client/User$Type.MSA").unwrap_or(V::NULL);
@@ -122,7 +125,9 @@ fn user(rt: &mut Rt) -> V {
     let Some(user) = make(rt, "User", desc, &[name, uuid, token, none, none, kind]) else {
         return V::NULL;
     };
-    rt.interned.insert(USER.into(), user);
+    if known {
+        rt.interned.insert(USER.into(), user);
+    }
     user
 }
 
@@ -363,7 +368,7 @@ mod tests {
         assert!(!heard(&mut rt, "ChunkEvent$Load"));
     }
 
-    /// The window's player, and the acting player's UUID when the game has one.
+    /// A game, which tells the profile its window plays under when it has one at hand.
     struct Window(Option<u128>);
     impl crate::host::Host for Window {
         fn block_state(&self, _pos: [i32; 3]) -> String {
@@ -375,11 +380,8 @@ mod tests {
         fn game_time(&self) -> i64 {
             0
         }
-        fn client_player(&self) -> Option<(String, u8)> {
-            Some(("Notch".into(), 0))
-        }
-        fn player_id(&self) -> Option<u128> {
-            self.0
+        fn client_profile(&self) -> Option<(String, u128)> {
+            self.0.map(|id| ("Notch".to_owned(), id))
         }
     }
 
@@ -396,10 +398,11 @@ mod tests {
         Some(user)
     }
 
-    /// `Minecraft.getUser()` is who plays, made once by the class's own constructor: the window's
-    /// player's name and the acting player's UUID, or with no player yet the UUID the game gives a
-    /// name without an account (Java's `UUID.nameUUIDFromBytes("OfflinePlayer:Notch")`), no token,
-    /// a Microsoft account's kind. Null while no mod carries the class.
+    /// `Minecraft.getUser()` is who plays, made by the class's own constructor with the profile
+    /// the game tells: its name and UUID, no token, a Microsoft account's kind, the same object
+    /// from then on. Before any game tells (a mod asks while it loads) it is "Player" without an
+    /// account (Java's `UUID.nameUUIDFromBytes("OfflinePlayer:Player")`), and not kept: the next
+    /// asking has the game's. Null while no mod carries the class.
     #[test]
     fn who_plays_is_made_by_the_games_own_class() {
         crate::install();
@@ -412,27 +415,24 @@ mod tests {
         };
         let mut rt = Rt::new();
         let get = key(&mut rt);
-        let mut host = Window(None);
-        assert_eq!(rt.with_host(&mut host, |rt| api::call(rt, get, &[])), V::NULL, "no code of the class");
+        let mut loading = Window(None);
+        assert_eq!(rt.with_host(&mut loading, |rt| api::call(rt, get, &[])), V::NULL, "no code of the class");
 
         rt.reflect = Some(user_code);
-        let user = rt.with_host(&mut host, |rt| api::call(rt, get, &[]));
+        let early = rt.with_host(&mut loading, |rt| api::call(rt, get, &[]));
+        assert_eq!(rt.str_of(rt.get_field(early, "name")), Some("Player"));
+        assert_eq!(uuid_text(&mut rt, early), "a01e3843-e521-3998-958a-f459800e4d11");
+
+        let mut game = Window(Some(0x0123_4567_89ab_cdef_0011_2233_4455_6677));
+        let user = rt.with_host(&mut game, |rt| api::call(rt, get, &[]));
+        assert_ne!(user, early, "the early one was not kept");
         assert_eq!(rt.str_of(rt.get_field(user, "name")), Some("Notch"));
-        assert_eq!(uuid_text(&mut rt, user), "b50ad385-829d-3141-a216-7e7d7539ba7f");
+        assert_eq!(uuid_text(&mut rt, user), "01234567-89ab-cdef-0011-223344556677");
         assert_eq!(rt.str_of(rt.get_field(user, "accessToken")), Some(""));
         let kind = rt.get_field(user, "type");
         assert_eq!(rt.str_of(rt.get_field(kind, "$name")), Some("MSA"));
-        // The same object from then on, whoever acts.
-        let mut host = Window(Some(7));
-        assert_eq!(rt.with_host(&mut host, |rt| api::call(rt, get, &[])), user);
-
-        // In a world: the acting player's own UUID.
-        let mut rt = Rt::new();
-        rt.reflect = Some(user_code);
-        let get = key(&mut rt);
-        let mut host = Window(Some(0x0123_4567_89ab_cdef_0011_2233_4455_6677));
-        let user = rt.with_host(&mut host, |rt| api::call(rt, get, &[]));
-        assert_eq!(uuid_text(&mut rt, user), "01234567-89ab-cdef-0011-223344556677");
+        // The same object from then on, whatever is at hand.
+        assert_eq!(rt.with_host(&mut loading, |rt| api::call(rt, get, &[])), user);
     }
 
     /// The level's event class keeps the level its constructor is handed; an event no constructor

@@ -13355,6 +13355,20 @@ impl Game<'_> {
         self.player.as_ref()?;
         Some((self.options.player_name(), self.ui.registries.permission))
     }
+    /// The profile this window plays under, in a world or not: the signed-in
+    /// account's name and UUID, else the offline name and the UUID a server
+    /// gives a name without an account (`OfflinePlayer:<name>`'s). A client
+    /// mod asks it as `Minecraft.getUser()`. API @API:window_profile@.
+    pub(super) fn native_window_profile(&self) -> (String, u128) {
+        match horizon_client::auth::current() {
+            Some(session) => (session.name.clone(), session.uuid),
+            None => {
+                let name = self.options.player_name();
+                let uuid = horizon_protocol::crypto::offline_uuid(&name);
+                (name, uuid)
+            }
+        }
+    }
     /// The window's player's entity id (`LocalPlayer.getId()`): on a client
     /// of a server, the one the server gave them, by which its packets name
     /// them (Create's `PersistentDataPacket` finds the player it syncs by

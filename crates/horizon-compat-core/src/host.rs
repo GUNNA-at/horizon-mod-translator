@@ -815,6 +815,11 @@ pub trait Host {
     fn client_player(&self) -> Option<(String, u8)> {
         None
     }
+    /// On a client, the profile the window plays under, in a world or not (`Minecraft.getUser()`):
+    /// its name and UUID. None elsewhere.
+    fn client_profile(&self) -> Option<(String, u128)> {
+        None
+    }
     /// On a client, the local player's entity id (`LocalPlayer.getId()`): the one the server gave
     /// them, by which its packets name them. None elsewhere.
     fn client_player_id(&self) -> Option<i32> {

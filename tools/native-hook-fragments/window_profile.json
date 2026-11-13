@@ -1,0 +1,6 @@
+{
+  "hooks": [],
+  "rust_summary": "the profile the window plays under, in a world or not: its name and UUID (`native_window_profile`).",
+  "doc_summary": "`native_window_profile()`: the profile this window plays under, in a world or not: the signed-in account's name and UUID, else the offline name and the UUID a server gives a name without an account (`OfflinePlayer:<name>`'s). Translated bundles answer `Minecraft.getUser()` with it: @API:window_profile@.",
+  "comments": []
+}
