@@ -6674,10 +6674,17 @@ pub fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
         // `StandardCharsets.UTF_8` and the others: one object each, named as Java names them.
         // And as the JDK's own code names them, by their classes (`sun.nio.cs.UTF_8.INSTANCE`).
         "java/nio/charset/StandardCharsets"
+        | "com/google/common/base/Charsets"
         | "sun/nio/cs/UTF_8"
         | "sun/nio/cs/ISO_8859_1"
         | "sun/nio/cs/US_ASCII" => {
             const STANDARD: &str = "java/nio/charset/StandardCharsets";
+            // (Guava's `Charsets` are Java's, under the same names.)
+            let owner = if owner == "com/google/common/base/Charsets" {
+                STANDARD
+            } else {
+                owner
+            };
             let name = match (owner, field) {
                 (STANDARD, "UTF_8") | ("sun/nio/cs/UTF_8", "INSTANCE") => "UTF-8",
                 (STANDARD, "US_ASCII") | ("sun/nio/cs/US_ASCII", "INSTANCE") => "US-ASCII",

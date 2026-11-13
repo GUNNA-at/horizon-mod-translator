@@ -4460,6 +4460,27 @@ pub fn get_static(rt: &mut Rt, key: &'static str) -> V {
             }
         }
         k if k.starts_with("java/util/Locale.") => rt.intern("compat:locale".into(), |rt| rt.new_object("java/util/Locale")),
+        // The empty collections as fields, older than the methods that give them.
+        "java/util/Collections.EMPTY_LIST" => call(
+            rt,
+            "java/util/Collections.emptyList.()Ljava/util/List;",
+            &[],
+        ),
+        "java/util/Collections.EMPTY_SET" => {
+            call(rt, "java/util/Collections.emptySet.()Ljava/util/Set;", &[])
+        }
+        "java/util/Collections.EMPTY_MAP" => {
+            call(rt, "java/util/Collections.emptyMap.()Ljava/util/Map;", &[])
+        }
+        k if k.starts_with("java/util/logging/Level.") => {
+            match crate::jutil::logging_level(rt, k.rsplit('.').next().unwrap_or("")) {
+                Some(level) => level,
+                None => {
+                    crate::miss(rt, key);
+                    V::NULL
+                }
+            }
+        }
         // `Unsafe.theUnsafe`, which a mod takes by reflection to write a field it may not
         // ([`crate::jlang`]'s `sun.misc.Unsafe`).
         "sun/misc/Unsafe.theUnsafe" => crate::jlang::the_unsafe(rt),

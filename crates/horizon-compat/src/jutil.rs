@@ -1836,6 +1836,258 @@ fn kind_of(class: &str) -> Option<&'static str> {
     })
 }
 
+const LOGGING_LEVEL: &str = "java/util/logging/Level";
+/// `java.util.logging`'s levels, with the numbers they are compared by.
+const LOGGING_LEVELS: [(&str, i32); 9] = [
+    ("OFF", i32::MAX),
+    ("SEVERE", 1000),
+    ("WARNING", 900),
+    ("INFO", 800),
+    ("CONFIG", 700),
+    ("FINE", 500),
+    ("FINER", 400),
+    ("FINEST", 300),
+    ("ALL", i32::MIN),
+];
+
+/// `Level.INFO` and the others: one object each.
+pub(crate) fn logging_level(rt: &mut Rt, name: &str) -> Option<V> {
+    let &(name, value) = LOGGING_LEVELS.iter().find(|(n, _)| *n == name)?;
+    Some(rt.intern(format!("compat:logging-level/{name}"), |rt| {
+        let level = rt.new_object(LOGGING_LEVEL);
+        let text = rt.string(name);
+        rt.put_field(level, "$name", text);
+        rt.put_field(level, "$value", V::I(value));
+        level
+    }))
+}
+
+const HEX_FORMAT: &str = "java/util/HexFormat";
+
+/// A hexadecimal digit's value; None for another character.
+fn hex_digit(c: char) -> Option<u32> {
+    c.to_digit(16).filter(|_| c.is_ascii())
+}
+
+/// `HexFormat`: bytes as hexadecimal text and back, each byte's two digits between a prefix
+/// and a suffix, the bytes apart by a delimiter, in lower case unless asked. The object keeps
+/// those four; every `with...` gives another.
+fn hex_format(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    let made = |rt: &mut Rt, upper: bool, delimiter: &str, prefix: &str, suffix: &str| {
+        let f = rt.new_object(HEX_FORMAT);
+        rt.put_field(f, "$upper", V::I(i32::from(upper)));
+        for (field, text) in [
+            ("$delimiter", delimiter),
+            ("$prefix", prefix),
+            ("$suffix", suffix),
+        ] {
+            let text = rt.string(text);
+            rt.put_field(f, field, text);
+        }
+        f
+    };
+    let not_hex = |rt: &mut Rt, c: char| {
+        crate::jlang::throw_with(
+            rt,
+            "java/lang/NumberFormatException",
+            &format!("not a hexadecimal digit: \"{c}\" = {}", c as u32),
+        )
+    };
+    // The static ones first: their first argument is no format.
+    match (name, desc) {
+        ("of", _) => return Some(made(rt, false, "", "", "")),
+        ("ofDelimiter", _) => {
+            let delimiter = rt.str_of(a(0))?.to_owned();
+            return Some(made(rt, false, &delimiter, "", ""));
+        }
+        ("isHexDigit", _) => {
+            let is = char::from_u32(a(0).i() as u32)
+                .and_then(hex_digit)
+                .is_some();
+            return Some(V::I(i32::from(is)));
+        }
+        ("fromHexDigit", _) => {
+            let c = char::from_u32(a(0).i() as u32).unwrap_or('\u{fffd}');
+            return Some(match hex_digit(c) {
+                Some(d) => V::I(d as i32),
+                None => not_hex(rt, c),
+            });
+        }
+        (
+            "fromHexDigits" | "fromHexDigitsToLong",
+            "(Ljava/lang/CharSequence;)I" | "(Ljava/lang/CharSequence;)J",
+        ) => {
+            let text = rt.str_of(a(0))?.to_owned();
+            let most = if name == "fromHexDigits" { 8 } else { 16 };
+            if text.chars().count() > most {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    &format!(
+                        "string length greater than {most}: {}",
+                        text.chars().count()
+                    ),
+                ));
+            }
+            let mut value = 0u64;
+            for c in text.chars() {
+                match hex_digit(c) {
+                    Some(d) => value = value << 4 | u64::from(d),
+                    None => return Some(not_hex(rt, c)),
+                }
+            }
+            return Some(if name == "fromHexDigits" {
+                V::I(value as u32 as i32)
+            } else {
+                V::J(value as i64)
+            });
+        }
+        _ => {}
+    }
+    let this = a(0);
+    let upper = rt.get_field(this, "$upper").i() != 0;
+    let text_of = |rt: &Rt, field: &'static str| {
+        rt.str_of(rt.get_field(this, field))
+            .unwrap_or("")
+            .to_owned()
+    };
+    let (delimiter, prefix, suffix) = (
+        text_of(rt, "$delimiter"),
+        text_of(rt, "$prefix"),
+        text_of(rt, "$suffix"),
+    );
+    let digits = |value: u64, count: usize| {
+        let text = format!("{value:016x}");
+        let text = &text[16 - count..];
+        if upper {
+            text.to_ascii_uppercase()
+        } else {
+            text.to_owned()
+        }
+    };
+    Some(match (name, desc) {
+        ("withUpperCase", _) => made(rt, true, &delimiter, &prefix, &suffix),
+        ("withLowerCase", _) => made(rt, false, &delimiter, &prefix, &suffix),
+        ("withDelimiter" | "withPrefix" | "withSuffix", _) => {
+            let given = rt.str_of(a(1))?.to_owned();
+            match name {
+                "withDelimiter" => made(rt, upper, &given, &prefix, &suffix),
+                "withPrefix" => made(rt, upper, &delimiter, &given, &suffix),
+                _ => made(rt, upper, &delimiter, &prefix, &given),
+            }
+        }
+        ("isUpperCase", _) => V::I(i32::from(upper)),
+        ("delimiter", _) => rt.string(&delimiter),
+        ("prefix", _) => rt.string(&prefix),
+        ("suffix", _) => rt.string(&suffix),
+        ("formatHex", "([B)Ljava/lang/String;" | "([BII)Ljava/lang/String;") => {
+            let all = elements(rt, a(1));
+            let (from, to) = if desc.starts_with("([BII)") {
+                (a(2).i(), a(3).i())
+            } else {
+                (0, all.len() as i32)
+            };
+            if from < 0 || to < from || to as usize > all.len() {
+                rt.throw_new("java/lang/IndexOutOfBoundsException");
+                return Some(V::NULL);
+            }
+            let parts: Vec<String> = all[from as usize..to as usize]
+                .iter()
+                .map(|b| format!("{prefix}{}{suffix}", digits(u64::from(b.i() as u8), 2)))
+                .collect();
+            rt.string(&parts.join(&delimiter))
+        }
+        ("parseHex", "(Ljava/lang/CharSequence;)[B") => {
+            let text = rt.str_of(a(1))?.to_owned();
+            let chars: Vec<char> = text.chars().collect();
+            let plain = delimiter.is_empty() && prefix.is_empty() && suffix.is_empty();
+            if plain && !chars.len().is_multiple_of(2) {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    &format!("string length not even: {}", chars.len()),
+                ));
+            }
+            let pieces: Vec<String> = if plain {
+                chars.chunks(2).map(|pair| pair.iter().collect()).collect()
+            } else if text.is_empty() {
+                Vec::new()
+            } else {
+                let split: Vec<&str> = if delimiter.is_empty() {
+                    vec![text.as_str()]
+                } else {
+                    text.split(delimiter.as_str()).collect()
+                };
+                let mut pieces = Vec::new();
+                for piece in split {
+                    let inner = piece
+                        .strip_prefix(prefix.as_str())
+                        .and_then(|rest| rest.strip_suffix(suffix.as_str()));
+                    match inner {
+                        Some(inner) if inner.chars().count() == 2 => pieces.push(inner.to_owned()),
+                        _ => {
+                            return Some(crate::jlang::throw_with(
+                                rt,
+                                "java/lang/IllegalArgumentException",
+                                &format!("found: \"{piece}\", expected: \"{prefix}hh{suffix}\""),
+                            ));
+                        }
+                    }
+                }
+                pieces
+            };
+            let mut bytes = Vec::with_capacity(pieces.len());
+            for piece in pieces {
+                let mut value = 0;
+                for c in piece.chars() {
+                    match hex_digit(c) {
+                        Some(d) => value = value << 4 | d,
+                        None => return Some(not_hex(rt, c)),
+                    }
+                }
+                bytes.push(V::I(i32::from(value as u8 as i8)));
+            }
+            rt.alloc("[B", Data::Array(bytes))
+        }
+        ("toHexDigits", "(B)Ljava/lang/String;") => {
+            rt.string(&digits(u64::from(a(1).i() as u8), 2))
+        }
+        ("toHexDigits", "(C)Ljava/lang/String;" | "(S)Ljava/lang/String;") => {
+            rt.string(&digits(u64::from(a(1).i() as u16), 4))
+        }
+        ("toHexDigits", "(I)Ljava/lang/String;") => {
+            rt.string(&digits(u64::from(a(1).i() as u32), 8))
+        }
+        ("toHexDigits", "(J)Ljava/lang/String;") => rt.string(&digits(a(1).j() as u64, 16)),
+        ("toHexDigits", "(JI)Ljava/lang/String;") => {
+            let count = a(2).i();
+            if !(0..=16).contains(&count) {
+                return Some(crate::jlang::throw_with(
+                    rt,
+                    "java/lang/IllegalArgumentException",
+                    &format!("number of digits: {count}"),
+                ));
+            }
+            rt.string(&digits(a(1).j() as u64, count as usize))
+        }
+        ("toLowHexDigit" | "toHighHexDigit", _) => {
+            let nibble = if name == "toLowHexDigit" {
+                a(1).i() & 15
+            } else {
+                a(1).i() >> 4 & 15
+            };
+            V::I(
+                digits(nibble as u64, 1)
+                    .chars()
+                    .next()
+                    .map_or(0, |c| c as i32),
+            )
+        }
+        _ => return None,
+    })
+}
+
 fn util_owner(owner: &str) -> bool {
     owner.starts_with("java/util/")
         || owner == NON_NULL_LIST
@@ -2117,6 +2369,25 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         }
         "java/util/TimeZone" => return crate::jsystem::time_zone(rt, name, desc, args),
         "java/util/StringJoiner" => return joiner(rt, name, desc, args),
+        HEX_FORMAT => return hex_format(rt, name, desc, args),
+        LOGGING_LEVEL => {
+            return match name {
+                "intValue" => Some(V::I(rt.get_field(a(0), "$value").i())),
+                "getName" | "toString" | "getLocalizedName" => Some(rt.get_field(a(0), "$name")),
+                "parse" => {
+                    let wanted = rt.str_of(a(0)).unwrap_or("").to_owned();
+                    match logging_level(rt, &wanted) {
+                        Some(level) => Some(level),
+                        None => Some(crate::jlang::throw_with(
+                            rt,
+                            "java/lang/IllegalArgumentException",
+                            &format!("Bad level \"{wanted}\""),
+                        )),
+                    }
+                }
+                _ => None,
+            };
+        }
         // An `Enumeration` here is an iterator under its older names.
         "java/util/Enumeration" => {
             let key = match name {
@@ -4721,6 +4992,110 @@ fn ends_name(name: &str) -> Option<(bool, bool)> {
     (primitive || (removes && kind.is_empty())).then_some((from_back, removes))
 }
 
+/// The comparator table `t` orders its keys by; null for their own order.
+fn comparator_of(rt: &Rt, t: V) -> V {
+    match rt.heap.get(t.r() as usize).map(|o| &o.data) {
+        Some(Data::Table(t)) => t.comparator,
+        _ => V::NULL,
+    }
+}
+
+/// A sorted set's or map's neighbour of `key`, by the method's name: `floor` the greatest at
+/// or below it, `lower` the greatest below, `ceiling` the least at or above, `higher` the
+/// least above. None where there is none.
+fn neighbour(rt: &mut Rt, t: V, key: V, name: &str) -> Option<(V, V)> {
+    let comparator = comparator_of(rt, t);
+    let below = name.starts_with("floor") || name.starts_with("lower");
+    let strict = name.starts_with("higher") || name.starts_with("lower");
+    let mut found = None;
+    for (k, v) in table_entries(rt, t) {
+        let c = compare(rt, comparator, k, key);
+        let fits = if below { c < 0 } else { c > 0 } || (c == 0 && !strict);
+        if below {
+            if !fits {
+                break;
+            }
+            found = Some((k, v));
+        } else if fits {
+            found = Some((k, v));
+            break;
+        }
+    }
+    found
+}
+
+/// The entries of sorted table `t` between two bounds, each with whether it is inside itself
+/// (none: no bound on that side), in the table's order.
+fn between(rt: &mut Rt, t: V, from: Option<(V, bool)>, to: Option<(V, bool)>) -> Vec<(V, V)> {
+    let comparator = comparator_of(rt, t);
+    let mut out = Vec::new();
+    for (k, v) in table_entries(rt, t) {
+        if let Some((low, inside)) = from {
+            let c = compare(rt, comparator, k, low);
+            if c < 0 || (c == 0 && !inside) {
+                continue;
+            }
+        }
+        if let Some((high, inside)) = to {
+            let c = compare(rt, comparator, k, high);
+            if c > 0 || (c == 0 && !inside) {
+                break;
+            }
+        }
+        out.push((k, v));
+    }
+    out
+}
+
+/// The bounds a `head`, `tail` or `sub` call names (`headMap(to)`, `tailSet(from, inclusive)`,
+/// `subMap(from, fromInclusive, to, toInclusive)`), as [`between`] takes them. Java's plain
+/// forms take the lower bound in and leave the upper out.
+type Bound = Option<(V, bool)>;
+fn bounds(name: &str, args: &[V]) -> (Bound, Bound) {
+    let a = |i: usize| args.get(i).copied().unwrap_or_default();
+    match (
+        name.starts_with("head"),
+        name.starts_with("tail"),
+        args.len(),
+    ) {
+        (true, _, 2) => (None, Some((a(1), false))),
+        (true, _, _) => (None, Some((a(1), a(2).i() != 0))),
+        (_, true, 2) => (Some((a(1), true)), None),
+        (_, true, _) => (Some((a(1), a(2).i() != 0)), None),
+        (_, _, 3) => (Some((a(1), true)), Some((a(2), false))),
+        _ => (Some((a(1), a(2).i() != 0)), Some((a(3), a(4).i() != 0))),
+    }
+}
+
+/// A new sorted set or map of `class`, ordered as `like` is, holding `entries`. (What Java
+/// gives for a part of a sorted collection is a view of it; here it is that part as it is
+/// now, as a key set and an entry set are.)
+fn sorted_part(rt: &mut Rt, like: V, class: &'static str, entries: Vec<(V, V)>) -> V {
+    let comparator = comparator_of(rt, like);
+    let part = rt.alloc(
+        class,
+        Data::Table(Table {
+            sorted: true,
+            comparator,
+            ..Table::default()
+        }),
+    );
+    for (k, v) in entries {
+        table_put(rt, part, k, v);
+    }
+    part
+}
+
+/// A set or map of `class` that keeps `entries` in the order given (a sorted one's, turned
+/// round).
+fn in_order(rt: &mut Rt, class: &'static str, entries: Vec<(V, V)>) -> V {
+    let kept = rt.alloc(class, Data::Table(Table::default()));
+    for (k, v) in entries {
+        table_put(rt, kept, k, v);
+    }
+    kept
+}
+
 fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
@@ -4797,6 +5172,41 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         }
         "first" | "getFirst" => elements(rt, this).first().copied().unwrap_or(V::NULL),
         "last" | "getLast" => elements(rt, this).last().copied().unwrap_or(V::NULL),
+        // A sorted set's neighbours of an element, its parts, and itself turned round.
+        "floor" | "ceiling" | "higher" | "lower" => {
+            neighbour(rt, this, a(1), name).map_or(V::NULL, |(k, _)| k)
+        }
+        "headSet" | "tailSet" | "subSet" => {
+            let (from, to) = bounds(name, args);
+            let part = between(rt, this, from, to);
+            sorted_part(rt, this, "java/util/TreeSet", part)
+        }
+        "descendingSet" | "reversed" => {
+            let mut all = table_entries(rt, this);
+            all.reverse();
+            in_order(rt, "java/util/LinkedHashSet", all)
+        }
+        "descendingIterator" => {
+            let mut items = elements(rt, this);
+            items.reverse();
+            iter_over(rt, this, items)
+        }
+        "pollFirst" | "pollLast" => {
+            let items = elements(rt, this);
+            let end = if name == "pollFirst" {
+                items.first()
+            } else {
+                items.last()
+            };
+            match end {
+                Some(&e) => {
+                    table_remove(rt, this, e);
+                    e
+                }
+                None => V::NULL,
+            }
+        }
+        "comparator" => comparator_of(rt, this),
         // An ordered set's ends under fastutil's names for a linked set of primitives
         // (`LongLinkedOpenHashSet.firstLong`, `removeFirstLong`) and Java 21's for any
         // sequenced set (`removeFirst`): the element there, taken out by the `remove` ones; an
@@ -5259,15 +5669,18 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             v
         }
-        "keySet" | "navigableKeySet" => {
+        "keySet" | "navigableKeySet" | "sequencedKeySet" => {
             let keys: Vec<V> = table_entries(rt, this).into_iter().map(|(k, _)| k).collect();
             let s = new_set(rt, &keys);
             rt.iter_sources.insert(s.r(), this);
             s
         }
-        "values" => map_values(rt, this),
+        "values" | "sequencedValues" => map_values(rt, this),
         // fastutil's typed entry sets (`int2ObjectEntrySet`, `object2IntEntrySet`...) are its entry set.
-        n if n == "entrySet" || (n.ends_with("EntrySet") && n.contains('2')) => {
+        n if n == "entrySet"
+            || n == "sequencedEntrySet"
+            || (n.ends_with("EntrySet") && n.contains('2')) =>
+        {
             let es: Vec<(V, V)> = table_entries(rt, this);
             let mut items = Vec::with_capacity(es.len());
             rt.iter_sources.reserve(es.len() + 1);
@@ -5295,6 +5708,51 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
                 (None, _) => V::NULL,
             }
         }
+        // A sorted map's neighbours of a key (the key, or its entry), its parts, itself turned
+        // round, and its ends taken out.
+        "floorKey" | "ceilingKey" | "higherKey" | "lowerKey" => {
+            neighbour(rt, this, a(1), name).map_or(V::NULL, |(k, _)| k)
+        }
+        "floorEntry" | "ceilingEntry" | "higherEntry" | "lowerEntry" => {
+            match neighbour(rt, this, a(1), name) {
+                Some((k, v)) => entry(rt, k, v),
+                None => V::NULL,
+            }
+        }
+        "headMap" | "tailMap" | "subMap" => {
+            let (from, to) = bounds(name, args);
+            let part = between(rt, this, from, to);
+            sorted_part(rt, this, "java/util/TreeMap", part)
+        }
+        "descendingMap" | "reversed" => {
+            let mut all = table_entries(rt, this);
+            all.reverse();
+            in_order(rt, "java/util/LinkedHashMap", all)
+        }
+        "descendingKeySet" => {
+            let mut keys: Vec<(V, V)> = table_entries(rt, this)
+                .into_iter()
+                .map(|(k, _)| (k, V::I(1)))
+                .collect();
+            keys.reverse();
+            in_order(rt, "java/util/LinkedHashSet", keys)
+        }
+        "pollFirstEntry" | "pollLastEntry" => {
+            let es = table_entries(rt, this);
+            let end = if name == "pollFirstEntry" {
+                es.first()
+            } else {
+                es.last()
+            };
+            match end {
+                Some(&(k, v)) => {
+                    table_remove(rt, this, k);
+                    entry(rt, k, v)
+                }
+                None => V::NULL,
+            }
+        }
+        "comparator" => comparator_of(rt, this),
         "equals" => {
             let (mine, theirs) = (table_entries(rt, this), table_entries(rt, a(1)));
             let mut same = mine.len() == theirs.len();
@@ -5993,6 +6451,511 @@ fn stream_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             return None;
         }
     })
+}
+
+/// A sorted map's and set's neighbours of a key, their parts between bounds, themselves
+/// turned round and their ends taken out. The answers are Java 21's own `TreeMap` and
+/// `TreeSet`'s, printed as its `toString` prints them.
+#[test]
+fn sorted_collections_tell_their_neighbours_and_parts() {
+    crate::install();
+    let mut rt = Rt::new();
+    let c = |rt: &mut Rt, key: &str, args: &[V]| {
+        let key = rt.static_key(key);
+        crate::api::call(rt, key, args)
+    };
+    let text = |rt: &mut Rt, v: V| {
+        let t = crate::linked::java_string(rt, v);
+        crate::jlang::text(rt, t)
+    };
+    // `recv.call(args)` as text: an int is a key (boxed), a bool a flag.
+    enum A {
+        K(i32),
+        B(bool),
+        S(&'static str),
+    }
+    use A::{B, K, S};
+    let ask = |rt: &mut Rt, class: &str, recv: V, call: &str, args: &[A]| {
+        let mut all = vec![recv];
+        for arg in args {
+            all.push(match arg {
+                K(i) => int_box(rt, *i),
+                B(b) => V::I(i32::from(*b)),
+                S(s) => rt.string(s),
+            });
+        }
+        let v = c(rt, &format!("{class}.{call}"), &all);
+        text(rt, v)
+    };
+    const MAP: &str = "java/util/TreeMap";
+    const ENTRY: &str = "(Ljava/lang/Object;)Ljava/util/Map$Entry;";
+    const KEY: &str = "(Ljava/lang/Object;)Ljava/lang/Object;";
+    let filled = |rt: &mut Rt| {
+        let m = rt.new_object(MAP);
+        c(rt, "java/util/TreeMap.<init>.()V", &[m]);
+        for k in [30, 10, 40, 20] {
+            let (key, value) = (int_box(rt, k), rt.string(&format!("v{k}")));
+            c(
+                rt,
+                "java/util/TreeMap.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+                &[m, key, value],
+            );
+        }
+        m
+    };
+    let m = filled(&mut rt);
+    for (call, key, expected) in [
+        ("floorEntry", 25, "20=v20"),
+        ("floorEntry", 20, "20=v20"),
+        ("floorEntry", 5, "null"),
+        ("ceilingEntry", 25, "30=v30"),
+        ("ceilingEntry", 20, "20=v20"),
+        ("ceilingEntry", 45, "null"),
+        ("higherEntry", 20, "30=v30"),
+        ("higherEntry", 40, "null"),
+        ("lowerEntry", 20, "10=v10"),
+        ("lowerEntry", 10, "null"),
+    ] {
+        assert_eq!(
+            ask(&mut rt, MAP, m, &format!("{call}.{ENTRY}"), &[K(key)]),
+            expected,
+            "{call}({key})"
+        );
+    }
+    for (call, key, expected) in [
+        ("floorKey", 25, "20"),
+        ("ceilingKey", 25, "30"),
+        ("higherKey", 40, "null"),
+        ("lowerKey", 11, "10"),
+        ("floorKey", 1, "null"),
+    ] {
+        assert_eq!(
+            ask(&mut rt, MAP, m, &format!("{call}.{KEY}"), &[K(key)]),
+            expected,
+            "{call}({key})"
+        );
+    }
+    const SORTED: &str = "Ljava/util/SortedMap;";
+    const NAVIGABLE: &str = "Ljava/util/NavigableMap;";
+    for (call, args, expected) in [
+        (
+            format!("headMap.(Ljava/lang/Object;){SORTED}"),
+            vec![K(30)],
+            "{10=v10, 20=v20}",
+        ),
+        (
+            format!("headMap.(Ljava/lang/Object;Z){NAVIGABLE}"),
+            vec![K(30), B(true)],
+            "{10=v10, 20=v20, 30=v30}",
+        ),
+        (
+            format!("tailMap.(Ljava/lang/Object;){SORTED}"),
+            vec![K(30)],
+            "{30=v30, 40=v40}",
+        ),
+        (
+            format!("tailMap.(Ljava/lang/Object;Z){NAVIGABLE}"),
+            vec![K(30), B(false)],
+            "{40=v40}",
+        ),
+        (
+            format!("subMap.(Ljava/lang/Object;Ljava/lang/Object;){SORTED}"),
+            vec![K(20), K(40)],
+            "{20=v20, 30=v30}",
+        ),
+        (
+            format!("subMap.(Ljava/lang/Object;ZLjava/lang/Object;Z){NAVIGABLE}"),
+            vec![K(20), B(false), K(40), B(true)],
+            "{30=v30, 40=v40}",
+        ),
+        (
+            format!("subMap.(Ljava/lang/Object;Ljava/lang/Object;){SORTED}"),
+            vec![K(21), K(29)],
+            "{}",
+        ),
+        (
+            format!("descendingMap.(){NAVIGABLE}"),
+            vec![],
+            "{40=v40, 30=v30, 20=v20, 10=v10}",
+        ),
+        (
+            format!("reversed.(){NAVIGABLE}"),
+            vec![],
+            "{40=v40, 30=v30, 20=v20, 10=v10}",
+        ),
+        (
+            "descendingKeySet.()Ljava/util/NavigableSet;".to_owned(),
+            vec![],
+            "[40, 30, 20, 10]",
+        ),
+        (
+            "sequencedValues.()Ljava/util/SequencedCollection;".to_owned(),
+            vec![],
+            "[v10, v20, v30, v40]",
+        ),
+        (
+            "sequencedKeySet.()Ljava/util/SequencedSet;".to_owned(),
+            vec![],
+            "[10, 20, 30, 40]",
+        ),
+        (
+            "comparator.()Ljava/util/Comparator;".to_owned(),
+            vec![],
+            "null",
+        ),
+    ] {
+        assert_eq!(ask(&mut rt, MAP, m, &call, &args), expected, "{call}");
+    }
+    // Its ends taken out, until there is none.
+    let polled = filled(&mut rt);
+    assert_eq!(
+        ask(
+            &mut rt,
+            MAP,
+            polled,
+            "pollFirstEntry.()Ljava/util/Map$Entry;",
+            &[]
+        ),
+        "10=v10"
+    );
+    assert_eq!(
+        ask(
+            &mut rt,
+            MAP,
+            polled,
+            "pollLastEntry.()Ljava/util/Map$Entry;",
+            &[]
+        ),
+        "40=v40"
+    );
+    assert_eq!(text(&mut rt, polled), "{20=v20, 30=v30}");
+    let none = rt.new_object(MAP);
+    c(&mut rt, "java/util/TreeMap.<init>.()V", &[none]);
+    assert_eq!(
+        ask(
+            &mut rt,
+            MAP,
+            none,
+            "pollFirstEntry.()Ljava/util/Map$Entry;",
+            &[]
+        ),
+        "null"
+    );
+    // One ordered by a comparator keeps its order in its neighbours and parts.
+    let reverse = c(
+        &mut rt,
+        "java/util/Comparator.reverseOrder.()Ljava/util/Comparator;",
+        &[],
+    );
+    let turned = rt.new_object(MAP);
+    c(
+        &mut rt,
+        "java/util/TreeMap.<init>.(Ljava/util/Comparator;)V",
+        &[turned, reverse],
+    );
+    for (k, v) in [("a", 1), ("c", 3), ("b", 2)] {
+        let (key, value) = (rt.string(k), int_box(&mut rt, v));
+        c(
+            &mut rt,
+            "java/util/TreeMap.put.(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            &[turned, key, value],
+        );
+    }
+    assert_eq!(text(&mut rt, turned), "{c=3, b=2, a=1}");
+    assert_eq!(
+        ask(&mut rt, MAP, turned, &format!("floorKey.{KEY}"), &[S("bb")]),
+        "c"
+    );
+    assert_eq!(
+        ask(
+            &mut rt,
+            MAP,
+            turned,
+            &format!("headMap.(Ljava/lang/Object;){SORTED}"),
+            &[S("b")]
+        ),
+        "{c=3}"
+    );
+    assert_eq!(
+        ask(&mut rt, MAP, turned, "firstKey.()Ljava/lang/Object;", &[]),
+        "c"
+    );
+
+    const SET: &str = "java/util/TreeSet";
+    let set = |rt: &mut Rt| {
+        let s = rt.new_object(SET);
+        c(rt, "java/util/TreeSet.<init>.()V", &[s]);
+        for k in [30, 10, 40, 20] {
+            let key = int_box(rt, k);
+            c(rt, "java/util/TreeSet.add.(Ljava/lang/Object;)Z", &[s, key]);
+        }
+        s
+    };
+    let s = set(&mut rt);
+    const SORTED_SET: &str = "Ljava/util/SortedSet;";
+    const NAVIGABLE_SET: &str = "Ljava/util/NavigableSet;";
+    for (call, args, expected) in [
+        (format!("floor.{KEY}"), vec![K(25)], "20"),
+        (format!("ceiling.{KEY}"), vec![K(25)], "30"),
+        (format!("higher.{KEY}"), vec![K(40)], "null"),
+        (format!("lower.{KEY}"), vec![K(10)], "null"),
+        (
+            format!("headSet.(Ljava/lang/Object;){SORTED_SET}"),
+            vec![K(30)],
+            "[10, 20]",
+        ),
+        (
+            format!("headSet.(Ljava/lang/Object;Z){NAVIGABLE_SET}"),
+            vec![K(30), B(true)],
+            "[10, 20, 30]",
+        ),
+        (
+            format!("tailSet.(Ljava/lang/Object;){SORTED_SET}"),
+            vec![K(30)],
+            "[30, 40]",
+        ),
+        (
+            format!("tailSet.(Ljava/lang/Object;Z){NAVIGABLE_SET}"),
+            vec![K(30), B(false)],
+            "[40]",
+        ),
+        (
+            format!("subSet.(Ljava/lang/Object;Ljava/lang/Object;){SORTED_SET}"),
+            vec![K(20), K(40)],
+            "[20, 30]",
+        ),
+        (
+            format!("subSet.(Ljava/lang/Object;ZLjava/lang/Object;Z){NAVIGABLE_SET}"),
+            vec![K(20), B(false), K(40), B(true)],
+            "[30, 40]",
+        ),
+        (
+            format!("descendingSet.(){NAVIGABLE_SET}"),
+            vec![],
+            "[40, 30, 20, 10]",
+        ),
+        (
+            "comparator.()Ljava/util/Comparator;".to_owned(),
+            vec![],
+            "null",
+        ),
+    ] {
+        assert_eq!(ask(&mut rt, SET, s, &call, &args), expected, "{call}");
+    }
+    let down = c(
+        &mut rt,
+        "java/util/TreeSet.descendingIterator.()Ljava/util/Iterator;",
+        &[s],
+    );
+    let mut seen = Vec::new();
+    while c(&mut rt, "java/util/Iterator.hasNext.()Z", &[down]).i() != 0 {
+        let next = c(
+            &mut rt,
+            "java/util/Iterator.next.()Ljava/lang/Object;",
+            &[down],
+        );
+        seen.push(text(&mut rt, next));
+    }
+    assert_eq!(seen, ["40", "30", "20", "10"]);
+    let polled = set(&mut rt);
+    assert_eq!(
+        ask(&mut rt, SET, polled, "pollFirst.()Ljava/lang/Object;", &[]),
+        "10"
+    );
+    assert_eq!(
+        ask(&mut rt, SET, polled, "pollLast.()Ljava/lang/Object;", &[]),
+        "40"
+    );
+    assert_eq!(text(&mut rt, polled), "[20, 30]");
+    let none = rt.new_object(SET);
+    c(&mut rt, "java/util/TreeSet.<init>.()V", &[none]);
+    assert_eq!(
+        ask(&mut rt, SET, none, "pollFirst.()Ljava/lang/Object;", &[]),
+        "null"
+    );
+    assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+}
+
+/// `HexFormat`, the empty collections as fields and `java.util.logging`'s levels, as Java
+/// 21 printed them.
+#[test]
+fn hex_and_the_older_constants_are_javas() {
+    crate::install();
+    let mut rt = Rt::new();
+    let c = |rt: &mut Rt, key: &str, args: &[V]| {
+        let key = rt.static_key(key);
+        crate::api::call(rt, key, args)
+    };
+    let text = |rt: &mut Rt, v: V| {
+        let t = crate::linked::java_string(rt, v);
+        crate::jlang::text(rt, t)
+    };
+    let bytes = |rt: &mut Rt, of: &[i8]| {
+        rt.alloc(
+            "[B",
+            Data::Array(of.iter().map(|&b| V::I(i32::from(b))).collect()),
+        )
+    };
+    const HEX: &str = "java/util/HexFormat";
+    let hex = c(
+        &mut rt,
+        "java/util/HexFormat.of.()Ljava/util/HexFormat;",
+        &[],
+    );
+    let four = bytes(&mut rt, &[0, 15, -1, 127]);
+    let formatted = c(
+        &mut rt,
+        &format!("{HEX}.formatHex.([B)Ljava/lang/String;"),
+        &[hex, four],
+    );
+    assert_eq!(rt.str_of(formatted), Some("000fff7f"));
+    let parsed = c(
+        &mut rt,
+        &format!("{HEX}.parseHex.(Ljava/lang/CharSequence;)[B"),
+        &[hex, formatted],
+    );
+    assert_eq!(elements(&rt, parsed), [0, 15, -1, 127].map(V::I));
+    let upper = c(
+        &mut rt,
+        &format!("{HEX}.withUpperCase.()Ljava/util/HexFormat;"),
+        &[hex],
+    );
+    let one = bytes(&mut rt, &[-85]);
+    let formatted = c(
+        &mut rt,
+        &format!("{HEX}.formatHex.([B)Ljava/lang/String;"),
+        &[upper, one],
+    );
+    assert_eq!(rt.str_of(formatted), Some("AB"));
+    let colon = rt.string(":");
+    let apart = c(
+        &mut rt,
+        &format!("{HEX}.ofDelimiter.(Ljava/lang/String;)Ljava/util/HexFormat;"),
+        &[colon],
+    );
+    let three = bytes(&mut rt, &[1, 2, 3]);
+    let formatted = c(
+        &mut rt,
+        &format!("{HEX}.formatHex.([B)Ljava/lang/String;"),
+        &[apart, three],
+    );
+    assert_eq!(rt.str_of(formatted), Some("01:02:03"));
+    let back = c(
+        &mut rt,
+        &format!("{HEX}.parseHex.(Ljava/lang/CharSequence;)[B"),
+        &[apart, formatted],
+    );
+    assert_eq!(elements(&rt, back), [1, 2, 3].map(V::I));
+    for (desc, value, expected) in [
+        ("(B)", V::I(10), "0a"),
+        ("(I)", V::I(255), "000000ff"),
+        ("(J)", V::J(1), "0000000000000001"),
+        ("(C)", V::I('a' as i32), "0061"),
+        ("(S)", V::I(7), "0007"),
+    ] {
+        let digits = c(
+            &mut rt,
+            &format!("{HEX}.toHexDigits.{desc}Ljava/lang/String;"),
+            &[hex, value],
+        );
+        assert_eq!(rt.str_of(digits), Some(expected), "{desc}");
+    }
+    assert_eq!(
+        c(
+            &mut rt,
+            &format!("{HEX}.isHexDigit.(I)Z"),
+            &[V::I('g' as i32)]
+        ),
+        V::I(0)
+    );
+    assert_eq!(
+        c(
+            &mut rt,
+            &format!("{HEX}.isHexDigit.(I)Z"),
+            &[V::I('F' as i32)]
+        ),
+        V::I(1)
+    );
+    assert_eq!(
+        c(
+            &mut rt,
+            &format!("{HEX}.fromHexDigit.(I)I"),
+            &[V::I('a' as i32)]
+        ),
+        V::I(10)
+    );
+    let ff = rt.string("ff");
+    assert_eq!(
+        c(
+            &mut rt,
+            &format!("{HEX}.fromHexDigits.(Ljava/lang/CharSequence;)I"),
+            &[ff]
+        ),
+        V::I(255)
+    );
+    let long = rt.string("ffffffffff");
+    assert_eq!(
+        c(
+            &mut rt,
+            &format!("{HEX}.fromHexDigitsToLong.(Ljava/lang/CharSequence;)J"),
+            &[long]
+        ),
+        V::J(1_099_511_627_775)
+    );
+    let odd = rt.string("abc");
+    c(
+        &mut rt,
+        &format!("{HEX}.parseHex.(Ljava/lang/CharSequence;)[B"),
+        &[hex, odd],
+    );
+    let thrown = rt
+        .thrown
+        .take()
+        .expect("an odd number of digits is no bytes");
+    assert_eq!(rt.class_of(thrown), "java/lang/IllegalArgumentException");
+    let message = rt.get_field(thrown, "message");
+    assert_eq!(rt.str_of(message), Some("string length not even: 3"));
+
+    for (field, expected) in [
+        ("EMPTY_LIST", "[]"),
+        ("EMPTY_SET", "[]"),
+        ("EMPTY_MAP", "{}"),
+    ] {
+        let key = rt.static_key(&format!("java/util/Collections.{field}"));
+        let empty = crate::api::get_static(&mut rt, key);
+        assert_eq!(text(&mut rt, empty), expected, "{field}");
+    }
+    for (name, value) in [
+        ("INFO", 800),
+        ("WARNING", 900),
+        ("SEVERE", 1000),
+        ("FINE", 500),
+        ("ALL", i32::MIN),
+        ("OFF", i32::MAX),
+        ("CONFIG", 700),
+        ("FINER", 400),
+        ("FINEST", 300),
+    ] {
+        let key = rt.static_key(&format!("java/util/logging/Level.{name}"));
+        let level = crate::api::get_static(&mut rt, key);
+        assert_eq!(
+            c(&mut rt, "java/util/logging/Level.intValue.()I", &[level]),
+            V::I(value),
+            "{name}"
+        );
+        let named = c(
+            &mut rt,
+            "java/util/logging/Level.getName.()Ljava/lang/String;",
+            &[level],
+        );
+        assert_eq!(rt.str_of(named), Some(name));
+    }
+    let utf8 = crate::api::get_static(&mut rt, "java/nio/charset/StandardCharsets.UTF_8");
+    assert_eq!(
+        crate::api::get_static(&mut rt, "com/google/common/base/Charsets.UTF_8"),
+        utf8
+    );
+    assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
 }
 
 #[cfg(test)]
