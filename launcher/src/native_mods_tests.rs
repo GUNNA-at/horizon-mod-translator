@@ -737,6 +737,38 @@ fn mods_build_from_the_one_repository_they_name() {
     );
 }
 
+/// A translated mod's hook points are in the fork it names alone: its build starts on the
+/// commit it pins. A mod of Horizon's own repository tries the installed version's commit
+/// first, as before, and the player's Rebuild on Horizon keeps every mod there.
+#[test]
+fn a_mod_of_a_fork_builds_on_its_pin_at_once() {
+    let bundle = |repo: Option<&str>, horizon: Option<&str>| Bundle {
+        id: "m".into(),
+        version: "1".into(),
+        dir: PathBuf::new(),
+        horizon: horizon.map(str::to_owned),
+        mixins: None,
+        hooks: None,
+        repository: repo.map(str::to_owned),
+        mixins_repository: None,
+        injections: Vec::new(),
+        api: None,
+        mixins_content: true,
+    };
+    let translated = bundle(Some("fork/horizon"), Some(A));
+    let own = bundle(None, Some(A));
+    assert!(starts_on_pin(&[own.clone(), translated.clone()], false));
+    assert!(!starts_on_pin(&[own], false));
+    assert!(
+        !starts_on_pin(&[translated], true),
+        "the player chose the base"
+    );
+    assert!(
+        !starts_on_pin(&[bundle(Some("fork/horizon"), None)], false),
+        "nothing pinned"
+    );
+}
+
 #[test]
 fn a_source_between_releases_gets_its_pending_hook_points() {
     let d = dir("catalog");

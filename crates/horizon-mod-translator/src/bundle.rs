@@ -5675,7 +5675,7 @@ pub const REPOSITORY: &str = "GUNNA-at/horizon-mod-translator";
 /// mod's other crates (a translated mod is several: its runtime, its code, its engine).
 pub const MIXINS_REPOSITORY: &str = "GUNNA-at/horizon-mixins";
 /// [`MIXINS_REPOSITORY`]'s commit the bundles are applied with.
-pub const MIXINS_REVISION: &str = "a053a552092634b5b5b50cc19faa51488f4f2bd0";
+pub const MIXINS_REVISION: &str = "99df1d5fc94f2c9803935a41b7aa5a6a8cda4f98";
 /// The commit of [`REPOSITORY`] this translator was built from (build.rs: the checkout's `HEAD`,
 /// else `HORIZON_TRANSLATOR_REVISION` or `GITHUB_SHA`), which its bundles pin: their code calls that
 /// commit's hook points and runtime. None for a translator built outside a checkout.

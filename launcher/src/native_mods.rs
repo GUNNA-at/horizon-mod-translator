@@ -2922,9 +2922,16 @@ pub fn build(
         let point = |version: &str| {
             instances::edit(&instance.id, |meta| meta.version = Some(version.to_owned()))
         };
+        let origin = about(base).map_or_else(|| base.to_owned(), |a| a.base);
+        // A mod of a fork's builds on its pin at once ([`starts_on_pin`]).
+        let pinned = starts_on_pin(&bundles(folder)?, on_base);
         // The first build may fail outright when the mods made elsewhere are all it had (every
         // mod left out) or the ones left could not build without them: those mods still move it.
-        let (first, left) = match run(base, true) {
+        let started = match pinned {
+            true => run(&origin, false),
+            false => run(base, true),
+        };
+        let (first, left) = match started {
             Ok(built) => {
                 point(&built.version)?;
                 let left = built.left_out.clone();
@@ -2932,7 +2939,7 @@ pub fn build(
             }
             Err((error, left)) => (Err(error), left),
         };
-        let theirs = match on_base {
+        let theirs = match on_base || pinned {
             true => Vec::new(),
             false => made_elsewhere(&bundles(folder)?, &left),
         };
@@ -2942,7 +2949,6 @@ pub fn build(
         };
         if !theirs.is_empty() {
             progress(Step::OnTheirHorizon(theirs));
-            let origin = about(base).map_or_else(|| base.to_owned(), |a| a.base);
             match (run(&origin, false), &built) {
                 (Ok(moved), _) => {
                     point(&moved.version)?;
@@ -2964,6 +2970,18 @@ pub fn build(
         }
         Ok(built.version)
     })
+}
+
+/// Whether a build of `bundles` starts on the commit they pin, not on the commit of the version
+/// it starts from: a mod of a fork's (a translated one names the mod translator's) has its hook
+/// points in that repository alone, so the version's own commit, which the fork may not even
+/// have, can't build it, and trying it first costs a download to learn so. Not when the player
+/// chose that commit (`on_base`).
+fn starts_on_pin(bundles: &[Bundle], on_base: bool) -> bool {
+    !on_base
+        && bundles
+            .iter()
+            .any(|b| b.repository.is_some() && b.horizon.is_some() && b.hooks.is_none())
 }
 
 /// The mods in `bundles` a build left out (`left_out`) for not building on its commit though they
