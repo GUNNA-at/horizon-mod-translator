@@ -2373,6 +2373,27 @@ fn tracker_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 
 // --- TOML and the runtime's configs -----------------------------------------------------------
 
+/// TOML `text` as the config Night Config's `TomlParser` makes of it; else its
+/// `ParsingException`'s message. (For a mod that parses a file of its own with Night Config:
+/// [`crate::nightconfig`].)
+pub(crate) fn toml_config(rt: &mut Rt, text: &str) -> Result<V, String> {
+    let table = toml::parse(text)?;
+    Ok(to_config(rt, &table))
+}
+
+/// Config `c` as the text Night Config's `TomlWriter` writes of it; else its
+/// `WritingException`'s message (a null value, an object TOML has no form for).
+pub(crate) fn toml_text(rt: &mut Rt, c: V) -> Result<String, String> {
+    let table = from_config(rt, c)?;
+    Ok(toml::write(&table, NEWLINE))
+}
+
+/// Writes config `c` to the TOML file at `path` whole, as the game's runtimes write a config
+/// file: one at a time, and never half written.
+pub(crate) fn write_toml_file(rt: &mut Rt, path: &Path, c: V) -> Result<(), String> {
+    with_files(|| write_file(rt, path, c))
+}
+
 /// The config Night Config's parser makes of a table: a commented config per table, Java's boxes
 /// for numbers and booleans, lists for arrays.
 fn to_config(rt: &mut Rt, t: &toml::Table) -> V {
@@ -2414,7 +2435,12 @@ fn to_value(rt: &mut Rt, v: &toml::Value) -> V {
 /// The table Night Config's writer writes of a config; what TOML can't hold (null, an object of
 /// another kind) is an error, as its `WritingException`.
 fn from_config(rt: &mut Rt, c: V) -> Result<toml::Table, String> {
-    let mut t = toml::Table::default();
+    // (Night Config's writer gives a table a header only where it holds comments: a plain
+    // config under a key, `Config.inMemory()`'s kind, is written inline whatever is in it.)
+    let mut t = toml::Table {
+        inline: rt.class_of(c) == CONFIG,
+        ..Default::default()
+    };
     let map = nightconfig::values(rt, c);
     for (k, v) in jutil::table_pairs(rt, map) {
         let key = rt.to_java_string(k, 'L');
@@ -3313,7 +3339,9 @@ mod toml {
                 Default::default();
             for (k, v) in &t.entries {
                 match v {
-                    Value::Table(sub) if !sub.entries.is_empty() => subs.push((k, sub)),
+                    Value::Table(sub) if !sub.entries.is_empty() && !sub.inline => {
+                        subs.push((k, sub))
+                    }
                     Value::Array(items)
                         if !items.is_empty()
                             && items.iter().all(|i| matches!(i, Value::Table(_))) =>
