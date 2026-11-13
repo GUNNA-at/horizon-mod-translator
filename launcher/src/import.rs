@@ -98,7 +98,9 @@ pub fn what(file: &Path) -> Result<Dropped, String> {
             let zip = open(file)?;
             return match MOD_METADATA.iter().any(|m| zip.index_for_name(m).is_some()) {
                 true => Ok(Dropped::JavaMod),
-                false => Err(format!("{name} is a jar but no mod: it names no mod in it.")),
+                false => Err(format!(
+                    "{name} is a jar but no mod: it names no mod in it."
+                )),
             };
         }
         // A game build: the program itself, or a release archive around it.
@@ -121,7 +123,7 @@ pub fn what(file: &Path) -> Result<Dropped, String> {
         // extension, so a file nothing else claims is read before giving up.
         _ if is_build(file) => return Ok(Dropped::Build),
         _ => {
-            let kinds = "a .mrpack, a .zip, a .hshader or a Horizon game build";
+            let kinds = "a .mrpack, a .zip, a mod's .jar, a .hshader or a Horizon game build";
             return Err(format!("{name} can't be imported: drop {kinds}."));
         }
     }
@@ -258,7 +260,10 @@ fn import_any(
 }
 
 /// A new instance called `base`, or "`base` (2)" and on when that name is taken.
-fn unique(base: &str, create: &dyn Fn(&str) -> Result<Instance, String>) -> Result<Instance, String> {
+fn unique(
+    base: &str,
+    create: &dyn Fn(&str) -> Result<Instance, String>,
+) -> Result<Instance, String> {
     (1..20)
         .map(|n| match n {
             1 => base.to_string(),

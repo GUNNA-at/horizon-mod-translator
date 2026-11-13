@@ -209,6 +209,8 @@ mod tests {
             api: None,
             mixins_content: true,
             injections: Vec::new(),
+            repository: None,
+            mixins_repository: None,
         }
     }
 

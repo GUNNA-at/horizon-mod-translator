@@ -20,8 +20,8 @@ use crate::i18n::{tr, trf};
 use crate::instances::{self, Instance};
 use crate::rust_toolchain::{self, Toolchain};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -619,11 +619,19 @@ fn sources(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let mut out = Vec::new();
     let mut todo = vec![String::new()];
     while let Some(rel) = todo.pop() {
-        let at = if rel.is_empty() { dir.to_owned() } else { dir.join(&rel) };
+        let at = if rel.is_empty() {
+            dir.to_owned()
+        } else {
+            dir.join(&rel)
+        };
         let entries = fs::read_dir(&at).map_err(|e| format!("{}: {e}", at.display()))?;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
+            let path = if rel.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel}/{name}")
+            };
             let kind = entry.file_type().map_err(|e| e.to_string())?;
             if kind.is_dir() {
                 if !(rel.is_empty() && (name == "content" || name.starts_with("content-"))) {
@@ -694,7 +702,11 @@ pub struct Added {
 pub fn add_java(source: &Path, home: &Path, log: &dyn Fn(String)) -> Result<Added, String> {
     let options = horizon_port_pack::install::Options::default();
     let outcome = horizon_port_pack::install::install(source, home, &options, log)?;
-    let mut content: Vec<&PathBuf> = outcome.mods.iter().filter_map(|m| m.path.as_ref()).collect();
+    let mut content: Vec<&PathBuf> = outcome
+        .mods
+        .iter()
+        .filter_map(|m| m.path.as_ref())
+        .collect();
     content.extend(&outcome.bundled);
     let mut enabled = Vec::new();
     for dir in content {
@@ -708,7 +720,11 @@ pub fn add_java(source: &Path, home: &Path, log: &dyn Fn(String)) -> Result<Adde
             enabled.push(id);
         }
     }
-    let mut natives: Vec<&PathBuf> = outcome.mods.iter().filter_map(|m| m.native.as_ref()).collect();
+    let mut natives: Vec<&PathBuf> = outcome
+        .mods
+        .iter()
+        .filter_map(|m| m.native.as_ref())
+        .collect();
     natives.sort();
     natives.dedup();
     for dir in natives {
@@ -1312,12 +1328,10 @@ fn hooks_in(source: &str) -> Option<u32> {
     line.trim_end().strip_suffix(';')?.parse().ok()
 }
 
-/// The native hook points' version of Horizon at `revision`, from GitHub (None: it has none).
-pub(crate) fn hooks_at(revision: &str) -> Option<u32> {
-    let url = format!(
-        "https://raw.githubusercontent.com/{}/{revision}/{HOOKS_FILE}",
-        backend::REPO
-    );
+/// The native hook points' version of Horizon at `revision` of `repo` (Horizon's own repository,
+/// or the fork a bundle names), from GitHub (None: it has none).
+pub(crate) fn hooks_at(repo: &str, revision: &str) -> Option<u32> {
+    let url = format!("https://raw.githubusercontent.com/{repo}/{revision}/{HOOKS_FILE}");
     let text = backend::get(&url).ok()?.into_string().ok()?;
     hooks_in(&text)
 }
@@ -1335,13 +1349,10 @@ fn catalog_in(text: &str) -> Option<HookCatalog> {
         .collect()
 }
 
-/// The named hook points of Horizon at `revision`, from GitHub (None: it has no catalog, as
-/// revisions from before d3e0774 that already had hook points v2).
-fn catalog_at(revision: &str) -> Option<HookCatalog> {
-    let url = format!(
-        "https://raw.githubusercontent.com/{}/{revision}/{CATALOG}",
-        backend::REPO
-    );
+/// The named hook points of Horizon at `revision` of `repo`, from GitHub (None: it has no catalog,
+/// as revisions from before d3e0774 that already had hook points v2).
+fn catalog_at(repo: &str, revision: &str) -> Option<HookCatalog> {
+    let url = format!("https://raw.githubusercontent.com/{repo}/{revision}/{CATALOG}");
     let text = backend::get(&url).ok()?.into_string().ok()?;
     catalog_in(&text)
 }
@@ -1929,7 +1940,12 @@ fn diagnostic(text: &str) -> Option<String> {
 
 /// horizon-mixins at commit `rev` of GitHub's `repo`, built once with the launcher's cargo
 /// (`cargo install --locked`); `progress` hears [`Step::Tool`] only when it is built.
-fn tool(rust: &Toolchain, repo: &str, rev: &str, progress: &impl Fn(Step)) -> Result<PathBuf, String> {
+fn tool(
+    rust: &Toolchain,
+    repo: &str,
+    rev: &str,
+    progress: &impl Fn(Step),
+) -> Result<PathBuf, String> {
     let dir = root().join("tools").join(&rev[..12]);
     let bin = dir
         .join("bin")
@@ -1941,8 +1957,8 @@ fn tool(rust: &Toolchain, repo: &str, rev: &str, progress: &impl Fn(Step)) -> Re
         rust.configure_cargo(&mut cmd);
         let git = format!("https://github.com/{repo}");
         cmd.args(["install", "--locked", "--git", &git, "--rev", rev, "--root"])
-        .arg(&dir)
-        .arg("horizon-mixins-cli");
+            .arg(&dir)
+            .arg("horizon-mixins-cli");
         run(cmd, "Building horizon-mixins", |_| {})?;
     }
     Ok(bin)
@@ -1958,6 +1974,28 @@ fn apply(rust: &Toolchain, tool: &Path, source: &Path, mods: &Path, out: &Path) 
     cmd
 }
 
+/// The mods' Rust past which a build is not incremental: incremental compilation keeps each
+/// crate's analysis besides its code, which for the mod translator's bundles (Create's is about
+/// 150 MB of Rust) costs tens of gigabytes and saves little, since a translation rewrites its
+/// crates whole. A bundle of a mod's own code stays far below it.
+const INCREMENTAL_LIMIT: u64 = 64 << 20;
+
+/// How much Rust the mods in `dir` hold, in bytes.
+fn rust_bytes(dir: &Path) -> u64 {
+    files(dir)
+        .unwrap_or_default()
+        .iter()
+        .filter(|(name, _)| name.ends_with(".rs"))
+        .filter_map(|(_, path)| fs::metadata(path).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// The `cargo --config` value that turns incremental compilation off for `cargo_profile`.
+fn incremental_off(cargo_profile: &str) -> String {
+    format!("profile.{cargo_profile}.incremental=false")
+}
+
 /// The build of the game in `stage` with `profile` (game-build.yml's, for `Release`) and
 /// `target`'s features, into `target`. It starts outside any Cargo configuration of the
 /// player's ([`rust_toolchain::outside_configs`]), so only the workspace's own
@@ -1971,6 +2009,7 @@ fn compile(
     target_dir: &Path,
     profile: Profile,
     package: &str,
+    incremental: bool,
 ) -> Command {
     let mut cmd = cargo(rust, stage, "build");
     // Cargo's progress bar (units done of the total) is read from its output. Incremental
@@ -1987,6 +2026,9 @@ fn compile(
         cargo_profile,
     ]);
     cmd.args(configs.iter().flat_map(|config| ["--config", config]));
+    if !incremental {
+        cmd.args(["--config", &incremental_off(cargo_profile)]);
+    }
     if target == Target::Server {
         cmd.arg("--no-default-features");
     }
@@ -2082,10 +2124,19 @@ fn post_build_programs(
         progress(Step::PostBuildCompile(step.mod_id.clone()));
         let mut cmd = cargo(rust, stage, "build");
         cmd.env("CARGO_TARGET_DIR", target);
-        cmd.arg("--locked")
-            .args(profile_args(profile_kind, incremental))
-            .args(["-p", &step.package, "--bin", &step.bin]);
+        cmd.args([
+            "--locked",
+            "--profile",
+            profile,
+            "-p",
+            &step.package,
+            "--bin",
+            &step.bin,
+        ]);
         cmd.args(configs.iter().flat_map(|config| ["--config", config]));
+        if !incremental {
+            cmd.args(["--config", &incremental_off(profile)]);
+        }
         run(
             cmd,
             &format!("Building {}'s post-build step", step.mod_id),
@@ -2121,10 +2172,9 @@ fn source(repo: &str, revision: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// The hook catalog's file at a source's root, and the folder of hook points added since the
-/// last release (one JSON fragment per change), which a release stamps into it
+/// The folder of hook points added to a source's hook catalog ([`CATALOG`]) since the last
+/// release (one JSON fragment per change), which a release stamps into it
 /// (`tools/stamp_native_hooks.py`).
-const CATALOG: &str = "native-hooks.json";
 const FRAGMENTS: &str = "tools/native-hook-fragments";
 
 /// Adds to `source`'s hook catalog the hook points its pending fragments add, as a release's
@@ -2159,18 +2209,33 @@ fn complete_catalog(source: &Path) -> Result<(), String> {
         for hook in fragment_json["hooks"].as_array().into_iter().flatten() {
             let (Some(name), Some(target)) = (hook["name"].as_str(), hook["target"].as_str())
             else {
-                return Err(format!("{}: a hook without a name or target.", fragment.display()));
+                return Err(format!(
+                    "{}: a hook without a name or target.",
+                    fragment.display()
+                ));
             };
             if !names.insert(name.to_owned()) {
                 continue;
             }
+            // The hook as its fragment declares it, its `mod_api` with it: the game's build
+            // script asks every hook point for one, and leaves out those that say `false` (the
+            // mod translator's own, which have no typed API).
             let mut entry = serde_json::json!({ "name": name, "version": 1, "target": target });
-            for fact in ["neoforge", "side", "cancellable"] {
-                if !hook[fact].is_null() {
-                    entry[fact] = hook[fact].clone();
+            for (fact, value) in hook.as_object().into_iter().flatten() {
+                if !matches!(fact.as_str(), "name" | "version" | "target") {
+                    entry[fact.as_str()] = value.clone();
                 }
             }
             hooks.push(entry);
+        }
+        // Stamped, a fragment keeps its texts and helpers alone: the build script reads the
+        // catalog and the fragments both, and a name in both is a duplicate to it.
+        let pending = fragment_json.get("hooks").and_then(|h| h.as_array());
+        if pending.is_some_and(|p| !p.is_empty()) {
+            let mut emptied = fragment_json.clone();
+            emptied["hooks"] = serde_json::json!([]);
+            let text = serde_json::to_string_pretty(&emptied).map_err(|e| e.to_string())?;
+            fs::write(fragment, text + "\n").map_err(|e| format!("{}: {e}", fragment.display()))?;
         }
     }
     if hooks.len() == before {
@@ -2390,7 +2455,12 @@ fn pipeline(
     // The repositories the source and horizon-mixins come from: the ones the mods name (the mod
     // translator's fork, whose game has their hook points), else Horizon's and horizon-mixins' own.
     let repo = repository(&mods, "Horizon", |b| b.repository.as_ref(), backend::REPO)?;
-    let mixins_repo = repository(&mods, "horizon-mixins", |b| b.mixins_repository.as_ref(), MIXINS_REPO)?;
+    let mixins_repo = repository(
+        &mods,
+        "horizon-mixins",
+        |b| b.mixins_repository.as_ref(),
+        MIXINS_REPO,
+    )?;
     let declared: Vec<Vec<dependencies::Dependency>> = mods
         .iter()
         .map(|bundle| {
@@ -2443,7 +2513,7 @@ fn pipeline(
         },
         None => revision_of(base),
     };
-    let date = |r: &str| committed(backend::REPO, r);
+    let date = |r: &str| committed(&repo, r);
     let (pinned, mut pinned_by) = pinned_revision(&pins, on_base, base_revision, date)?;
     // Known without asking GitHub again unless a pin chose the commit.
     let base_horizon = match pinned_by.is_empty() {
@@ -2451,7 +2521,14 @@ fn pipeline(
         false => base_revision().ok(),
     };
     let game = || revision_of(origin).ok();
-    let revision = with_hooks(&mods, pinned.clone(), free, game, hooks_at, catalog_at)?;
+    let revision = with_hooks(
+        &mods,
+        pinned.clone(),
+        free,
+        game,
+        |r| hooks_at(&repo, r),
+        |r| catalog_at(&repo, r),
+    )?;
     // Nothing to say when the pin is the base's own commit, or the hook points moved the build.
     if base_horizon.as_ref() == Some(&revision) || revision != pinned {
         pinned_by.clear();
@@ -2612,6 +2689,7 @@ fn pipeline(
         }
         // A revision without `[profile.fast]` builds with `release`: the build says so.
         let compiled = profile_of(&stage, profile);
+        let incremental = rust_bytes(&incoming) <= INCREMENTAL_LIMIT;
         built.profile = compiled;
         let (mut crates, mut total, mut name) = (0, None, String::new());
         let identities: Vec<_> = mods
@@ -2626,6 +2704,7 @@ fn pipeline(
                 &target_dir,
                 compiled,
                 api::game_package(&stage, target, has_api),
+                incremental,
             ),
             "Compiling the game",
             |line| {
@@ -2701,6 +2780,7 @@ fn pipeline(
             &target_dir,
             &real.join("programs").join("post-build"),
             compiled,
+            incremental,
             progress,
         )?;
         progress(Step::Install);

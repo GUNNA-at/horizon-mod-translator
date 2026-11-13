@@ -165,7 +165,7 @@ fn hooks_at(revision: &str) -> Option<u32> {
     if let Some(&hooks) = HOOKS.lock().unwrap().get_or_insert_default().get(revision) {
         return Some(hooks);
     }
-    let hooks = native_mods::hooks_at(revision)?;
+    let hooks = native_mods::hooks_at(crate::backend::REPO, revision)?;
     HOOKS
         .lock()
         .unwrap()

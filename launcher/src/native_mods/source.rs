@@ -72,11 +72,24 @@ pub(super) fn installed_mods_into(home: &Path, out: &Path) -> Result<PathBuf, St
     let mut paths: Vec<PathBuf> = fs::read_dir(home.join(INSTALLED))
         .map(|dir| dir.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
-    paths.retain(|p| horizon_mods::index::native::is_file(p));
+    paths.retain(|p| horizon_mods::index::native::is_file(p) || p.join(MANIFEST).is_file());
     paths.sort();
     let mut count = 0;
     let mut seen = std::collections::BTreeSet::new();
     for path in paths {
+        // A translated Java mod (`add_java`): a folder with its manifest, taken as it is.
+        if path.is_dir() {
+            let id = bundle(&path, None)?.id;
+            if !crate::browser::java::is_enabled(home, &id) {
+                continue;
+            }
+            if !seen.insert(id.clone()) {
+                return Err(trf("Duplicate native mod {id}.", &[("id", &id)]));
+            }
+            copy_sources(&path, &out.join(&id))?;
+            count += 1;
+            continue;
+        }
         let bundle = horizon_mods::index::native::Bundle::read(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         if !crate::browser::java::is_enabled(home, &bundle.manifest.id) {
