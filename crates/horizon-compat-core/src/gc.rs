@@ -148,7 +148,7 @@ fn refs(data: &Data, each: &mut impl FnMut(u32)) {
 
 /// The stack pointer here, where this build knows how to read it.
 #[inline(always)]
-fn stack_pointer() -> Option<usize> {
+pub(crate) fn stack_pointer() -> Option<usize> {
     #[cfg(target_arch = "aarch64")]
     {
         let sp: usize;
@@ -177,7 +177,7 @@ fn stack_pointer() -> Option<usize> {
 /// the stack yet. The general ones, and the floating-point ones a call keeps (their low halves
 /// on ARM), though no reference is kept there by any code seen.
 #[inline(always)]
-fn kept_registers() -> [usize; 40] {
+pub(crate) fn kept_registers() -> [usize; 40] {
     let mut kept = [0usize; 40];
     #[cfg(target_arch = "aarch64")]
     // SAFETY: stores registers into `kept`, which has room for the twenty.
@@ -525,6 +525,10 @@ impl Rt {
         if born == 0 || self.made - self.born_base >= u64::from(u32::MAX) - 1 {
             return 0;
         }
+        // With threads of the mods': only what was made since this one took the runtime. What
+        // is older, a thread that waits may hold in a container of the runtime's own code above
+        // it, which nothing shows; what is newer, none of them has seen.
+        let born = born.max(self.threads.resumed_born);
         let started = std::time::Instant::now();
         let n = self.heap.len();
         // Several threads read a large heap (nothing is written to it meanwhile).
@@ -768,6 +772,12 @@ impl Rt {
         if !self.entries.is_empty() {
             return n - self.free.len();
         }
+        // A thread of the mods' waits under the runtime's own code, whose containers no stack
+        // shows: when it has come back from under it.
+        if self.threads_deep() {
+            self.threads.put_off += 1;
+            return n - self.free.len();
+        }
         // (The scopes left are of code that is done: this is a safe point.)
         self.scopes_done(0);
         let mut marked = vec![false; n];
@@ -779,6 +789,22 @@ impl Rt {
                 todo.push(r);
             }
         });
+        // The threads of the mods' that wait: what the runtime keeps for each, and whatever
+        // their frames may hold (any word of their stacks that could be a reference).
+        if self.has_threads() {
+            self.thread_roots(&mut |v| {
+                if let V::R(r) = v
+                    && r != 0
+                {
+                    todo.push(r);
+                }
+            });
+            self.thread_stack_words(&mut |w| {
+                if w != 0 && (w as usize) < n {
+                    todo.push(w);
+                }
+            });
+        }
         self.mark(&mut marked, &mut todo);
         // An iterator's source stays while the iterator does (weak keys, as an ephemeron).
         // Only sources not marked yet: pushing marked ones again would never settle.
@@ -820,6 +846,8 @@ impl Rt {
         self.young_last = self.made;
         self.young_due = self.made + young_min().0;
         self.live_at_collection = survivors as u64;
+        // Every object is as old as any now: what counts from here is made from here.
+        self.threads.resumed_born = 0;
         survivors
     }
 

@@ -72,6 +72,7 @@ impl std::hash::Hasher for FxHasher {
 pub mod gc;
 pub mod host;
 pub mod linked;
+pub mod threads;
 
 /// A JVM value. References index [`Rt::heap`]; 0 is null.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -376,6 +377,11 @@ pub struct Rt {
     pub scopes: Vec<gc::Scope>,
     /// What the scopes' own code made or was answered, each scope's from where it began.
     pub scope_kept: Vec<u32>,
+    /// The mods' own threads, which run the runtime in turn with the game's ([`threads`]).
+    pub threads: threads::Threads,
+    /// The calls the mods' code made into the runtime's ([`api::call`]): what a thread of the
+    /// mods' counts its looks at the clock by.
+    pub calls: u64,
 }
 
 impl Default for Rt {
@@ -442,6 +448,8 @@ impl Default for Rt {
             young_min: gc::young_min().0,
             scopes: Vec::new(),
             scope_kept: Vec::new(),
+            threads: threads::Threads::default(),
+            calls: 0,
         }
     }
 }
@@ -1599,8 +1607,16 @@ pub mod api {
     /// What the runtime's code holds while it answers is told of nowhere, so calls made from
     /// inside it are no such place.
     pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> V {
-        if rt.native == 0 && rt.made >= rt.young_due {
-            rt.young_point();
+        rt.calls += 1;
+        if rt.native == 0 {
+            if rt.made >= rt.young_due {
+                rt.young_point();
+            }
+            // A thread of the mods' past its slice gives the runtime back here, where all it
+            // holds is in its frames.
+            if rt.calls >= rt.threads.check_at {
+                rt.slice_point();
+            }
         }
         if super::gc::checking() {
             rt.check_collected(key, args);
