@@ -1476,9 +1476,18 @@ mod tests {
         assert_eq!(v.color >> 24, 0xFF);
     }
 
-    /// Every glyph 6 wide in a cell of its own but the space, which is blank.
-    fn glyph(c: char) -> (Option<Rect>, f32) {
-        ((c != ' ').then_some(sprite()), 6.0)
+    /// Every glyph 6 wide in a cell of its own, from the pen down 8, but the space, which is
+    /// blank.
+    fn glyph(c: char) -> horizon_client::font::Glyph {
+        horizon_client::font::Glyph {
+            rect: (c != ' ').then_some(sprite()),
+            left: 0.0,
+            top: 0.0,
+            right: 6.0,
+            bottom: 8.0,
+            advance: 6.0,
+            offset: 1.0,
+        }
     }
 
     #[test]
@@ -1496,7 +1505,7 @@ mod tests {
             piece("ab", 0xFF10_2030, false),
             piece(" c", 0x0040_5060, false),
         ];
-        assert_eq!(d.text(&glyph, &pieces, [2.0, 3.0], false, 0), 26.0);
+        assert_eq!(d.text(&glyph, None, &pieces, [2.0, 3.0], false, 0), 26.0);
         assert_eq!(d.vertices.len(), 3 * 4);
         assert_eq!(
             [top_left(&d, 0), top_left(&d, 1), top_left(&d, 2)],
@@ -1509,7 +1518,7 @@ mod tests {
 
         // A drop shadow: a pixel right and down, a quarter as bright, the text in front of it.
         let mut d = draw();
-        d.text(&glyph, &a, at, true, 0);
+        d.text(&glyph, None, &a, at, true, 0);
         assert_eq!(d.vertices.len(), 2 * 4);
         assert_eq!(top_left(&d, 0), [11.0, 1.0, 0.0]);
         assert_eq!(d.vertices[0].color, 0xFF3F_3F3F);
@@ -1519,14 +1528,14 @@ mod tests {
         // Bold: each glyph again a pixel to its right, the glyphs a pixel further apart.
         let mut d = draw();
         let bold = [piece("ab", white, true)];
-        assert_eq!(d.text(&glyph, &bold, at, false, 0), 14.0);
+        assert_eq!(d.text(&glyph, None, &bold, at, false, 0), 14.0);
         let xs: Vec<f32> = (0..4).map(|q| top_left(&d, q)[0] - 10.0).collect();
         assert_eq!(xs, [0.0, 1.0, 7.0, 8.0]);
 
         // An outline: eight copies around the text in its colour, the text in front of them,
         // toward the side it reads from (-z under this pose).
         let (mut d, black) = (draw(), 0xFF00_0000);
-        d.text(&glyph, &a, at, false, black);
+        d.text(&glyph, None, &a, at, false, black);
         assert_eq!(d.vertices.len(), 9 * 4);
         let (around, text) = d.vertices.split_at(32);
         assert!(around.iter().all(|v| v.color == black && v.pos[2] == 0.0));
@@ -1535,7 +1544,7 @@ mod tests {
         // Fainter than a tenth: not drawn, shadow and all, though it takes its room.
         let mut d = draw();
         let faint = [piece("a", 0x10FF_FFFF, false)];
-        assert_eq!(d.text(&glyph, &faint, at, true, 0), 6.0);
+        assert_eq!(d.text(&glyph, None, &faint, at, true, 0), 6.0);
         assert!(d.vertices.is_empty());
     }
 
@@ -1556,27 +1565,27 @@ mod tests {
         };
         // From the front, the text and its shadow; from behind, nothing, though it takes its room.
         let mut d = seen_from(100.0);
-        assert_eq!(d.text(&glyph, &a, at, true, 0), 6.0);
+        assert_eq!(d.text(&glyph, None, &a, at, true, 0), 6.0);
         assert_eq!(d.vertices.len(), 2 * 4);
         let mut d = seen_from(-100.0);
-        assert_eq!(d.text(&glyph, &a, at, true, 0), 6.0);
+        assert_eq!(d.text(&glyph, None, &a, at, true, 0), 6.0);
         assert!(d.vertices.is_empty());
 
         // A nixie tube's digit and its mirror image for the back (Create's `scale(-1, 1, 1)`):
         // each side shows its own.
         for (z, front, back) in [(100.0, 4, 0), (-100.0, 0, 4)] {
             let mut d = seen_from(z);
-            d.text(&glyph, &a, at, false, 0);
+            d.text(&glyph, None, &a, at, false, 0);
             let drawn = d.vertices.len();
             d.scale([-1.0, 1.0, 1.0]);
-            d.text(&glyph, &a, at, false, 0);
+            d.text(&glyph, None, &a, at, false, 0);
             let mirrored = d.vertices.len() - drawn;
             assert_eq!((drawn, mirrored), (front, back), "seen from z {z}");
         }
 
         // Outlined text in front of its outline toward the side it reads from: +z here.
         let mut d = seen_from(100.0);
-        d.text(&glyph, &a, at, false, 0xFF00_0000);
+        d.text(&glyph, None, &a, at, false, 0xFF00_0000);
         assert_eq!(d.vertices.len(), 9 * 4);
         let (around, text) = d.vertices.split_at(32);
         assert!(around.iter().all(|v| v.pos[2] == 0.0));

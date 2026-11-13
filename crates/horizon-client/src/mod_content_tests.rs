@@ -2376,7 +2376,7 @@ fn atlas_additions_merge_after_the_bases_sources() {
     let Some(base) = prepared() else {
         return;
     };
-    let scratch = std::env::temp_dir().join(format!("horizon-mod-atlas-{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-atlas-kinds-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     let file = "assets/minecraft/atlases/blocks.json";
     let goo = folder_mod(
@@ -2882,8 +2882,8 @@ fn a_shaped_blocks_faces_hold_up_what_its_shape_does() {
         &scratch.join("mod"),
         &[
             ("horizon-mod.toml", &manifest("testmod", "")),
-            ("data/testmod/horizon/block/post.json", r#"{"template":"minecraft:stone","shapes":[[0.375,0,0.375,0.625,1,0.625]]}"#),
-            ("data/testmod/horizon/block/slab.json", r#"{"template":"minecraft:stone","shapes":[[0,0,0,1,0.5,1]]}"#),
+            ("data/testmod/horizon/block/post.json", r#"{"template":"minecraft:stone","shapes":{"default":[[0.375,0,0.375,0.625,1,0.625]]}}"#),
+            ("data/testmod/horizon/block/slab.json", r#"{"template":"minecraft:stone","shapes":{"default":[[0,0,0,1,0.5,1]]}}"#),
         ],
     );
     let mods = [m];
@@ -2907,7 +2907,7 @@ fn a_shaped_blocks_faces_hold_up_what_its_shape_does() {
 /// its template's rows.
 #[test]
 fn a_block_copying_a_vanilla_blocks_properties_takes_the_games_rows_for_them() {
-    let scratch = std::env::temp_dir().join(format!("horizon-mod-copy-{}", std::process::id()));
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-copy-rows-{}", std::process::id()));
     let _ = fs::remove_dir_all(&scratch);
     let base = scratch.join("base");
     fs::create_dir_all(&base).unwrap();

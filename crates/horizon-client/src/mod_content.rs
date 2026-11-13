@@ -2184,7 +2184,8 @@ impl<'a> Plan<'a> {
                                 *flags = *copied;
                             }
                             for key in ["friction", "speedFactor", "jumpFactor"] {
-                                if let (Some(slot), Some(copied)) = (v.get_mut(key), from.get(key)) {
+                                if let (Some(slot), Some(copied)) = (v.get_mut(key), from.get(key))
+                                {
                                     *slot = copied.clone();
                                 }
                             }
@@ -3122,8 +3123,7 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                     // Most files (textures, models...) only go into the overlay: copied, not read and
                     // written again, they take a fraction of the time (Chipped alone has 10k textures).
                     let plain = !(is_tag && file.ends_with(".json"))
-                        && !(file.starts_with("assets/minecraft/atlases/")
-                            && file.ends_with(".json"))
+                        && !is_atlas(file)
                         && !file.starts_with(&declarations)
                         && !biomes::is_modifier(file)
                         && worldgen_entry(file).is_none()
@@ -3163,18 +3163,6 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
                             .entry(file.clone())
                             .or_default()
                             .extend(sprite_sources(&m.id, file, &bytes, &mut warnings));
-                    } else if file.starts_with("assets/minecraft/atlases/")
-                        && file.ends_with(".json")
-                    {
-                        let doc: J =
-                            serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
-                        let Some(J::Arr(sources)) = doc.get("sources") else {
-                            return Err(format!("{}: {file}: no sources", m.id).into());
-                        };
-                        atlases
-                            .entry(file.clone())
-                            .or_default()
-                            .extend(sources.iter().cloned());
                     } else if !file.starts_with(&declarations) {
                         overlay.write(file, &bytes)?;
                         if let Some(id) = damage::type_id(file) {
@@ -3220,30 +3208,14 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
         files?;
         Ok(tables?)
     })?;
-    // A reload appends every pack's sources for an atlas to the ones below it.
+    // A reload appends every pack's sources for an atlas (any namespace's) to the ones below it:
+    // the base's file, then every mod's in order.
     for (file, sources) in &atlases {
         let vanilla = fs::read_to_string(base.join(file)).ok();
         overlay.write(
             file,
             merge_atlas(vanilla.as_deref(), sources, file)?.as_bytes(),
         )?;
-    }
-    // Atlases merge as resource packs' do: the sources of the base's file,
-    // then every mod's in order.
-    for (file, sources) in atlases {
-        let mut merged = match fs::read(base.join(&file)) {
-            Ok(bytes) => match serde_json::from_slice::<J>(&bytes)
-                .map_err(|e| format!("{file}: {e}"))?
-                .get("sources")
-            {
-                Some(J::Arr(base_sources)) => base_sources.clone(),
-                _ => Vec::new(),
-            },
-            Err(_) => Vec::new(),
-        };
-        merged.extend(sources);
-        let doc = J::Obj(vec![("sources".to_owned(), J::Arr(merged))]);
-        overlay.write(&file, &serde_json::to_vec_pretty(&doc)?)?;
     }
     // A tag naming an id nobody registers fails as a whole in vanilla, and
     // carried-over mods name blocks left out or other mods' ids: such
@@ -3667,7 +3639,9 @@ mod tests;
 /// them. A folder named `tags` deeper in a mod's own data is that mod's (Create Big Cannons'
 /// `block_armor/tags/concrete.json` gives a tag's blocks their armour: no list of values).
 fn is_tag_file(file: &str) -> bool {
-    let third = file.strip_prefix("data/").and_then(|rest| rest.split('/').nth(1));
+    let third = file
+        .strip_prefix("data/")
+        .and_then(|rest| rest.split('/').nth(1));
     third == Some("tags") && file.ends_with(".json")
 }
 

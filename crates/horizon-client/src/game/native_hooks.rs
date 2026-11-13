@@ -1891,12 +1891,12 @@ impl GameLevel<'_> {
 
 #[path = "native_camera_pose.rs"]
 mod camera_pose;
+use super::native_world_edit::{state_facts, state_occlusion};
+pub(super) use super::native_world_edit::{state_from_text, state_id_text};
 pub use camera_pose::NativeShake;
 pub(super) use camera_pose::hand_pose_matrix;
 use camera_pose::{bounded_shake, posed_camera, shake_pose};
 use horizon_assets::item_model::OwnerState;
-pub(super) use super::native_world_edit::{state_from_text, state_id_text};
-use super::native_world_edit::{state_facts, state_occlusion};
 
 /// The mod screen open on this client: the block it is for, the key its
 /// slots are under, the window id of its menu, the menu's data slots as
@@ -8437,7 +8437,12 @@ impl Game<'_> {
     /// Left false, the hopper tries a container entity there, as vanilla
     /// does; a hopper that moved an item waits its 8 ticks. Server-side.
     /// API @API:vanilla_inventory_hooks@.
-    pub(super) fn native_hopper_insert(&mut self, pos: [i32; 3], facing: Direction, moved: &mut bool) {
+    pub(super) fn native_hopper_insert(
+        &mut self,
+        pos: [i32; 3],
+        facing: Direction,
+        moved: &mut bool,
+    ) {
         let _ = (pos, facing, moved);
     }
     /// The hopper at `pos` pulls from the block above it, which has no
@@ -10168,7 +10173,11 @@ impl Game<'_> {
     /// `native_living_death` for mob `m` about to die (`LivingEntity.die`) of
     /// `source` ([`Game::death_source`]): whether a mod kept it from dying. One
     /// given health back lives on, and its next death is told again.
-    pub(super) fn living_death_canceled(&mut self, m: &horizon_client::mobs::Mob, source: HurtSource<'static>) -> bool {
+    pub(super) fn living_death_canceled(
+        &mut self,
+        m: &horizon_client::mobs::Mob,
+        source: HurtSource<'static>,
+    ) -> bool {
         let mut canceled = false;
         let kind = mob_kind(m);
         self.native_living_death_source(
@@ -10179,9 +10188,7 @@ impl Game<'_> {
             source.direct,
             &mut canceled,
         );
-        if canceled
-            && let Some(o) = self.mobs.iter_mut().find(|o| o.id == m.id && o.alive())
-        {
+        if canceled && let Some(o) = self.mobs.iter_mut().find(|o| o.id == m.id && o.alive()) {
             o.death_time = 0;
             self.died.remove(&m.id);
         }
@@ -10193,9 +10200,11 @@ impl Game<'_> {
         let acting = self.player.as_ref().map_or(0, |p| p.entity_id);
         match self.last_hurt_by_player.get(&m.id) {
             // During that guest's own turn, the hub is out of `lan`.
-            Some(Some(conn)) if self.lan_acting != Some(*conn) => {
-                self.lan.as_ref().and_then(|l| l.hub.guest(*conn)).map_or(0, |g| g.entity_id)
-            }
+            Some(Some(conn)) if self.lan_acting != Some(*conn) => self
+                .lan
+                .as_ref()
+                .and_then(|l| l.hub.guest(*conn))
+                .map_or(0, |g| g.entity_id),
             Some(Some(_)) => acting,
             Some(None) if self.lan_acting.is_none() => acting,
             _ => 0,
@@ -10222,7 +10231,16 @@ impl Game<'_> {
         drops: &mut Vec<NativeDrop>,
         canceled: &mut bool,
     ) {
-        let _ = (entity, kind, damage_type, causing, direct, recently_hit, drops, canceled);
+        let _ = (
+            entity,
+            kind,
+            damage_type,
+            causing,
+            direct,
+            recently_hit,
+            drops,
+            canceled,
+        );
     }
     /// `native_living_drops` for mob `m`'s death drops: whether a mod canceled
     /// them. Drops left empty, or at a place that isn't a finite point, go;
@@ -10246,7 +10264,11 @@ impl Game<'_> {
             drops,
             &mut canceled,
         );
-        drops.retain(|d| d.stack.count > 0 && &*d.stack.item != "minecraft:air" && d.position.iter().all(|v| v.is_finite()));
+        drops.retain(|d| {
+            d.stack.count > 0
+                && &*d.stack.item != "minecraft:air"
+                && d.position.iter().all(|v| v.is_finite())
+        });
         for d in drops.iter_mut() {
             if d.motion.iter().any(|v| !v.is_finite()) {
                 d.motion = [0.0; 3];
@@ -10601,7 +10623,9 @@ pub(super) fn block_contact(
 /// `native_living_incoming_damage` for the damage code (`health::HURT_SERVER`): whether
 /// it canceled the hit. Its one caller.
 pub(super) fn hurt_server(hurting: Hurting<'_>, amount: &mut f32) -> bool {
-    horizon_client::health::with_hit_entity(hit_entity(&hurting), || hurt_server_hook(hurting, amount))
+    horizon_client::health::with_hit_entity(hit_entity(&hurting), || {
+        hurt_server_hook(hurting, amount)
+    })
 }
 fn hurt_server_hook(hurting: Hurting<'_>, amount: &mut f32) -> bool {
     // Who the hit names, for v3: only while a native mod listens.
@@ -10744,13 +10768,15 @@ fn native_sound(
         .all(|v| v.is_finite() && v.abs() <= f64::from(i32::MAX) / 8.0);
     let gain_ok = volume.is_finite() && volume >= 0.0 && pitch.is_finite() && pitch >= 0.0;
     let source_ok = source < horizon_client::settings::SOUND_SOURCES.len();
-    (sound_id(sound) && source_ok && position_ok && gain_ok).then(|| super::creatures::NativeSound {
-        dimension,
-        sound: sound.to_owned(),
-        at,
-        source: source as i32,
-        volume,
-        pitch,
+    (sound_id(sound) && source_ok && position_ok && gain_ok).then(|| {
+        super::creatures::NativeSound {
+            dimension,
+            sound: sound.to_owned(),
+            at,
+            source: source as i32,
+            volume,
+            pitch,
+        }
     })
 }
 
@@ -10773,9 +10799,9 @@ fn particle_ok(
         }
     }
     let supported = match options.ty {
-        T::Block | T::BlockMarker | T::FallingDust | T::DustPillar | T::BlockCrumble => p
-            .state
-            .is_some_and(|id| registry.state(id).is_some()),
+        T::Block | T::BlockMarker | T::FallingDust | T::DustPillar | T::BlockCrumble => {
+            p.state.is_some_and(|id| registry.state(id).is_some())
+        }
         T::Item | T::Trail | T::Vibration => false,
         T::Geyser | T::GeyserPlume | T::GeyserBase | T::GeyserPoof => options
             .geyser
@@ -10787,8 +10813,7 @@ fn particle_ok(
         && p.spread
             .into_iter()
             .all(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
-        && p
-            .speed
+        && p.speed
             .into_iter()
             .all(|v| v.is_finite() && v.abs() <= f32::MAX as f64)
         && options.color.into_iter().all(f32::is_finite)
@@ -11249,14 +11274,20 @@ impl GameLevel<'_> {
     /// bit `support * 6 + direction` by `SupportType`'s and `Direction`'s
     /// ordinals). None for an unknown block, property or value.
     pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool, u32)> {
-        Some(state_facts(self.behaviours, self.native_state_from_text(text)?))
+        Some(state_facts(
+            self.behaviours,
+            self.native_state_from_text(text)?,
+        ))
     }
     /// Whether the state `text` names can hide its neighbours' faces
     /// (`canOcclude`) and is an opaque full cube to the renderer
     /// (`isSolidRender`), as vanilla's `BlockStateBase` keeps them. None for
     /// an unknown block, property or value. API @API:state_occlusion@.
     pub(super) fn native_state_occlusion(&self, text: &str) -> Option<(bool, bool)> {
-        Some(state_occlusion(self.behaviours, self.native_state_from_text(text)?))
+        Some(state_occlusion(
+            self.behaviours,
+            self.native_state_from_text(text)?,
+        ))
     }
     /// `updateShape` as a vanilla block class declares it, for the state
     /// `state` names at `pos` whose neighbour toward `direction`
@@ -11347,7 +11378,13 @@ impl GameLevel<'_> {
             return false;
         };
         let b = self.behaviours;
-        b.set_block(self, ticks, BlockPos::new(pos[0], pos[1], pos[2]), id, flags)
+        b.set_block(
+            self,
+            ticks,
+            BlockPos::new(pos[0], pos[1], pos[2]),
+            id,
+            flags,
+        )
     }
     /// This level's own random (vanilla's `Level.random`): the stream
     /// `native_level_random(dimension)` hands a server hook, for a world hook
@@ -11764,9 +11801,8 @@ impl Game<'_> {
         let kind = FluidKind::from_name(fluid)?;
         let state = state_from_text(self.pack.assets.registry, state)?;
         let at = BlockPos::new(pos[0], pos[1], pos[2]);
-        let new = self.with_level(|b, level, ticks| {
-            b.new_liquid_for(level, ticks, kind, at, state)
-        });
+        let new =
+            self.with_level(|b, level, ticks| b.new_liquid_for(level, ticks, kind, at, state));
         Some((new.kind().name(), new.amount(), new.falling()))
     }
     /// A block state as text, as `GameLevel::native_state_id_text` gives it:
@@ -11805,7 +11841,12 @@ impl Game<'_> {
     }
     /// Sets the block at `pos` in the current authoritative level from text
     /// (`GameLevel::native_set_state_text` for hooks on `Game`). API 81.
-    pub(super) fn native_set_state_text_at(&mut self, pos: [i32; 3], text: &str, flags: i32) -> bool {
+    pub(super) fn native_set_state_text_at(
+        &mut self,
+        pos: [i32; 3],
+        text: &str,
+        flags: i32,
+    ) -> bool {
         let Some(id) = state_from_text(self.pack.assets.registry, text) else {
             return false;
         };
@@ -11815,14 +11856,20 @@ impl Game<'_> {
     /// What vanilla's state accessors give for the state `text` names, as
     /// `GameLevel::native_state_facts` answers, for hooks on `Game`.
     pub(super) fn native_state_facts(&self, text: &str) -> Option<(f32, u8, bool, u32)> {
-        Some(state_facts(self.res.behaviours(), state_from_text(self.pack.assets.registry, text)?))
+        Some(state_facts(
+            self.res.behaviours(),
+            state_from_text(self.pack.assets.registry, text)?,
+        ))
     }
     /// Whether the state `text` names can hide its neighbours' faces and is
     /// an opaque full cube to the renderer, as
     /// `GameLevel::native_state_occlusion` answers, for hooks on `Game`.
     /// API @API:state_occlusion@.
     pub(super) fn native_state_occlusion(&self, text: &str) -> Option<(bool, bool)> {
-        Some(state_occlusion(self.res.behaviours(), state_from_text(self.pack.assets.registry, text)?))
+        Some(state_occlusion(
+            self.res.behaviours(),
+            state_from_text(self.pack.assets.registry, text)?,
+        ))
     }
     /// Sets a block in the current authoritative level through `Level.setBlock`.
     /// Returns false for another dimension, an invalid state, or no change.
@@ -11908,11 +11955,18 @@ impl Game<'_> {
     /// an item's use. A tick of that block already queued there is kept. False
     /// for an unknown block, a position that isn't loaded, or a window that
     /// isn't a server. API @API:native_level_reads@.
-    pub(super) fn native_schedule_block_tick_at(&mut self, pos: [i32; 3], block: &str, delay: i32) -> bool {
+    pub(super) fn native_schedule_block_tick_at(
+        &mut self,
+        pos: [i32; 3],
+        block: &str,
+        delay: i32,
+    ) -> bool {
         if self.serving.is_none() && self.options.dedicated.is_none() {
             return false;
         }
-        self.with_level(|_, level, ticks| level.native_schedule_block_tick(ticks, pos, block, delay))
+        self.with_level(|_, level, ticks| {
+            level.native_schedule_block_tick(ticks, pos, block, delay)
+        })
     }
     /// [`Self::native_schedule_block_tick_at`] at a priority, `TickPriority`'s
     /// value (`GameLevel::native_schedule_prioritized_block_tick`). API
@@ -12538,7 +12592,8 @@ impl Game<'_> {
         if !self.native_window() || !at.iter().chain(&velocity).all(|v| v.is_finite()) {
             return false;
         }
-        self.particles.add_with(options, at, velocity, force, always);
+        self.particles
+            .add_with(options, at, velocity, force, always);
         true
     }
     /// Whether a client mod's own particle at `at` is made, as the game's
@@ -13078,7 +13133,9 @@ impl Game<'_> {
         }
         match key {
             "key.keyboard.left.shift" | "key.keyboard.right.shift" => self.modifiers.shift_key(),
-            "key.keyboard.left.control" | "key.keyboard.right.control" => self.modifiers.control_key(),
+            "key.keyboard.left.control" | "key.keyboard.right.control" => {
+                self.modifiers.control_key()
+            }
             "key.keyboard.left.alt" | "key.keyboard.right.alt" => self.modifiers.alt_key(),
             "key.keyboard.left.win" | "key.keyboard.right.win" => self.modifiers.super_key(),
             _ => keybinds::key_code(key).is_some_and(|k| self.physical_keys.contains(&k)),
@@ -14684,7 +14741,9 @@ fn mod_screen_opens(
 fn resource_path(path: &str) -> Option<&str> {
     let ok = !path.is_empty()
         && !path.contains('\\')
-        && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..");
+        && path
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..");
     ok.then_some(path)
 }
 

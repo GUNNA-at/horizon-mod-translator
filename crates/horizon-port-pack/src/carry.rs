@@ -2972,7 +2972,8 @@ mod tests {
                 r#"{"sources": [{"type": "single", "resource": "towers_fx:fluid/goo"}]}"#,
             ),
             ("assets/towers_fx/textures/fluid/goo.png", "png"),
-            // Tags for a mod outside the pack, named by its own model: no claim.
+            // Tags for a mod outside the pack, named by its own model: no claim, and carried as
+            // any tag addition is.
             (
                 "data/create/tags/block/brittle.json",
                 r#"{"values": ["kaisyn:brick"]}"#,
@@ -3010,7 +3011,6 @@ mod tests {
             report.outside,
             [
                 "data/wares/loot_table/crate.json",
-                "data/create/tags/block/brittle.json",
                 "data/cristel/config/towers.json",
                 "data/neoforge/loot_modifiers/global.json",
             ]
@@ -3026,6 +3026,7 @@ mod tests {
         let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
         for file in [
             "data/kaisyn/structure/tower.nbt",
+            "data/create/tags/block/brittle.json",
             "assets/minecraft/atlases/blocks.json",
             "assets/towers_fx/textures/fluid/goo.png",
         ] {

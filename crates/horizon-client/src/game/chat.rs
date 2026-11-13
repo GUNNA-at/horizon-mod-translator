@@ -2827,3 +2827,67 @@ mod damage_type_registry_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mod_registry_tests {
+    use super::{Registries, add_component_type, add_entity_type};
+
+    /// An item argument names a mod's component, as Farmer's Delight's cooking pot carries its
+    /// meal: refused while the type is unknown, taken once the mod has registered it, and the value
+    /// stays the mod's to read.
+    #[test]
+    fn item_arguments_take_a_mods_component_types() {
+        let mut reg = Registries::default();
+        reg.permission = 4;
+        reg.items = vec!["test:pot".to_owned()];
+        reg.persistent_components = vec!["minecraft:damage".to_owned()];
+        let tree = horizon_client::command::vanilla::game_dispatcher();
+        let line = r#"give @s test:pot[test:meal={id:"test:stew",count:1}]"#;
+        assert!(
+            tree.parse(line, &reg).executable().is_err(),
+            "unknown before the mod registers it"
+        );
+        add_component_type(&mut reg, "test:meal");
+        add_component_type(&mut reg, "test:meal");
+        assert_eq!(reg.persistent_components, ["minecraft:damage", "test:meal"]);
+        assert_eq!(reg.ids("minecraft:data_component_type"), ["test:meal"]);
+        assert!(tree.parse(line, &reg).executable().is_ok(), "{line}");
+        let removal = "give @s test:pot[!test:meal]";
+        assert!(tree.parse(removal, &reg).executable().is_ok(), "{removal}");
+    }
+
+    /// `/summon` and a selector's `type=` name a mod's entity type once the mods registered it (as
+    /// Waddles' penguin), refused before; a type built `noSummon` is named by selectors alone.
+    #[test]
+    fn commands_take_a_mods_entity_types() {
+        let mut reg = Registries::default();
+        reg.permission = 4;
+        reg.entity_types = vec!["minecraft:pig".to_owned(), "minecraft:player".to_owned()];
+        reg.summonable = vec!["minecraft:pig".to_owned()];
+        let tree = horizon_client::command::vanilla::game_dispatcher();
+        let summon = "summon test:penguin ~ ~ ~";
+        let select = "kill @e[type=test:penguin]";
+        for line in [summon, select] {
+            assert!(
+                tree.parse(line, &reg).executable().is_err(),
+                "unknown before: {line}"
+            );
+        }
+        add_entity_type(&mut reg, "test:penguin", true);
+        add_entity_type(&mut reg, "test:penguin", true);
+        add_entity_type(&mut reg, "test:seat", false);
+        assert_eq!(
+            reg.entity_types,
+            [
+                "minecraft:pig",
+                "minecraft:player",
+                "test:penguin",
+                "test:seat"
+            ]
+        );
+        assert_eq!(reg.summonable, ["minecraft:pig", "test:penguin"]);
+        for line in [summon, select, "kill @e[type=test:seat]"] {
+            assert!(tree.parse(line, &reg).executable().is_ok(), "{line}");
+        }
+    }
+}
