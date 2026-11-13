@@ -130,6 +130,24 @@ pub(crate) fn timed_out() -> bool {
     PIECE.get().is_some_and(|piece| piece.stopped)
 }
 
+/// Reads the clock for the piece that runs now, whatever the count of calls is at: whether it
+/// has run past its time. For a wait of the runtime's own, which makes no call that would look.
+pub(crate) fn piece_over() -> bool {
+    let Some(piece) = PIECE.get() else {
+        return false;
+    };
+    if !piece.stopped {
+        if piece.since.elapsed() < piece.limit {
+            return false;
+        }
+        PIECE.set(Some(Piece {
+            stopped: true,
+            ..piece
+        }));
+    }
+    true
+}
+
 /// The piece [`timed_start`] began is done: the one around it goes on.
 pub(crate) fn timed_end(outer: Option<Piece>) {
     PIECE.set(outer);
@@ -3570,14 +3588,37 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             "isDedicatedServer" | "isPublished" | "isHardcore" | "isStopped" => V::I(0),
             // The window's own server, as a world opened from the menu has it.
             "isSingleplayer" | "isSingleplayerOwner" | "isRunning" => V::I(1),
-            "isSameThread" => V::I(1),
+            "isSameThread" => V::I((rt.thread_id() == 0) as i32),
             // The thread the server's hooks run on is the one asking (Immersive Portals checks
             // `Thread.currentThread() == server.getRunningThread()` at every packet).
-            "getRunningThread" => call(
-                rt,
-                "java/lang/Thread.currentThread.()Ljava/lang/Thread;",
-                &[],
-            ),
+            "getRunningThread" => crate::jsystem::game_thread(rt),
+            // The server's own queue (`execute`, `tell`, `submit`): run now, on its thread.
+            // From a thread of the mods' own it waits for the server's to come by
+            // ([`crate::screens::give_game`]), and a `submit`'s future for that.
+            "execute" | "tell" | "executeIfPossible" | "executeBlocking" | "submit"
+            | "submitAsync"
+                if desc.starts_with("(Ljava/lang/Runnable;)") =>
+            {
+                let submit = n.starts_with("submit");
+                if rt.thread_id() == 0 {
+                    rt.call_functional("java/lang/Runnable.run.()V", a(1), &[]);
+                    rt.report_thrown("a task for the server thread");
+                    if submit {
+                        crate::jutil::completed_future(rt, V::NULL)
+                    } else {
+                        V::Void
+                    }
+                } else if submit {
+                    let future = crate::tasks::waiting(rt, a(1), crate::tasks::RUN, V::Void);
+                    crate::tasks::home(rt, future);
+                    let task = crate::functions::task(rt, future);
+                    crate::screens::give_game(rt, task);
+                    future
+                } else {
+                    crate::screens::give_game(rt, a(1));
+                    V::Void
+                }
+            }
             "getPlayerList" => crate::events::player_list(rt),
             "tickRateManager" => rt.intern("compat:tick-rate".into(), |rt| {
                 rt.new_object("net/minecraft/server/ServerTickRateManager")

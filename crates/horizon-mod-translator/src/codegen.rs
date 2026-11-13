@@ -165,6 +165,41 @@ fn hash(s: &str) -> u32 {
     s.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193))
 }
 
+/// A `synchronized` method: its translated body under another name, and under its own the
+/// function that holds the monitor (its object's; its class's for a static one) while the body
+/// runs, however it ends (`Rt::monitor_enter`). A method a `@WrapMethod` handler took the name
+/// of stays as it is.
+fn synchronized(text: &str, class: &str, name: &str, desc: &str, is_static: bool) -> String {
+    let f = fn_name(class, name, desc);
+    let head = format!("pub fn {f}(rt: &mut Rt, args: &[V]) -> V {{");
+    if !text.contains(&head) {
+        return text.to_owned();
+    }
+    let body = format!("{f}__sync");
+    let (enter, exit) = if is_static {
+        (
+            format!("rt.monitor_enter_class({class:?});"),
+            format!("rt.monitor_exit_class({class:?});"),
+        )
+    } else {
+        (
+            "let o = args.first().copied().unwrap_or_default();\n    rt.monitor_enter(o);"
+                .to_owned(),
+            "rt.monitor_exit(o);".to_owned(),
+        )
+    };
+    let mut out = text.replacen(
+        &head,
+        &format!("pub fn {body}(rt: &mut Rt, args: &[V]) -> V {{"),
+        1,
+    );
+    let _ = write!(
+        out,
+        "/// `{class}.{name}{desc}` is `synchronized`: its monitor is held while it runs.\npub fn {f}(rt: &mut Rt, args: &[V]) -> V {{\n    {enter}\n    let r = {body}(rt, args);\n    {exit}\n    r\n}}\n\n"
+    );
+    out
+}
+
 /// A Rust identifier for a Java method.
 pub fn fn_name(class: &str, name: &str, desc: &str) -> String {
     let simple = class.rsplit('/').next().unwrap_or(class);
@@ -1327,7 +1362,13 @@ impl<'a> Program<'a> {
         for c in classes {
             for m in &c.methods {
                 if let Some(code) = &m.code {
-                    part.push_str(&self.method(c, &m.name, &m.desc, m.access & 0x0008 != 0, code));
+                    let is_static = m.access & 0x0008 != 0;
+                    let text = self.method(c, &m.name, &m.desc, is_static, code);
+                    if m.access & 0x0020 != 0 {
+                        part.push_str(&synchronized(&text, &c.name, &m.name, &m.desc, is_static));
+                    } else {
+                        part.push_str(&text);
+                    }
                     for f in std::mem::take(&mut self.synthetic) {
                         part.push_str(&f);
                     }
@@ -2736,7 +2777,10 @@ fn {}(rt: &mut Rt, args: &[V]) -> V {{
                 let class = c.class_name(idx as u16).unwrap_or_default();
                 format!("let a = {pop}; s.push(V::I(rt.instance_of_static(a, {class:?}) as i32)); {go}")
             }
-            0xc2 | 0xc3 => format!("s.p(); {go}"),
+            // `synchronized`: one thread runs at a time, so a monitor is always free; the thread
+            // that holds one keeps its turn until it leaves it (`Rt::monitor_enter`).
+            0xc2 => format!("let a = {pop}; rt.monitor_enter(a); {go}"),
+            0xc3 => format!("let a = {pop}; rt.monitor_exit(a); {go}"),
             0xc5 => match &i.arg {
                 Operand::IndexCount(t, dims) => {
                     let ty = c.class_name(*t).unwrap_or_default();

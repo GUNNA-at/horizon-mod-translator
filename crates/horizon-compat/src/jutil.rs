@@ -2918,12 +2918,12 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             } else {
                 crate::tasks::SUPPLY
             };
-            // With no executor it is the common pool's.
+            // With no executor it is the common pool's; with a pool of the runtime's, that one's.
             let Some(&executor) = args
                 .get(1)
                 .filter(|e| e.r() != 0 && !crate::api_common::is_pool(rt, **e))
             else {
-                return Some(crate::tasks::later(rt, a(0), kind, V::Void));
+                return Some(crate::tasks::later_in(rt, a(1), a(0), kind, V::Void));
             };
             // An executor of the mods' own or the game's: it is handed the work to run when it
             // chooses (the client's runs it here and now, on its own thread). What it has not
@@ -2932,23 +2932,34 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             // for the client's while the mods load, which keeps it for when its resources
             // are there.
             let future = crate::tasks::waiting(rt, a(0), kind, V::Void);
+            // Given to the game's own executor from a thread of the mods': the game's thread
+            // runs it, and whoever asks for it meanwhile waits for that.
+            let game = crate::screens::game_executor(rt, executor);
+            if game && rt.thread_id() != 0 {
+                crate::tasks::home(rt, future);
+            }
             let task = crate::functions::task(rt, future);
             rt.call_functional(
                 "java/util/concurrent/Executor.execute.(Ljava/lang/Runnable;)V",
                 executor,
                 &[task],
             );
-            if crate::tasks::waits(rt, future)
-                && rt.class_of(executor) != "net/minecraft/client/Minecraft"
-            {
-                crate::tasks::queue(rt, future);
+            if crate::tasks::waits(rt, future) && !game {
+                crate::tasks::give(rt, V::NULL, future);
             }
             return Some(future);
         }
-        // The future of them all: each one's work runs if it has not.
+        // The future of them all: each one's work runs if it has not; with work among them
+        // that a thread of the mods' still is to bring, it is done when that is.
         "allOf" | "anyOf" => {
-            for f in elements(rt, a(0)) {
-                crate::tasks::force(rt, f);
+            let all = elements(rt, a(0));
+            for f in &all {
+                if !crate::tasks::pending(rt, *f) {
+                    crate::tasks::force(rt, *f);
+                }
+            }
+            if all.iter().any(|f| crate::tasks::pending(rt, *f)) {
+                return Some(crate::tasks::after_all(rt, a(0), name == "anyOf"));
             }
             return Some(completed_future(rt, V::NULL));
         }
@@ -2957,12 +2968,72 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         "isCancelled" => return Some(V::I(rt.get_field(a(0), CANCELLED).i())),
         _ => {}
     }
+    let this = a(0);
+    // A future whose outcome a thread of the mods' is still to bring (its own, or one handed
+    // along): it is not done, a stage added to it runs when it is, and only who must have its
+    // value waits for it.
+    if let Some(source) = args.iter().copied().find(|v| crate::tasks::pending(rt, *v)) {
+        let mine = crate::tasks::pending(rt, this);
+        match name {
+            "isDone" | "isCompletedExceptionally" if mine => return Some(V::I(0)),
+            "getNow" if mine => return Some(a(1)),
+            "getNumberOfDependents" => return Some(V::I(0)),
+            "toCompletableFuture"
+            | "orTimeout"
+            | "completeOnTimeout"
+            | "copy"
+            | "minimalCompletionStage" => return Some(this),
+            "complete" | "completeExceptionally" if mine => {
+                let open = matches!(rt.get_field(this, "$value"), V::Void)
+                    && rt.get_field(this, FAILED).r() == 0;
+                if open {
+                    let field = if name == "complete" { "$value" } else { FAILED };
+                    rt.put_field(this, field, a(1));
+                }
+                crate::tasks::completed_by_hand(rt, this);
+                return Some(V::I(open as i32));
+            }
+            // `get(time, unit)`: no longer than that.
+            "get" if mine && args.len() == 3 => {
+                let time = crate::api_common::unit_duration(rt, a(1).j(), a(2));
+                let until = std::time::Instant::now() + time;
+                if !crate::tasks::wait_for(rt, this, Some(until)) && rt.thrown.is_none() {
+                    return Some(crate::jlang::throw_with(
+                        rt,
+                        "java/util/concurrent/TimeoutException",
+                        "",
+                    ));
+                }
+            }
+            n if is_stage(n) => return Some(crate::tasks::after(rt, source, name, args)),
+            _ => {}
+        }
+    }
     // Anything else is asked of a future: its work runs now if it still waits, and that of a
     // future handed along (`thenCombine`'s other).
+    let waited = args.iter().any(|v| crate::tasks::pending(rt, *v));
     for &v in args {
         crate::tasks::force(rt, v);
     }
-    let this = a(0);
+    // (A wait that was interrupted throws that, and answers nothing.)
+    if waited && rt.thrown.is_some() {
+        return Some(V::NULL);
+    }
+    // What a pool's thread still runs when the game's own could wait no longer for it.
+    if crate::tasks::pending(rt, this)
+        && matches!(name, "join" | "get" | "resultNow" | "exceptionNow")
+    {
+        let class = if name == "get" {
+            "java/lang/InterruptedException"
+        } else {
+            "java/util/concurrent/CompletionException"
+        };
+        return Some(crate::jlang::throw_with(
+            rt,
+            class,
+            "the wait for work a pool's thread still runs was given up",
+        ));
+    }
     let failed = match rt.get_field(this, FAILED) {
         e if e.r() != 0 => Some(e),
         _ => None,
@@ -3141,6 +3212,27 @@ fn future_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
         | "minimalCompletionStage" => this,
         _ => return None,
     })
+}
+
+/// Whether `name` is a method that adds a stage to a future.
+fn is_stage(name: &str) -> bool {
+    [
+        "then",
+        "handle",
+        "whenComplete",
+        "exceptionally",
+        "applyToEither",
+        "acceptEither",
+        "runAfter",
+    ]
+    .iter()
+    .any(|p| name.starts_with(p))
+}
+
+/// A stage of a future that is done, run now ([`crate::tasks::replay`]: it was added while the
+/// future's outcome was still to come).
+pub(crate) fn future_stage(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
+    future_call(rt, name, args)
 }
 
 fn statics(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option<V> {

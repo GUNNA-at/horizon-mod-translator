@@ -1952,6 +1952,8 @@ pub fn server_tick(rt: &mut Rt, host: &mut dyn Host, post: bool) {
             server_place(rt, &crate::places::TICK_CHILDREN, true);
         } else {
             server_place(rt, &crate::places::TICK_SERVER, false);
+            // The tick is done: the mods' own threads have their turn.
+            crate::mod_threads::lend(rt);
         }
     });
 }
@@ -2602,6 +2604,9 @@ pub fn client_tick(rt: &mut Rt, host: &mut dyn Host) {
         crate::keys::tick(rt);
         // The sound manager's: the mods' own instances that tick.
         crate::sounds::tick(rt);
+        // The tick is done: the mods' own threads have their turn (also with no world open,
+        // where no frame of the mods' comes by).
+        crate::mod_threads::lend(rt);
     });
 }
 
@@ -2614,7 +2619,9 @@ pub fn render_frame(rt: &mut Rt, host: &mut dyn Host, realtime: f32, partial: f3
     // A hook's outermost entry: no translated frame holds values, so garbage can go.
     rt.safe_point();
     rt.with_host(host, |rt| {
-        crate::camera::render_frame(rt, realtime, partial)
+        crate::camera::render_frame(rt, realtime, partial);
+        // Between two frames the mods' own threads have their turn.
+        crate::mod_threads::lend(rt);
     });
 }
 

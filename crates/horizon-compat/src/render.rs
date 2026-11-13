@@ -1701,7 +1701,7 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
         // F3: closed (debug overlays a mod draws over the world stay off).
         ("net/minecraft/client/Minecraft", "getDebugOverlay") => single(rt, "net/minecraft/client/gui/components/DebugScreenOverlay"),
         ("net/minecraft/client/gui/components/DebugScreenOverlay", _) if desc.ends_with(")Z") => V::I(0),
-        ("net/minecraft/client/Minecraft", "isSameThread") => V::I(1),
+        ("net/minecraft/client/Minecraft", "isSameThread") => V::I((rt.thread_id() == 0) as i32),
         // A frame's (`camera::render_frame`): its time in ticks and how far it is into its tick;
         // another's: the drawing's partial tick, a tick a frame.
         ("net/minecraft/client/DeltaTracker" | "net/minecraft/client/DeltaTracker$Timer", n) => match n {

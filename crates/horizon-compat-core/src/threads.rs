@@ -113,6 +113,14 @@ pub struct Threads {
     cursor: usize,
     /// Whole collections put off because a thread waited under the runtime's own code.
     pub put_off: u64,
+    /// How many times the game's thread came to where it lends the runtime: none yet, and no
+    /// thread of the mods' would ever run on it.
+    pub lends: u64,
+    /// How long the mods' threads have run, and how many turns they had.
+    pub ran: (Duration, u64),
+    /// The game's thread lends from between two pieces of its own work, where it holds no
+    /// value of its own ([`Rt::lend_threads`]), and not from the middle of a call that waits.
+    clean: bool,
 }
 
 impl Default for Threads {
@@ -132,6 +140,9 @@ impl Default for Threads {
             locks: 0,
             cursor: 0,
             put_off: 0,
+            lends: 0,
+            ran: (Duration::ZERO, 0),
+            clean: false,
         }
     }
 }
@@ -157,6 +168,19 @@ impl std::fmt::Debug for Threads {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Threads({} of the mods', {} runs)", self.list.len(), self.current)
     }
+}
+
+thread_local! {
+    /// On a thread of the mods': where the runtime it runs is ([`Rt::address`]); 0 on any other.
+    static LENT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Where the runtime this thread runs for is, when it is a thread of the mods' own; 0 on a
+/// thread of the game's. The game runs a hook on whatever thread asked it something: on one of
+/// these the hook's runtime is the one lent to it, which is in the middle of that call (as
+/// [`crate::reenter`] finds it), and never one of the thread's own.
+pub fn lent_at() -> usize {
+    LENT.with(|l| l.get())
 }
 
 /// Hands the runtime at `rt` to thread `id` and waits until it is handed back. Not inlined, and
@@ -209,10 +233,16 @@ fn thread_main(baton: Arc<Baton>, id: u32, body: Box<dyn FnOnce(&mut Rt) + Send>
     // SAFETY: the game's thread lent the runtime to this thread and waits until it is handed
     // back ([`lend`]); it stays where it is for as long as it has threads.
     let rt: &mut Rt = unsafe { &mut *rt };
+    LENT.with(|l| l.set(rt.address()));
     if let Some(t) = rt.threads.list.iter_mut().find(|t| t.id == id) {
         t.stack = (0, top);
     }
-    body(rt);
+    // A panic in its code ends this thread alone: the game's thread, which waits for the
+    // runtime, has it back all the same.
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(&mut *rt)));
+    if ended.is_err() {
+        eprintln!("horizon-compat: a thread of the mods' own (thread {id}) panicked and is done");
+    }
     rt.thread_ended();
     let rt: *mut Rt = rt;
     hand_back(&baton, id, rt, false);
@@ -271,6 +301,15 @@ impl Rt {
     pub fn thread_object(&self) -> V {
         let id = self.threads.current;
         self.threads.list.iter().find(|t| t.id == id).map_or(V::NULL, |t| t.object)
+    }
+
+    /// The object of thread `id` (its `Thread`), while it is not done.
+    pub fn thread_object_of(&self, id: u32) -> Option<V> {
+        self.threads
+            .list
+            .iter()
+            .find(|t| t.id == id && t.state != State::Done)
+            .map(|t| t.object)
     }
 
     /// Whether the mods have threads that are not done.
@@ -339,6 +378,37 @@ impl Rt {
         ran
     }
 
+    /// [`Rt::run_threads`] from between two pieces of the game thread's own work (a tick ended,
+    /// a frame drawn), where that thread holds no value of the runtime's in a frame or a
+    /// container of its own: what a thread of the mods' collects meanwhile is then all that
+    /// was made since its call began, whoever made it ([`Rt::collect_young`]).
+    pub fn lend_threads(&mut self, budget: Duration) -> bool {
+        self.threads.clean = true;
+        let ran = self.run_threads(budget);
+        self.threads.clean = false;
+        ran
+    }
+
+    /// Whether every value a thread other than the one that runs may hold can be read: the
+    /// game's lent from between its own work ([`Rt::lend_threads`]), and none of the mods'
+    /// waits under the runtime's own code.
+    pub(crate) fn threads_clean(&self) -> bool {
+        self.threads.clean && self.threads.game.entries.is_empty() && !self.threads_deep()
+    }
+
+    /// A whole collection ran: every object left is as old as any, so each call in progress
+    /// on a waiting thread, and each scope, counts what is made from here as its own.
+    pub(crate) fn threads_rebased(&mut self) {
+        for t in &mut self.threads.list {
+            for e in &mut t.ctx.entries {
+                e.rebase();
+            }
+            for s in &mut t.ctx.scopes {
+                s.rebase();
+            }
+        }
+    }
+
     /// Whether the thread at `at` has something to do: its turn, a wake, or its time come.
     fn thread_ready(&mut self, at: usize, now: Instant) -> bool {
         let t = &mut self.threads.list[at];
@@ -362,6 +432,33 @@ impl Rt {
         })
     }
 
+    /// When a thread of the mods' next has something to do: now or before (it is ready, woken,
+    /// or its time has come), or at a time one of them waits until. None when none of them goes
+    /// on unless something wakes it, which only the thread that runs can do.
+    pub fn threads_next(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        for t in &self.threads.list {
+            let at = match t.state {
+                State::Ready => now,
+                State::Waiting { .. } if t.woken => now,
+                State::Waiting { until: Some(u), .. } => u,
+                _ => continue,
+            };
+            next = Some(next.map_or(at, |n| n.min(at)));
+        }
+        next
+    }
+
+    /// How many threads of the mods' are not done.
+    pub fn thread_count(&self) -> usize {
+        self.threads
+            .list
+            .iter()
+            .filter(|t| t.state != State::Done)
+            .count()
+    }
+
     /// The game's thread gives the runtime to the thread at `at` until `slice_end`, and has it
     /// back when that thread waits, is out of time or is done.
     fn switch_to(&mut self, at: usize, slice_end: Instant) {
@@ -376,10 +473,13 @@ impl Rt {
         self.threads.check_at = self.calls + CHECK_EVERY;
         self.threads.resumed_born = self.next_born();
         let baton = self.threads.baton.clone();
+        let began = Instant::now();
         let rt: *mut Rt = self;
         lend(&baton, id, rt);
         // The thread put its own context away and this one back before it handed over.
         self.threads.resumed_born = self.next_born();
+        self.threads.ran.0 += began.elapsed();
+        self.threads.ran.1 += 1;
     }
 
     /// The thread that runs gives the runtime back to the game's thread, in `state`, and goes on
@@ -507,8 +607,38 @@ impl Rt {
         let holding = self.threads.locks > 0 && over < LOCK_GRACE;
         let under = self.entries.len() > BODY_ENTRIES && over < SHALLOW_GRACE;
         if !holding && !under {
+            // Held that long, a lock is no reason to hold the game any more: the others go on
+            // beside it from here (and a count that came off, a lock never given back, stops
+            // costing every turn its grace).
+            self.threads.locks = 0;
             self.thread_park(State::Ready);
         }
+    }
+
+    /// The mods' code enters a monitor (`synchronized`, a lock taken): the thread that runs is
+    /// not made to give the runtime up in the middle of what it guards, so no other thread
+    /// finds that half done ([`LOCK_GRACE`]). One runs at a time, so nothing is waited for.
+    #[inline]
+    pub fn monitor_enter(&mut self, _of: V) {
+        self.threads.locks += 1;
+    }
+
+    /// The mods' code leaves a monitor ([`Rt::monitor_enter`]).
+    #[inline]
+    pub fn monitor_exit(&mut self, _of: V) {
+        self.threads.locks = self.threads.locks.saturating_sub(1);
+    }
+
+    /// [`Rt::monitor_enter`] for a class's own monitor (a `static synchronized` method).
+    #[inline]
+    pub fn monitor_enter_class(&mut self, _class: &'static str) {
+        self.threads.locks += 1;
+    }
+
+    /// [`Rt::monitor_exit`] for a class's own monitor.
+    #[inline]
+    pub fn monitor_exit_class(&mut self, _class: &'static str) {
+        self.threads.locks = self.threads.locks.saturating_sub(1);
     }
 
     /// Whether a thread waits under the runtime's own code (a lambda a `forEach` of the
@@ -663,6 +793,156 @@ mod tests {
             rounds += 1;
         }
         assert!(!rt.has_threads() && rounds > 3, "{rounds} rounds");
+    }
+
+    /// A thread that holds a monitor keeps its turn past its slice until it leaves it, so no
+    /// other finds what it guards half done; one that holds none hands over when its slice is up.
+    #[test]
+    fn a_thread_in_a_monitor_keeps_its_turn_until_it_leaves() {
+        fn work(rt: &mut Rt, guarded: bool) {
+            if guarded {
+                rt.monitor_enter(V::NULL);
+            }
+            let began = Instant::now();
+            while began.elapsed() < Duration::from_millis(20) {
+                rt.calls += 1;
+                if rt.calls >= rt.threads.check_at {
+                    rt.slice_point();
+                }
+            }
+            if guarded {
+                rt.monitor_exit(V::NULL);
+            }
+        }
+        for guarded in [true, false] {
+            let mut rt = Rt::new();
+            rt.thread_start(V::NULL, Box::new(move |rt| work(rt, guarded)));
+            let began = Instant::now();
+            assert!(rt.run_threads(Duration::from_millis(3)));
+            let held = began.elapsed();
+            if guarded {
+                assert!(held >= Duration::from_millis(19), "{held:?}");
+                assert!(!rt.has_threads(), "its work was done in the one turn");
+            } else {
+                assert!(held < Duration::from_millis(15), "{held:?}");
+                assert!(rt.has_threads());
+                while rt.has_threads() {
+                    rt.run_threads(Duration::from_millis(3));
+                }
+            }
+        }
+    }
+
+    /// A whole collection asked for on a thread of the mods' own is put off: the game's thread
+    /// waits below it with frames of its own, which that thread cannot read.
+    #[test]
+    fn a_whole_collection_is_the_games_threads_to_run() {
+        static FREED: AtomicU32 = AtomicU32::new(u32::MAX);
+        let mut rt = Rt::new();
+        let lost = rt.new_object("java/lang/Object");
+        rt.thread_start(
+            V::NULL,
+            Box::new(|rt| {
+                let before = rt.heap.len() - rt.free.len();
+                let after = rt.collect();
+                FREED.store((before - after) as u32, Ordering::SeqCst);
+            }),
+        );
+        while rt.run_threads(Duration::from_millis(5)) {}
+        assert_eq!(FREED.load(Ordering::SeqCst), 0);
+        assert_eq!(rt.threads.put_off, 1);
+        assert!(live(&rt, lost));
+        rt.collect();
+        assert!(!live(&rt, lost), "on the game's own thread it runs");
+    }
+
+    /// A thread whose code panics is done, and the game's thread has its runtime back.
+    #[test]
+    fn a_thread_that_panics_hands_the_runtime_back() {
+        let mut rt = Rt::new();
+        let id = rt.thread_start(
+            V::NULL,
+            Box::new(|rt| {
+                rt.thrown = Some(V::NULL);
+                panic!("a test's panic, on a thread of the mods' own");
+            }),
+        );
+        assert!(rt.run_threads(Duration::from_millis(5)));
+        assert!(!rt.thread_alive(id) && !rt.has_threads());
+        assert_eq!(
+            (rt.thrown, rt.thread_id()),
+            (None, 0),
+            "the game's own context"
+        );
+    }
+
+    /// Work on a thread of the mods' that runs for many turns leaves its garbage to no whole
+    /// collection: a collection inside its call frees what it made in the turns before too,
+    /// while the game's thread lends from between its own work, and keeps what another thread
+    /// holds in its frames.
+    #[test]
+    fn a_threads_own_collection_frees_what_its_earlier_turns_made() {
+        static HELD: AtomicU32 = AtomicU32::new(0);
+        static FREED: AtomicU32 = AtomicU32::new(0);
+        let mut rt = Rt::new();
+        rt.young_min = 1;
+        // A thread that holds one object in its frame, and waits.
+        rt.thread_start(
+            V::NULL,
+            Box::new(|rt| {
+                rt.entered(
+                    |rt| {
+                        // (Far up the heap: a small number on a stack is not taken for it.)
+                        for _ in 0..70_000 {
+                            rt.new_object("java/lang/Object");
+                        }
+                        let mine = std::hint::black_box(rt.new_object("java/lang/Object"));
+                        HELD.store(mine.r(), Ordering::SeqCst);
+                        rt.thread_wait(V::NULL, Some(Instant::now() + Duration::from_millis(200)));
+                        assert_eq!(rt.class_of(std::hint::black_box(mine)), "java/lang/Object");
+                    },
+                    |_| V::Void,
+                );
+            }),
+        );
+        // And one that makes garbage over several turns, then collects inside its call.
+        rt.thread_start(
+            V::NULL,
+            Box::new(|rt| {
+                rt.entered(
+                    |rt| {
+                        let top = rt.entries.last().map(gc::Entry::began);
+                        for _ in 0..3 {
+                            for _ in 0..1000 {
+                                rt.new_object("java/lang/Object");
+                            }
+                            rt.thread_yield();
+                        }
+                        let (born, stack) = top.unwrap();
+                        let freed = rt.collect_young(born, &[], None, Some(stack), "a test");
+                        FREED.store(freed as u32, Ordering::SeqCst);
+                    },
+                    |_| V::Void,
+                );
+            }),
+        );
+        let began = Instant::now();
+        while FREED.load(Ordering::SeqCst) == 0 && began.elapsed() < Duration::from_secs(5) {
+            rt.lend_threads(Duration::from_millis(5));
+        }
+        assert!(
+            FREED.load(Ordering::SeqCst) >= 3000,
+            "{}",
+            FREED.load(Ordering::SeqCst)
+        );
+        assert!(
+            live(&rt, V::R(HELD.load(Ordering::SeqCst))),
+            "what the other thread holds stays"
+        );
+        while rt.has_threads() {
+            rt.lend_threads(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// A collection inside a call of the game's thread frees what that call made, and not what a

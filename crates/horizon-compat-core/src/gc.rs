@@ -79,6 +79,27 @@ pub struct Scope {
     survived: u64,
 }
 
+impl Entry {
+    /// After a whole collection, which leaves every object as old as any: what is made from
+    /// here on is this call's own.
+    pub(crate) fn rebase(&mut self) {
+        self.born = 1;
+    }
+
+    /// Where its objects and its frames begin: [`Object::born`] of the first, and the stack.
+    #[cfg(test)]
+    pub(crate) fn began(&self) -> (u32, usize) {
+        (self.born, self.stack)
+    }
+}
+
+impl Scope {
+    /// As [`Entry::rebase`].
+    pub(crate) fn rebase(&mut self) {
+        self.born = 1;
+    }
+}
+
 /// What `HORIZON_COMPAT_GC` asks for of the collections inside a hook: `off` for none, `exit`
 /// for those at a call's end alone (none reads the stack); every kind otherwise.
 fn young_mode() -> u8 {
@@ -469,6 +490,12 @@ impl Rt {
         };
         let interval = self.young_interval(e.survived);
         let (born, top, since) = (e.born, e.stack, self.made - e.examined);
+        // On a thread of the mods' own that cannot read what the others hold, a look through
+        // the heap would free next to nothing (what this turn made): at a later turn.
+        if self.thread_id() != 0 && !self.threads_clean() {
+            self.young_due = self.made + (interval / 8).max(1);
+            return;
+        }
         if young_mode() >= 2 && since >= interval && self.made - self.young_last >= interval / 4 {
             let (before, freed) = (
                 self.young_runs.3,
@@ -525,10 +552,23 @@ impl Rt {
         if born == 0 || self.made - self.born_base >= u64::from(u32::MAX) - 1 {
             return 0;
         }
-        // With threads of the mods': only what was made since this one took the runtime. What
-        // is older, a thread that waits may hold in a container of the runtime's own code above
-        // it, which nothing shows; what is newer, none of them has seen.
-        let born = born.max(self.threads.resumed_born);
+        // With threads of the mods'. On the game's own thread: only what was made since it had
+        // the runtime back. What is older, a thread that waits may hold in a container of the
+        // runtime's own code above it, which nothing shows; what is newer, none of them has
+        // seen. On a thread of the mods' own: all that was made since its call began, whoever
+        // made it, with what the other threads hold read from their stacks below, and only
+        // where all of that can be read ([`Rt::threads_clean`]); else nothing (what this turn
+        // alone made is not worth a look through the heap). Work that runs for minutes, a
+        // slice at a time, would otherwise leave all its garbage to the whole collections.
+        let all_read = self.thread_id() != 0;
+        if all_read && !self.threads_clean() {
+            return 0;
+        }
+        let born = if all_read {
+            born
+        } else {
+            born.max(self.threads.resumed_born)
+        };
         let started = std::time::Instant::now();
         let n = self.heap.len();
         // Several threads read a large heap (nothing is written to it meanwhile).
@@ -635,6 +675,16 @@ impl Rt {
         }
         self.roots(&mut |v| todo.extend(young_ref(v)));
         todo.extend(roots.iter().filter_map(|v| young_ref(*v)));
+        // What the other threads hold: what the runtime keeps for each, and any word of their
+        // stacks that could be a reference.
+        if all_read {
+            self.thread_roots(&mut |v| todo.extend(young_ref(v)));
+            self.thread_stack_words(&mut |w| {
+                if young.get(w as usize) {
+                    todo.push(w);
+                }
+            });
+        }
         // What the scope's own code made or was answered ([`Scope`]).
         if let Some(from) = kept {
             todo.extend(
@@ -756,27 +806,40 @@ impl Rt {
     }
 
     /// Collects when enough was allocated since the last collection. Call only at a safe point.
+    /// A collection that could not run now ([`Rt::collect`]) is asked for again at the next.
     pub fn maybe_collect(&mut self) {
         let live = self.heap.len() - self.free.len();
-        if live >= self.collect_at {
-            let survivors = self.collect();
+        if live >= self.collect_at
+            && let Some(survivors) = self.collect_now()
+        {
             self.collect_at = (survivors * 2).max(survivors + MIN_INTERVAL);
         }
     }
 
     /// Frees every object the roots don't reach; returns how many objects stay. Call only at a safe
-    /// point (no translated frame running).
+    /// point (no translated frame running). Where it can't run (a call into the mods' code is in
+    /// progress, or a thread of theirs is where its values can't be read) nothing is freed.
     pub fn collect(&mut self) -> usize {
+        match self.collect_now() {
+            Some(survivors) => survivors,
+            None => self.heap.len() - self.free.len(),
+        }
+    }
+
+    /// [`Rt::collect`]; None when it could not run here and now.
+    fn collect_now(&mut self) -> Option<usize> {
         let n = self.heap.len();
         // A call into the mods' code is in progress: its frames hold values no root names.
         if !self.entries.is_empty() {
-            return n - self.free.len();
+            return None;
         }
-        // A thread of the mods' waits under the runtime's own code, whose containers no stack
-        // shows: when it has come back from under it.
-        if self.threads_deep() {
+        // A thread of the mods' runs: the game's own thread waits below it, in the middle of
+        // whatever it lent the runtime from, and its frames are not this thread's to read. And
+        // one that waits under the runtime's own code, whose containers no stack shows: when
+        // it has come back from under it.
+        if self.thread_id() != 0 || self.threads_deep() {
             self.threads.put_off += 1;
-            return n - self.free.len();
+            return None;
         }
         // (The scopes left are of code that is done: this is a safe point.)
         self.scopes_done(0);
@@ -848,7 +911,8 @@ impl Rt {
         self.live_at_collection = survivors as u64;
         // Every object is as old as any now: what counts from here is made from here.
         self.threads.resumed_born = 0;
-        survivors
+        self.threads_rebased();
+        Some(survivors)
     }
 
     fn mark(&self, marked: &mut [bool], todo: &mut Vec<u32>) {

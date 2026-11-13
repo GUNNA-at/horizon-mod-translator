@@ -169,50 +169,50 @@ fn synchronizer(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
             }
             V::I(i32::from(same))
         }
-        "acquire" | "acquireInterruptibly" | "tryAcquireNanos" => {
-            let had = asks(
-                rt,
-                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryAcquire.(I)Z",
-            )
-            .i() != 0;
+        // An acquire the class refuses waits for a release, and asks again: with threads of
+        // the mods' own another of them may release it meanwhile.
+        "acquire"
+        | "acquireInterruptibly"
+        | "tryAcquireNanos"
+        | "acquireShared"
+        | "acquireSharedInterruptibly"
+        | "tryAcquireSharedNanos" => {
+            let shared = name.contains("Shared");
+            let what = if shared {
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryAcquireShared.(I)I"
+            } else {
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryAcquire.(I)Z"
+            };
+            let granted = move |v: V| if shared { v.i() >= 0 } else { v.i() != 0 };
+            let mut had = granted(asks(rt, what));
             if !had && rt.thrown.is_none() {
-                wait(rt);
+                let until = name.ends_with("Nanos").then(|| {
+                    std::time::Instant::now()
+                        + std::time::Duration::from_nanos(a(2).j().max(0) as u64)
+                });
+                let arg = a(1);
+                had = crate::mod_threads::wait_until(rt, this, until, |rt| {
+                    granted(rt.call_functional(what, this, &[arg])) || rt.thrown.is_some()
+                }) && rt.thrown.is_none();
             }
-            if name == "tryAcquireNanos" {
+            if name.ends_with("Nanos") {
                 V::I(i32::from(had))
             } else {
                 V::Void
             }
         }
-        "acquireShared" | "acquireSharedInterruptibly" | "tryAcquireSharedNanos" => {
-            let had = asks(
-                rt,
-                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryAcquireShared.(I)I",
-            )
-            .i() >= 0;
-            if !had && rt.thrown.is_none() {
-                wait(rt);
-            }
-            if name == "tryAcquireSharedNanos" {
-                V::I(i32::from(had))
+        "release" | "releaseShared" => {
+            let what = if name == "release" {
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryRelease.(I)Z"
             } else {
-                V::Void
+                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryReleaseShared.(I)Z"
+            };
+            let released = asks(rt, what).i();
+            if released != 0 {
+                crate::mod_threads::wake(rt, this, true);
             }
+            V::I(released)
         }
-        "release" => V::I(
-            asks(
-                rt,
-                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryRelease.(I)Z",
-            )
-            .i(),
-        ),
-        "releaseShared" => V::I(
-            asks(
-                rt,
-                "java/util/concurrent/locks/AbstractQueuedSynchronizer.tryReleaseShared.(I)Z",
-            )
-            .i(),
-        ),
         "hasQueuedThreads" | "hasContended" | "hasQueuedPredecessors" | "isQueued" => V::I(0),
         "getQueueLength" => V::I(0),
         "setExclusiveOwnerThread" => {
@@ -260,16 +260,58 @@ fn locks(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option
         "countDown" => {
             let left = (rt.get_field(this, "$count").j() - 1).max(0);
             rt.put_field(this, "$count", V::J(left));
+            if left == 0 {
+                crate::mod_threads::wake(rt, this, true);
+            }
             V::Void
         }
         "getCount" => V::J(rt.get_field(this, "$count").j()),
         "availablePermits" => V::I(rt.get_field(this, "$count").j() as i32),
-        "await" | "awaitNanos" | "awaitUninterruptibly" | "park" | "parkNanos" => {
-            let waited = wait(rt);
+        // A latch is waited for until it is at zero (a thread of the mods' own really waits;
+        // the game's lets them run meanwhile, and passes when none can count it down).
+        "await" if owner == LATCH => {
+            let until = desc.starts_with("(J").then(|| {
+                std::time::Instant::now() + crate::api_common::unit_duration(rt, a(1).j(), a(2))
+            });
+            let zero = |rt: &mut Rt| rt.get_field(this, "$count").j() == 0;
+            let had = crate::mod_threads::wait_until(rt, this, until, zero);
+            if desc.ends_with(")Z") {
+                V::I(had as i32)
+            } else {
+                V::Void
+            }
+        }
+        // `LockSupport.park`: until unparked, or for the time given.
+        "park" | "parkNanos" | "parkUntil" => {
+            let time = match (name, args.last().copied()) {
+                ("parkNanos", Some(V::J(n))) => {
+                    Some(std::time::Duration::from_nanos(n.max(0) as u64))
+                }
+                ("parkUntil", Some(V::J(at))) => {
+                    Some(std::time::Duration::from_millis((at - now()).max(0) as u64))
+                }
+                _ => None,
+            };
+            crate::mod_threads::park(rt, time);
+            V::Void
+        }
+        // A condition's: until it is signalled, or for the time given.
+        "await" | "awaitNanos" | "awaitUninterruptibly" | "awaitUntil" => {
+            let began = std::time::Instant::now();
+            let time = match (name, a(1)) {
+                ("awaitNanos", V::J(n)) => Some(std::time::Duration::from_nanos(n.max(0) as u64)),
+                ("await", V::J(d)) => Some(crate::api_common::unit_duration(rt, d, a(2))),
+                _ => None,
+            };
+            let woken = crate::mod_threads::wait_on(rt, this, time);
             match desc.rsplit(')').next() {
-                Some("Z") => V::I((rt.get_field(this, "$count").j() == 0) as i32),
-                Some("J") => V::J(0),
-                _ => waited,
+                Some("Z") => V::I(woken as i32),
+                // What is left of the time given: none when it ran out.
+                Some("J") => V::J(match time {
+                    Some(t) if woken => t.saturating_sub(began.elapsed()).as_nanos().max(1) as i64,
+                    _ => 0,
+                }),
+                _ => V::Void,
             }
         }
         // A permit may be the pools' work's to release: that runs first, as beside a wait.
@@ -277,12 +319,31 @@ fn locks(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Option
             crate::tasks::run_pending(rt);
             V::Void
         }
-        "lock" | "unlock" | "lockInterruptibly" | "release" | "signal" | "signalAll" | "unpark" => {
+        // One thread runs at a time, so a lock is always free: what it guards is done in one
+        // piece all the same, the thread that holds it keeping its turn until it lets go
+        // ([`Rt::monitor_enter`]).
+        "lock" | "lockInterruptibly" => {
+            rt.monitor_enter(this);
             V::Void
         }
-        "tryLock" | "tryAcquire" | "isHeldByCurrentThread" | "isWriteLockedByCurrentThread" => {
+        "unlock" => {
+            rt.monitor_exit(this);
+            V::Void
+        }
+        "tryLock" => {
+            rt.monitor_enter(this);
             V::I(1)
         }
+        "signal" | "signalAll" => {
+            crate::mod_threads::wake(rt, this, name == "signalAll");
+            V::Void
+        }
+        "unpark" => {
+            crate::mod_threads::unpark(rt, this);
+            V::Void
+        }
+        "release" => V::Void,
+        "tryAcquire" | "isHeldByCurrentThread" | "isWriteLockedByCurrentThread" => V::I(1),
         "isLocked" | "hasQueuedThreads" | "isWriteLocked" | "isFair" => V::I(0),
         "getHoldCount" | "getQueueLength" | "getReadLockCount" => V::I(0),
         "readLock" | "writeLock" | "asReadLock" | "asWriteLock" if desc.starts_with("()L") => this,
@@ -368,14 +429,21 @@ pub(crate) fn thread_builder(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
-/// `java.lang.Thread`. One runtime runs on one thread, the game's: `currentThread` is that one
-/// each time. A thread a mod makes and starts runs its body at once, there, to its end or to its
-/// first wait: a task done in the background is done when `start` returns, and a loop that polls
-/// and sleeps ends at its first sleep, interrupted ([`wait`]).
+/// The `Thread` the game's own thread is to the mods.
+pub(crate) fn game_thread(rt: &mut Rt) -> V {
+    rt.intern("compat:thread".into(), |rt| rt.new_object(THREAD))
+}
+
+/// `java.lang.Thread`. A runtime runs on one thread of the game's: there `currentThread` is that
+/// one each time. A thread a mod makes and starts runs on a stack of its own where the mods have
+/// threads ([`crate::mod_threads`]: in a running game), beside the game, and waits where its code
+/// waits. Where they have none (while they load) it runs its body at once, there, to its end or
+/// to its first wait: a task done in the background is done when `start` returns, and a loop that
+/// polls and sleeps ends at its first sleep, interrupted ([`wait`]).
 pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i: usize| args.get(i).copied().unwrap_or_default();
     let this = a(0);
-    let game = |rt: &mut Rt| rt.intern("compat:thread".into(), |rt| rt.new_object(THREAD));
+    let game = game_thread;
     let run = |rt: &mut Rt, thread: V| {
         // A subclass's own `run`, else the body the thread was made with.
         let body = if rt.class_of(thread) == THREAD { rt.get_field(thread, "$target") } else { thread };
@@ -405,7 +473,10 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         }
     };
     Some(match name {
-        "currentThread" => game(rt),
+        "currentThread" => match crate::mod_threads::current(rt) {
+            Some(own) => own,
+            None => game(rt),
+        },
         // The arguments by their types: a group, the body, a name, a stack size.
         "<init>" => {
             for (i, p) in params(desc).into_iter().enumerate() {
@@ -417,10 +488,14 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
             }
             V::Void
         }
+        // On a stack of its own where the mods have threads ([`crate::mod_threads`]); else
+        // here and now.
         "start" => {
             if rt.get_field(this, "$started").i() == 0 {
                 rt.put_field(this, "$started", V::I(1));
-                run(rt, this);
+                if !crate::mod_threads::start(rt, this) {
+                    run(rt, this);
+                }
             }
             V::Void
         }
@@ -436,7 +511,9 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
             let t = rt.new_object(THREAD);
             rt.put_field(t, "$target", a(0));
             rt.put_field(t, "$started", V::I(1));
-            run(rt, t);
+            if !crate::mod_threads::start(rt, t) {
+                run(rt, t);
+            }
             t
         }
         "getName" => match rt.get_field(this, "$name") {
@@ -455,11 +532,26 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         "isDaemon" => V::I(rt.get_field(this, "$daemon").i()),
         "getId" | "threadId" => V::J(if this == game(rt) { 1 } else { i64::from(this.r()) }),
         "getPriority" => V::I(5),
-        // The game's thread runs; one a mod started ran to its end inside `start`.
-        "isAlive" => V::I((this == game(rt)) as i32),
-        // A started thread's body is always being asked to stop: it can't share the game's thread.
+        // The game's thread runs, and a thread on a stack of its own until its body ends; one
+        // a mod started with none ran to its end inside `start`.
+        "isAlive" => V::I((this == game(rt) || crate::mod_threads::alive(rt, this)) as i32),
+        // On a stack of its own a thread is interrupted when a mod interrupts it. One started
+        // with none is always being asked to stop: it can't share the game's thread.
+        "isInterrupted" if crate::mod_threads::id_of(rt, this) != 0 => {
+            V::I(crate::mod_threads::interrupted(rt, this) as i32)
+        }
+        "interrupted" if rt.thread_id() != 0 => V::I(crate::mod_threads::take_interrupt(rt) as i32),
         "isInterrupted" | "interrupted" => V::I(in_started_thread() as i32),
-        "sleep" => wait(rt),
+        // `sleep(millis)`, `sleep(millis, nanos)`, `sleep(Duration)`.
+        "sleep" => {
+            let time = match a(0) {
+                V::J(ms) => std::time::Duration::from_millis(ms.max(0) as u64),
+                d => std::time::Duration::from_millis(
+                    crate::api_common::duration_millis(rt, d).max(0) as u64,
+                ),
+            };
+            crate::mod_threads::sleep(rt, time)
+        }
         "holdsLock" => V::I(1),
         // No handler but a mod's own, which is asked nothing here: what ends a thread's body
         // is told of where it ends.
@@ -468,14 +560,26 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         "getStackTrace" => crate::jlang::thread_frames(rt),
         "getThreadGroup" => crate::neo::thread_group(rt),
         "getContextClassLoader" => rt.intern("compat:class-loader".into(), |rt| rt.new_object("java/lang/ClassLoader")),
-        // Giving the other threads a turn: the pools' work has it ([`crate::tasks`]).
+        // Giving the other threads a turn: the mods' own, and the pools' work
+        // ([`crate::tasks`]).
         "yield" | "onSpinWait" => {
-            if !in_started_thread() {
-                crate::tasks::run_pending(rt);
-            }
+            crate::mod_threads::give_way(rt);
             V::Void
         }
-        "join" | "interrupt" | "setPriority" | "setUncaughtExceptionHandler" | "setDefaultUncaughtExceptionHandler" | "setContextClassLoader" | "checkAccess" => {
+        // `join()`, `join(millis)`, `join(millis, nanos)`: until the thread is done.
+        "join" => {
+            let time = match a(1) {
+                V::J(ms) if ms > 0 => Some(std::time::Duration::from_millis(ms as u64)),
+                _ => None,
+            };
+            crate::mod_threads::join(rt, this, time);
+            V::Void
+        }
+        "interrupt" => {
+            crate::mod_threads::interrupt(rt, this);
+            V::Void
+        }
+        "setPriority" | "setUncaughtExceptionHandler" | "setDefaultUncaughtExceptionHandler" | "setContextClassLoader" | "checkAccess" => {
             V::Void
         }
         _ => return None,

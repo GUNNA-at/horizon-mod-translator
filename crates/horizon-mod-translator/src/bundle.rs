@@ -99,10 +99,11 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 145] = [
+const COMPAT: [(&str, &str); 147] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
+    ("threads.rs", include_str!("../../horizon-compat-core/src/threads.rs")),
     ("api.rs", include_str!("../../horizon-compat/src/api.rs")),
     ("api_common.rs", include_str!("../../horizon-compat/src/api_common.rs")),
     ("baked_models.rs", include_str!("../../horizon-compat/src/baked_models.rs")),
@@ -145,6 +146,7 @@ const COMPAT: [(&str, &str); 145] = [
     ("neo_tags.rs", include_str!("../../horizon-compat/src/neo_tags.rs")),
     ("nightconfig.rs", include_str!("../../horizon-compat/src/nightconfig.rs")),
     ("mod_configs.rs", include_str!("../../horizon-compat/src/mod_configs.rs")),
+    ("mod_threads.rs", include_str!("../../horizon-compat/src/mod_threads.rs")),
     ("annotations.rs", include_str!("../../horizon-compat/src/annotations.rs")),
     ("atomics.rs", include_str!("../../horizon-compat/src/atomics.rs")),
     ("invoke.rs", include_str!("../../horizon-compat/src/invoke.rs")),
@@ -309,7 +311,7 @@ fn crate_bytes() -> usize {
 }
 
 /// The runtime's core files, which the runtime crate carries; the mapping crate, the rest.
-const CORE_FILES: [&str; 3] = ["host.rs", "gc.rs", "linked.rs"];
+const CORE_FILES: [&str; 4] = ["host.rs", "gc.rs", "linked.rs", "threads.rs"];
 
 /// A split engine's runtime crate: horizon-compat-core as it is, which every crate of translated
 /// code builds on. The API mapping is a crate of its own ([`write_mapping`]) that only the engine
@@ -5957,13 +5959,15 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
                  pub fn with_runtime<R>(f: impl FnOnce(&mut Rt) -> R) -> R {{\n    RUNTIME.with(|cell| {{\n        let mut slot = cell.borrow_mut();\n        let rt = slot.get_or_insert_with(copy_of_loaded);\n        RUNTIME_AT.with(|at| at.set(rt.address()));\n        f(rt)\n    }})\n}}\n\n\
                  /// Whether the mod's runtime is in a call on this thread: a hook the game runs from inside one (the\n\
                  /// mod's code places a block, and the game asks for the block's block entity) finds it so.\n\
-                 pub fn runtime_busy() -> bool {{\n    RUNTIME.with(|cell| cell.try_borrow_mut().is_err())\n}}\n\n\
+                 /// On a thread of the mods' own it always is: the runtime that thread runs is the one a\n\
+                 /// thread of the game's lent it, in the middle of a call.\n\
+                 pub fn runtime_busy() -> bool {{\n    horizon_compat::threads::lent_at() != 0 || RUNTIME.with(|cell| cell.try_borrow_mut().is_err())\n}}\n\n\
                  /// [`with_runtime`] for a hook the game runs. When the runtime is busy on this thread (the game ran\n\
                  /// the hook from inside one of the mod's calls), the runtime runs it where it waits for the game\n\
                  /// ([`Rt::host_call`]), as the JVM runs an event's listeners inside the call that posted it. Where it\n\
                  /// doesn't wait (a call that can't take a hook), the hook does nothing (`R::default()`, which\n\
                  /// leaves it to the game), and says so once.\n\
-                 pub fn hook_runtime<R: Default>(hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {{\n    if runtime_busy() {{\n        thread_local! {{\n            static TOLD: std::cell::RefCell<Vec<(&'static str, bool)>> = const {{ std::cell::RefCell::new(Vec::new()) }};\n        }}\n        let mut f = Some(f);\n        let at = RUNTIME_AT.with(|at| at.get());\n        let ran = horizon_compat::reenter(at, |rt| f.take().map(|f| f(rt))).flatten();\n        let first = TOLD.with(|t| !t.borrow().contains(&(hook, ran.is_some())) && {{ t.borrow_mut().push((hook, ran.is_some())); true }});\n        if let Some(r) = ran {{\n            if first && Rt::tracing() {{\n                eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; run there\");\n            }}\n            return r;\n        }}\n        if first {{\n            eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; skipped\");\n        }}\n        return R::default();\n    }}\n    with_runtime(|rt| horizon_compat::neo::profiled(rt, hook, f))\n}}\n\n\
+                 pub fn hook_runtime<R: Default>(hook: &'static str, f: impl FnOnce(&mut Rt) -> R) -> R {{\n    if runtime_busy() {{\n        thread_local! {{\n            static TOLD: std::cell::RefCell<Vec<(&'static str, bool)>> = const {{ std::cell::RefCell::new(Vec::new()) }};\n        }}\n        let mut f = Some(f);\n        let at = match horizon_compat::threads::lent_at() {{\n            0 => RUNTIME_AT.with(|at| at.get()),\n            lent => lent,\n        }};\n        let ran = horizon_compat::reenter(at, |rt| f.take().map(|f| f(rt))).flatten();\n        let first = TOLD.with(|t| !t.borrow().contains(&(hook, ran.is_some())) && {{ t.borrow_mut().push((hook, ran.is_some())); true }});\n        if let Some(r) = ran {{\n            if first && Rt::tracing() {{\n                eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; run there\");\n            }}\n            return r;\n        }}\n        if first {{\n            eprintln!(\"{id}: the game ran the {{hook}} hook from inside one of the mod's own calls; skipped\");\n        }}\n        return R::default();\n    }}\n    with_runtime(|rt| horizon_compat::neo::profiled(rt, hook, f))\n}}\n\n\
                  /// A question about the mod's classes and registrations alone (a block's block entity type, an\n\
                  /// item's use duration, a block's state for a placement): the runtime answers it, or the probe\n\
                  /// runtime while the runtime is busy (a block the mod's own code places asks from inside its call).\n\

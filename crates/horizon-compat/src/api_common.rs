@@ -664,6 +664,11 @@ fn duration(rt: &mut Rt, nanos: i128) -> V {
     d
 }
 
+/// A `Duration`'s length in milliseconds.
+pub(crate) fn duration_millis(rt: &Rt, d: V) -> i64 {
+    (duration_nanos(rt, d) / 1_000_000).clamp(0, i128::from(i64::MAX)) as i64
+}
+
 fn duration_nanos(rt: &Rt, d: V) -> i128 {
     i128::from(rt.get_field(d, "$seconds").j()) * 1_000_000_000 + i128::from(rt.get_field(d, "$nanos").i())
 }
@@ -694,6 +699,13 @@ fn is_executor(class: &str) -> bool {
             | SCHEDULED_POOL
             | FORK_JOIN_POOL
     )
+}
+
+/// `d` of the `TimeUnit` `unit` as a length of time; none for a negative one.
+pub(crate) fn unit_duration(rt: &Rt, d: i64, unit: V) -> std::time::Duration {
+    let ordinal = rt.get_field(unit, "$ordinal").i().clamp(0, 6) as usize;
+    let nanos = (i128::from(d.max(0)) * TIME_UNIT_NANOS[ordinal]).min(i128::from(u64::MAX));
+    std::time::Duration::from_nanos(nanos as u64)
 }
 
 /// `d` of `TimeUnit` `from` (an ordinal) in `to`, saturating as `TimeUnit.convert` does.
@@ -2187,8 +2199,19 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         (MONTH, "getValue") => V::I(rt.get_field(a(0), "$ordinal").i() + 1),
         // `TimeUnit.sleep(d)` and its timed waits: a wait as `Thread.sleep` is one (Create
         // Railways Navigator's listener thread sleeps a second between its tasks so).
-        ("java/util/concurrent/TimeUnit", "sleep" | "timedWait" | "timedJoin") => {
-            crate::jsystem::wait(rt);
+        ("java/util/concurrent/TimeUnit", "sleep") => {
+            let time = unit_duration(rt, a(1).j(), a(0));
+            crate::mod_threads::sleep(rt, time);
+            V::Void
+        }
+        ("java/util/concurrent/TimeUnit", "timedWait") => {
+            let time = unit_duration(rt, a(2).j(), a(0));
+            crate::mod_threads::wait_on(rt, a(1), Some(time));
+            V::Void
+        }
+        ("java/util/concurrent/TimeUnit", "timedJoin") => {
+            let time = unit_duration(rt, a(2).j(), a(0));
+            crate::mod_threads::join(rt, a(1), Some(time));
             V::Void
         }
         // `TimeUnit`'s conversions (`MILLISECONDS.toSeconds(d)`, `convert(d, unit)`).
@@ -2404,7 +2427,7 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // thread never runs it inside that code's own call.
         (o, n) if is_executor(o) && is_executor(rt.class_of(a(0))) => match n {
             "execute" => {
-                crate::tasks::later(rt, a(1), crate::tasks::RUN, V::Void);
+                crate::tasks::later_in(rt, a(0), a(1), crate::tasks::RUN, V::Void);
                 V::Void
             }
             "invokeAll" => {
@@ -2456,28 +2479,64 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
             "remove" => V::I(0),
             "submit" => {
                 if desc.starts_with("(Ljava/util/concurrent/Callable;)") {
-                    crate::tasks::later(rt, a(1), crate::tasks::CALL, V::Void)
+                    crate::tasks::later_in(rt, a(0), a(1), crate::tasks::CALL, V::Void)
                 } else {
                     let result = if desc.starts_with("(Ljava/lang/Runnable;Ljava/lang/Object;)") {
                         a(2)
                     } else {
                         V::Void
                     };
-                    crate::tasks::later(rt, a(1), crate::tasks::RUN, result)
+                    crate::tasks::later_in(rt, a(0), a(1), crate::tasks::RUN, result)
                 }
             }
-            "schedule" | "scheduleAtFixedRate" | "scheduleWithFixedDelay" => rt.new_object(SCHEDULED_FUTURE),
+            // Work with a time of its own runs on the pool's thread when it is due, where the
+            // mods have threads ([`crate::tasks::scheduled`]); with none it never runs.
+            "schedule" | "scheduleAtFixedRate" | "scheduleWithFixedDelay" => {
+                let callable = desc.starts_with("(Ljava/util/concurrent/Callable;");
+                let unit = args.last().copied().unwrap_or_default();
+                let ms = |rt: &Rt, d: V| {
+                    unit_duration(rt, d.j(), unit)
+                        .as_millis()
+                        .min(i64::MAX as u128) as i64
+                };
+                let delay = ms(rt, a(2));
+                let period = match n {
+                    "scheduleAtFixedRate" => ms(rt, a(3)).max(1),
+                    "scheduleWithFixedDelay" => -ms(rt, a(3)).max(1),
+                    _ => 0,
+                };
+                let kind = if callable {
+                    crate::tasks::CALL
+                } else {
+                    crate::tasks::RUN
+                };
+                match crate::tasks::scheduled(rt, a(0), SCHEDULED_FUTURE, a(1), kind, delay, period)
+                {
+                    Some(future) => future,
+                    None => rt.new_object(SCHEDULED_FUTURE),
+                }
+            }
             // A pool shut down runs what it was given first, and whoever waits for it to end
-            // waits for that.
+            // waits for that. What its own thread has not begun, `shutdownNow` drops.
             "shutdownNow" => {
                 crate::tasks::run_pending(rt);
+                crate::tasks::stop(rt, a(0));
                 rt.put_field(a(0), "$shutdown", V::I(1));
                 crate::jutil::new_list(rt, Vec::new())
             }
-            "isShutdown" | "isTerminated" => V::I(rt.get_field(a(0), "$shutdown").i()),
+            "isShutdown" => V::I(rt.get_field(a(0), "$shutdown").i()),
+            "isTerminated" => V::I(
+                (rt.get_field(a(0), "$shutdown").i() != 0 && crate::tasks::idle(rt, a(0))) as i32,
+            ),
+            // Until its own thread has nothing left, for the time given.
             "awaitTermination" | "awaitQuiescence" => {
                 crate::tasks::run_pending(rt);
-                V::I(1)
+                let pool = a(0);
+                let until = std::time::Instant::now() + unit_duration(rt, a(1).j(), a(2));
+                let done = crate::mod_threads::wait_until(rt, pool, Some(until), |rt| {
+                    crate::tasks::idle(rt, pool)
+                });
+                V::I(done as i32)
             }
             "shutdown" | "close" => {
                 crate::tasks::run_pending(rt);
@@ -2490,11 +2549,23 @@ pub fn call(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Opt
         // A task that never runs here: not done, not cancelled until asked.
         ("java/util/concurrent/ScheduledFuture" | "java/util/concurrent/Future" | "java/util/concurrent/RunnableScheduledFuture", n) if rt.class_of(a(0)) == SCHEDULED_FUTURE => match n {
             "cancel" => {
+                crate::tasks::cancel(rt, a(0));
                 rt.put_field(a(0), "$cancelled", V::I(1));
                 V::I(1)
             }
             "isCancelled" => V::I(rt.get_field(a(0), "$cancelled").i()),
-            "isDone" => V::I(rt.get_field(a(0), "$cancelled").i()),
+            // Cancelled; or work a pool's thread ran when it was due (work that repeats never
+            // is done).
+            "isDone" => V::I(
+                (rt.get_field(a(0), "$cancelled").i() != 0
+                    || (crate::tasks::was_scheduled(rt, a(0)) && !crate::tasks::pending(rt, a(0))))
+                    as i32,
+            ),
+            "getDelay" => {
+                let left = crate::tasks::delay(rt, a(0)).max(0);
+                let per = unit_duration(rt, 1, a(1)).as_nanos().max(1) as i128;
+                V::J((i128::from(left) * 1_000_000 / per) as i64)
+            }
             _ => return None,
         },
         // A factory of the runtime's own (`Executors.defaultThreadFactory()`, a builder's): a

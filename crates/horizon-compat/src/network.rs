@@ -1116,11 +1116,17 @@ thread_local! {
     /// The messages waiting on this thread's runtime (a server's for its players, a client's
     /// for its server), in the order they were sent.
     static WAITING: std::cell::RefCell<std::collections::VecDeque<Waiting>> = const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
-    /// The number of the last message this thread sent in parts.
-    static SPLIT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// The parts that have come of each message sent in parts, by its sender and number.
     static PARTS: std::cell::RefCell<std::collections::HashMap<(Option<u128>, u32), Vec<Option<Vec<u8>>>>> = std::cell::RefCell::new(std::collections::HashMap::new());
 }
+
+/// The number of the last message sent in parts (by any thread: a sender's are told apart by
+/// it).
+static SPLIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The messages the mods' own threads sent, each with the runtime it is of ([`Rt::address`]):
+/// that runtime's game thread sends them with what waits on it ([`send_waiting`]).
+static HANDED: std::sync::Mutex<Vec<(usize, Waiting)>> = std::sync::Mutex::new(Vec::new());
 
 /// Ticks a message waits at most before it is given up: half a minute (a player who left, a
 /// server that carries no mod messages).
@@ -1172,10 +1178,9 @@ pub fn send_raw(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> b
     if channel.len() > 1024 {
         return false;
     }
-    let number = SPLIT.with(|n| {
-        n.set(n.get().wrapping_add(1));
-        n.get()
-    });
+    let number = SPLIT
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(1);
     let chunks: Vec<&[u8]> = if data.is_empty() {
         vec![data]
     } else {
@@ -1207,7 +1212,10 @@ pub fn send_raw(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> b
 /// level has.
 fn send_whole(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> bool {
     let one = matches!(to, PayloadTarget::Server | PayloadTarget::Player(_));
-    let behind = one && WAITING.with(|w| w.borrow().iter().any(|m| m.to == to));
+    // From a thread of the mods' own a message always waits: for the game's thread, which
+    // sends what waits in the order it was sent ([`send_waiting`]).
+    let own = rt.thread_id() != 0;
+    let behind = own || (one && WAITING.with(|w| w.borrow().iter().any(|m| m.to == to)));
     let sent = !behind
         && rt
             .host_mut()
@@ -1245,6 +1253,28 @@ fn send_whole(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> boo
             .map(|(uuid, _)| PayloadTarget::Player(uuid))
             .collect(),
     };
+    if own {
+        let mut handed = HANDED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if handed.len() + for_whom.len() > MOST_WAITING {
+            return false;
+        }
+        let at = rt.address();
+        for to in for_whom {
+            handed.push((
+                at,
+                Waiting {
+                    to,
+                    channel: channel.to_owned(),
+                    data: data.to_vec(),
+                    ticks: 0,
+                    refused: 0,
+                },
+            ));
+        }
+        return true;
+    }
     let waits = !for_whom.is_empty()
         && WAITING.with(|w| {
             let mut w = w.borrow_mut();
@@ -1279,6 +1309,18 @@ fn send_whole(rt: &mut Rt, to: PayloadTarget, channel: &str, data: &[u8]) -> boo
 /// is given up, so that what waits behind it goes on. One that waited past [`PATIENCE`] is
 /// given up too.
 pub fn send_waiting(rt: &mut Rt) {
+    // What the mods' own threads of this runtime sent since: behind what already waits.
+    if rt.has_threads() {
+        let mut handed = HANDED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !handed.is_empty() {
+            let at = rt.address();
+            let (mine, others): (Vec<_>, Vec<_>) = handed.drain(..).partition(|(of, _)| *of == at);
+            *handed = others;
+            WAITING.with(|w| w.borrow_mut().extend(mine.into_iter().map(|(_, m)| m)));
+        }
+    }
     if WAITING.with(|w| w.borrow().is_empty()) {
         return;
     }

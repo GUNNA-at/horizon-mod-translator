@@ -93,6 +93,12 @@ pub(crate) fn task(rt: &mut Rt, future: V) -> V {
     combinator(rt, "compat:fn/task", vec![future])
 }
 
+/// The `Runnable` the game's own thread is handed for a stage added to `source` while its
+/// outcome was still to come ([`crate::tasks::replay`]): the stage is for the game's executor.
+pub(crate) fn after_task(rt: &mut Rt, source: V, record: V) -> V {
+    combinator(rt, "compat:fn/after", vec![source, record])
+}
+
 /// A method of its argument called with one more, fixed argument (`style ->
 /// style.withColor(colour)`): `key` is the method's.
 pub(crate) fn with(rt: &mut Rt, key: &str, extra: V) -> V {
@@ -295,6 +301,10 @@ fn run(rt: &mut Rt, kind: &str, this: V, key: &'static str, args: &[V]) -> V {
         // The work of a future handed to an executor of the mods' own: run when that runs it.
         "compat:fn/task" => {
             crate::tasks::force(rt, part(0));
+            V::Void
+        }
+        "compat:fn/after" => {
+            crate::tasks::replay(rt, part(0), part(1));
             V::Void
         }
         "compat:fn/bound" => {

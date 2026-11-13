@@ -1044,8 +1044,32 @@ fn client_tasks(rt: &mut Rt) -> V {
     })
 }
 
+/// Whether `executor` is the game's own (the client, a server): what it is given runs on the
+/// game's thread.
+pub(crate) fn game_executor(rt: &Rt, executor: V) -> bool {
+    matches!(
+        rt.class_of(executor),
+        MINECRAFT
+            | "net/minecraft/server/MinecraftServer"
+            | "net/minecraft/client/server/IntegratedServer"
+            | "net/minecraft/server/dedicated/DedicatedServer"
+    )
+}
+
+/// Gives the game's own thread `task` to run when it next comes by its queue
+/// ([`run_client_tasks`]): from a thread of the mods' own, which must not run it itself.
+pub(crate) fn give_game(rt: &mut Rt, task: V) {
+    let queue = client_tasks(rt);
+    crate::api::call(
+        rt,
+        "java/util/List.add.(Ljava/lang/Object;)Z",
+        &[queue, task],
+    );
+}
+
 /// Runs what was given to the client's thread while the mods loaded, once the client has its
-/// resources (as they first load, or at its first tick), each in the order it was given.
+/// resources (as they first load, or at its first tick), each in the order it was given. And
+/// what the mods' own threads gave the game's thread since it last came by.
 pub(crate) fn run_client_tasks(rt: &mut Rt) {
     let Some(&queue) = rt.interned.get("compat:client-tasks") else {
         return;
@@ -1086,7 +1110,13 @@ fn client_calls(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         // the client's thread as a task is run, and the future asks it when it has to wait.
         "submit" if desc.starts_with("(Ljava/util/function/Supplier;)") => {
             let future = crate::tasks::waiting(rt, a(1), crate::tasks::SUPPLY, V::Void);
-            if rt.host().is_none() {
+            // From a thread of the mods' own it waits for the client's, as on a JVM: asked for
+            // there, it is waited for.
+            if rt.thread_id() != 0 {
+                crate::tasks::home(rt, future);
+                let task = crate::functions::task(rt, future);
+                give_game(rt, task);
+            } else if rt.host().is_none() {
                 let task = crate::functions::task(rt, future);
                 let queue = client_tasks(rt);
                 crate::api::call(
@@ -1099,8 +1129,16 @@ fn client_calls(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             future
         }
+        // From a thread of the mods' own, a `submit`'s future waits for the client's thread.
+        "submit" if rt.thread_id() != 0 => {
+            let future = crate::tasks::waiting(rt, a(1), crate::tasks::RUN, V::Void);
+            crate::tasks::home(rt, future);
+            let task = crate::functions::task(rt, future);
+            give_game(rt, task);
+            future
+        }
         "tell" | "execute" | "submit" => {
-            if rt.host().is_none() {
+            if rt.host().is_none() || rt.thread_id() != 0 {
                 let queue = client_tasks(rt);
                 crate::api::call(
                     rt,
@@ -1113,7 +1151,7 @@ fn client_calls(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             }
             if name == "submit" { crate::jutil::completed_future(rt, V::NULL) } else { V::Void }
         }
-        "isSameThread" => V::I(1),
+        "isSameThread" => V::I((rt.thread_id() == 0) as i32),
         _ => return None,
     })
 }

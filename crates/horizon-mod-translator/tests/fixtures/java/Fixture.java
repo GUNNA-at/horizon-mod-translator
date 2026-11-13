@@ -93,6 +93,27 @@ public class Fixture {
         String joined = new java.util.StringJoiner("-", "<", ">").add("a").add("b" + n).toString();
         return box[0] * 31 + box[1] + (task.getName().equals("worker") ? 100 : 0) + (task.isAlive() ? 1000 : 0) + joined.hashCode();
     }
+    // `synchronized` methods and blocks: what they guard runs as it would unguarded, and a monitor is left however its block ends.
+    static class Guarded {
+        private int n;
+        synchronized int add(int d) { n += d; if (d == 13) throw new IllegalStateException("unlucky"); return n; }
+        static synchronized int twice(int x) { return x * 2; }
+        int total() { synchronized (this) { return n; } }
+    }
+    public static int monitors(int k) {
+        Guarded c = new Guarded();
+        Object lock = new Object();
+        int r = 0;
+        for (int i = 0; i < 5; i++) {
+            synchronized (lock) {
+                r += c.add(i + k);
+                synchronized (c) { r ^= Guarded.twice(i); }
+            }
+        }
+        try { synchronized (lock) { c.add(13); } } catch (IllegalStateException e) { r += e.getMessage().length(); }
+        try { synchronized (lock) { int[] none = new int[0]; r += none[k & 3]; } } catch (ArrayIndexOutOfBoundsException e) { r += 7; }
+        return r * 31 + c.total();
+    }
     // Static helpers of the JDK the runtime has no answer of its own for: the JDK's own code stands for them.
     public static long jdkStatics(int n) {
         int[] sorted = {1, 4, 9, 16, 25, 36, 49};

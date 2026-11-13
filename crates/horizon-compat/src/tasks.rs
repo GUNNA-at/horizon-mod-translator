@@ -15,7 +15,15 @@
 //! It runs in the order it was given, as a pool of one thread would run it. What it throws with
 //! nobody asking for its result is told of, as a pool's thread tells of what ends its task, and
 //! kept for whoever asks later.
+//!
+//! Where the mods have threads of their own ([`crate::mod_threads::real`]: in a running game,
+//! not while they load) a pool has one too ([`give`]): its work runs there, beside the game, a
+//! slice at a time, for as long as it takes. Its future is pending meanwhile ([`pending`]):
+//! not done when asked, waited for by whoever must have its value ([`force`]), and a stage
+//! added to it is kept for when it is done ([`after`], [`settle`]). Work with a time of its own
+//! (`schedule`, `scheduleAtFixedRate`) runs there when it is due ([`scheduled`]).
 use crate::{Data, Rt, V};
+use std::time::{Duration, Instant};
 
 const FUTURE: &str = "java/util/concurrent/CompletableFuture";
 const QUEUE: &str = "compat:pool-tasks";
@@ -28,6 +36,35 @@ const RESULT: &str = "$taskResult";
 /// What a future's work threw.
 pub(crate) const FAILED: &str = "$failed";
 pub(crate) const CANCELLED: &str = "$cancelled";
+/// Set on a future whose outcome a thread of the mods' is still to bring: its work is in a
+/// pool's own queue or runs there, or it is a stage after such a future.
+const PENDING: &str = "$pending";
+/// The pool whose queue holds a pending future's work.
+const POOL: &str = "$pool";
+/// The stages added to a future while it was pending: a list of records, each a list of what
+/// to do (a stage's method name, or [`COPY`], [`ALL`], [`ANY`]), the future that stands for
+/// its outcome, and the arguments.
+const AFTER: &str = "$after";
+/// The future a pending stage waits for.
+const AWAITS: &str = "$awaits";
+/// When scheduled work is due ([`clock`]), and how it repeats: every so many milliseconds from
+/// one start to the next (positive), or from one end to the next start (negative).
+const DUE: &str = "$due";
+const PERIOD: &str = "$period";
+/// Work only the game's own thread may run: it was given to the game's executor.
+pub(crate) const HOME: &str = "$home";
+/// A pool's own queue of futures, and the id of its thread.
+const WORK: &str = "$work";
+const WORKER: &str = "$worker";
+/// The pool of work given to none (`CompletableFuture.runAsync(task)`).
+const COMMON: &str = "compat:common-pool";
+/// Records of [`AFTER`] that are no stage: the outcome is copied; one of `allOf`'s; of `anyOf`'s.
+const COPY: &str = "$copy";
+const ALL: &str = "$all";
+const ANY: &str = "$any";
+/// How long a pool's thread stays with nothing to do before it ends (the next work starts
+/// another).
+const IDLE: Duration = Duration::from_secs(30);
 
 /// A `Runnable`.
 pub(crate) const RUN: i32 = 0;
@@ -52,18 +89,280 @@ pub(crate) fn waiting(rt: &mut Rt, work: V, kind: i32, result: V) -> V {
     future
 }
 
-/// Gives a pool `work` (of `kind`) to run later, and the future of it.
+/// Gives a pool `work` (of `kind`) to run later, and the future of it: the common pool.
+#[cfg(test)]
 pub(crate) fn later(rt: &mut Rt, work: V, kind: i32, result: V) -> V {
+    later_in(rt, V::NULL, work, kind, result)
+}
+
+/// Gives `pool` (null: the common one) `work` (of `kind`) to run later, and the future of it.
+pub(crate) fn later_in(rt: &mut Rt, pool: V, work: V, kind: i32, result: V) -> V {
     let future = waiting(rt, work, kind, result);
-    queue(rt, future);
+    give(rt, pool, future);
     future
 }
 
-/// Puts a future whose work waits ([`waiting`]) in the pools' queue.
+/// Puts a future whose work waits ([`waiting`]) in a pool's queue: `pool`'s own, run by its
+/// own thread, where the mods have threads ([`crate::mod_threads::real`]); else the one the
+/// game's thread runs when the mods' code is done ([`at_rest`]).
+pub(crate) fn give(rt: &mut Rt, pool: V, future: V) {
+    if crate::mod_threads::real(rt) && to_worker(rt, pool, future) {
+        return;
+    }
+    queue(rt, future);
+}
+
+/// Puts a future whose work waits ([`waiting`]) in the queue the game's thread runs.
 pub(crate) fn queue(rt: &mut Rt, future: V) {
     let queue = rt.intern(QUEUE.into(), |rt| crate::jutil::new_list(rt, Vec::new()));
-    if let Some(Data::List(l)) = rt.heap.get_mut(queue.r() as usize).map(|o| &mut o.data) {
-        l.push(future);
+    push(rt, queue, future);
+}
+
+fn push(rt: &mut Rt, list: V, v: V) {
+    if let Some(Data::List(l)) = rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data) {
+        l.push(v);
+    }
+}
+
+fn remove(rt: &mut Rt, list: V, v: V) {
+    if let Some(Data::List(l)) = rt.heap.get_mut(list.r() as usize).map(|o| &mut o.data)
+        && let Some(at) = l.iter().position(|x| *x == v)
+    {
+        l.remove(at);
+    }
+}
+
+fn items(rt: &Rt, list: V) -> &[V] {
+    match rt.heap.get(list.r() as usize).map(|o| &o.data) {
+        Some(Data::List(l)) => l,
+        _ => &[],
+    }
+}
+
+/// Milliseconds on a clock that only goes forward, which scheduled work is due by.
+fn clock() -> i64 {
+    epoch().elapsed().as_millis() as i64
+}
+
+fn epoch() -> Instant {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// Whether `future`'s outcome is still to come from a thread of the mods' ([`PENDING`]).
+pub(crate) fn pending(rt: &Rt, future: V) -> bool {
+    future.r() != 0 && rt.get_field(future, PENDING).i() != 0
+}
+
+/// Puts `future` in `pool`'s own queue (null: the common pool's) and sees that the pool's
+/// thread is there to run it. False where no thread is to be had: nothing was done.
+fn to_worker(rt: &mut Rt, pool: V, future: V) -> bool {
+    let pool = if pool.r() == 0 {
+        rt.intern(COMMON.into(), |rt| rt.new_object("java/lang/Object"))
+    } else {
+        pool
+    };
+    let list = match rt.get_field(pool, WORK) {
+        l if l.r() != 0 => l,
+        _ => {
+            let l = crate::jutil::new_list(rt, Vec::new());
+            rt.put_field(pool, WORK, l);
+            l
+        }
+    };
+    push(rt, list, future);
+    rt.put_field(future, PENDING, V::I(1));
+    rt.put_field(future, POOL, pool);
+    let id = match rt.get_field(pool, WORKER) {
+        V::I(n) if n > 0 => n as u32,
+        _ => 0,
+    };
+    if id != 0 && rt.thread_alive(id) {
+        crate::mod_threads::wake(rt, pool, true);
+        return true;
+    }
+    let thread = crate::mod_threads::new_thread(rt, &format!("pool-{}-thread-1", pool.r()));
+    // The thread holds its pool, and the pool its work, while there is any.
+    rt.put_field(thread, POOL, pool);
+    let id = rt.thread_start(thread, Box::new(move |rt| worker(rt, pool)));
+    if id == 0 {
+        remove(rt, list, future);
+        rt.put_field(future, PENDING, V::Void);
+        return false;
+    }
+    rt.put_field(thread, crate::mod_threads::ID, V::I(id as i32));
+    rt.put_field(pool, WORKER, V::I(id as i32));
+    true
+}
+
+/// What a pool's thread does next.
+enum Next {
+    Run(V),
+    /// Nothing is due before then.
+    At(Instant),
+    Nothing,
+}
+
+/// A pool's own thread: runs what its queue holds, in order and when it is due, and waits for
+/// more; with none for [`IDLE`] it ends.
+fn worker(rt: &mut Rt, pool: V) {
+    let mut idle = Instant::now();
+    loop {
+        match next(rt, pool) {
+            Next::Run(future) => {
+                work(rt, future);
+                idle = Instant::now();
+            }
+            Next::At(when) => {
+                rt.thread_wait(pool, Some(when));
+            }
+            Next::Nothing => {
+                if idle.elapsed() >= IDLE {
+                    break;
+                }
+                rt.thread_wait(pool, Some(Instant::now() + IDLE));
+            }
+        }
+        // (An interrupt is a pool's way to stop its thread's work, not the thread.)
+        crate::mod_threads::take_interrupt(rt);
+    }
+    rt.put_field(pool, WORKER, V::I(0));
+}
+
+/// The first work in `pool`'s queue that is due and no thread is in, or when the next is.
+/// What was run or cancelled by another since it was queued leaves the queue here.
+fn next(rt: &mut Rt, pool: V) -> Next {
+    let list = rt.get_field(pool, WORK);
+    let now = clock();
+    let shut = rt.get_field(pool, "$shutdown").i() != 0;
+    let mut earliest: Option<i64> = None;
+    for future in items(rt, list).to_vec() {
+        if rt.get_field(future, RUNNING).i() != 0 {
+            continue;
+        }
+        if !waits(rt, future) {
+            remove(rt, list, future);
+            continue;
+        }
+        // A pool shut down repeats nothing more.
+        if shut && rt.get_field(future, PERIOD).j() != 0 {
+            cancel(rt, future);
+            continue;
+        }
+        match rt.get_field(future, DUE) {
+            V::J(due) if due > now => earliest = Some(earliest.map_or(due, |e| e.min(due))),
+            _ => return Next::Run(future),
+        }
+    }
+    match earliest {
+        Some(due) => Next::At(epoch() + Duration::from_millis(due.max(0) as u64)),
+        None => Next::Nothing,
+    }
+}
+
+/// A pool's thread runs `future`'s work: for as long as it takes, the game going on beside it.
+/// Work that repeats is due again after; any other is done, and whoever waits for it hears.
+fn work(rt: &mut Rt, future: V) {
+    let task = rt.get_field(future, TASK);
+    rt.put_field(future, RUNNING, V::I(1));
+    // The calls nothing maps are counted for this work alone, as for a listener.
+    rt.hook_misses = 0;
+    rt.hook_first_miss = None;
+    crate::api::new_piece();
+    run_timed(rt, future, task);
+    rt.put_field(future, RUNNING, V::Void);
+    rt.report_thrown("work given to a pool");
+    // (A lock its code never gave back is no other work's to carry.)
+    rt.threads.locks = 0;
+    let period = rt.get_field(future, PERIOD).j();
+    let over = rt.get_field(future, FAILED).r() != 0 || rt.get_field(future, CANCELLED).i() != 0;
+    if period != 0 && !over {
+        let due = if period > 0 {
+            (rt.get_field(future, DUE).j() + period).max(clock())
+        } else {
+            clock() - period
+        };
+        rt.put_field(future, DUE, V::J(due));
+        rt.put_field(future, TASK, task);
+        return;
+    }
+    take_out(rt, future);
+    settle(rt, future);
+}
+
+/// Takes a pending future out of its pool's queue.
+fn take_out(rt: &mut Rt, future: V) {
+    let pool = rt.get_field(future, POOL);
+    if pool.r() != 0 {
+        let list = rt.get_field(pool, WORK);
+        remove(rt, list, future);
+    }
+}
+
+/// Gives `pool` work to run on its own thread when it is due: after `delay` milliseconds, and
+/// with `period` again and again ([`PERIOD`]). The object of class `class` that stands for it
+/// (a `ScheduledFuture`); None where the mods have no threads, and nothing ever runs it.
+pub(crate) fn scheduled(
+    rt: &mut Rt,
+    pool: V,
+    class: &'static str,
+    work: V,
+    kind: i32,
+    delay: i64,
+    period: i64,
+) -> Option<V> {
+    if !crate::mod_threads::real(rt) || work.r() == 0 {
+        return None;
+    }
+    let future = rt.new_object(class);
+    rt.put_field(future, TASK, work);
+    rt.put_field(future, KIND, V::I(kind));
+    rt.put_field(future, DUE, V::J(clock() + delay.max(0)));
+    rt.put_field(future, PERIOD, V::J(period));
+    to_worker(rt, pool, future).then_some(future)
+}
+
+/// Whether `future` is work a pool's thread runs when it is due ([`scheduled`]).
+pub(crate) fn was_scheduled(rt: &Rt, future: V) -> bool {
+    matches!(rt.get_field(future, DUE), V::J(_))
+}
+
+/// How long until scheduled work is due, in milliseconds (`ScheduledFuture.getDelay`).
+pub(crate) fn delay(rt: &Rt, future: V) -> i64 {
+    match rt.get_field(future, DUE) {
+        V::J(due) => due - clock(),
+        _ => 0,
+    }
+}
+
+/// Whether `pool`'s own thread has nothing to run and nothing waiting (`isTerminated`,
+/// `awaitTermination`).
+pub(crate) fn idle(rt: &Rt, pool: V) -> bool {
+    let list = rt.get_field(pool, WORK);
+    items(rt, list).is_empty()
+}
+
+/// `shutdownNow`: what `pool`'s thread has not begun never runs, and the work it is in is
+/// interrupted.
+pub(crate) fn stop(rt: &mut Rt, pool: V) {
+    let list = rt.get_field(pool, WORK);
+    for future in items(rt, list).to_vec() {
+        if rt.get_field(future, RUNNING).i() == 0 {
+            cancel(rt, future);
+        } else if rt.get_field(future, PERIOD).j() != 0 {
+            rt.put_field(future, CANCELLED, V::I(1));
+        }
+    }
+    if let Some(thread) = worker_thread(rt, pool) {
+        crate::mod_threads::interrupt(rt, thread);
+    }
+}
+
+/// The `Thread` of `pool`'s own thread, while it has one.
+fn worker_thread(rt: &Rt, pool: V) -> Option<V> {
+    match rt.get_field(pool, WORKER) {
+        V::I(n) if n > 0 => rt.thread_object_of(n as u32),
+        _ => None,
     }
 }
 
@@ -72,10 +371,15 @@ pub(crate) fn waits(rt: &Rt, future: V) -> bool {
     future.r() != 0 && rt.get_field(future, TASK).r() != 0
 }
 
-/// Runs `future`'s work if it still waits: something is asked of the future, which a pool's
-/// thread would have answered by now. What the work throws is the future's ([`FAILED`]), not
-/// thrown at whoever asked.
+/// Something is asked of `future` that needs its outcome. Work that still waits runs now,
+/// where it is asked, as a pool's thread would have run it by now; what a thread of the mods'
+/// is still to bring ([`pending`]) is waited for ([`wait_for`]). What the work throws is the
+/// future's ([`FAILED`]), not thrown at whoever asked.
 pub(crate) fn force(rt: &mut Rt, future: V) {
+    if pending(rt, future) {
+        wait_for(rt, future, None);
+        return;
+    }
     if !waits(rt, future) {
         return;
     }
@@ -85,14 +389,253 @@ pub(crate) fn force(rt: &mut Rt, future: V) {
     }
 }
 
-/// `Future.cancel` of work that has not run: it never does. False for work that ran.
+/// Whether the thread that runs is the one to run pending `future`'s work, where it stands
+/// and now: no thread has begun it, it is due, and it is this thread's own to run. That is the
+/// game's thread for what was given to the game's executor ([`HOME`]), and a pool's own thread
+/// for what waits in its queue behind the work it is in: asking for that, it would wait for
+/// itself (a pool here has one thread, whatever it was made with). Any other work a pool's
+/// thread has is waited for: whoever asks is not the one it was given to.
+fn takeable(rt: &Rt, future: V) -> bool {
+    if !waits(rt, future)
+        || rt.get_field(future, RUNNING).i() != 0
+        || matches!(rt.get_field(future, DUE), V::J(_))
+    {
+        return false;
+    }
+    let me = rt.thread_id();
+    if rt.get_field(future, HOME).i() != 0 {
+        return me == 0;
+    }
+    let pool = rt.get_field(future, POOL);
+    me != 0 && rt.get_field(pool, WORKER) == V::I(me as i32)
+}
+
+/// Whether pending `future` is done; if not, what this thread can do towards it here is done
+/// first: the work it waits for that no thread has begun is run where it is asked for, as one
+/// more thread of its pool would run it (a pool's one thread that asks for work queued behind
+/// its own would wait for itself).
+fn advance(rt: &mut Rt, future: V) -> bool {
+    for _ in 0..64 {
+        if !pending(rt, future) {
+            return true;
+        }
+        // The first of the futures it waits for, one after another, that is not done.
+        let mut at = future;
+        for _ in 0..64 {
+            let source = rt.get_field(at, AWAITS);
+            if !pending(rt, source) {
+                break;
+            }
+            at = source;
+        }
+        if !takeable(rt, at) {
+            return false;
+        }
+        take_out(rt, at);
+        run(rt, at);
+        if rt.thrown.take().is_some() {
+            rt.unwinding.clear();
+        }
+        settle(rt, at);
+    }
+    !pending(rt, future)
+}
+
+/// Waits for pending `future`'s outcome, until `until` at the latest (none: for as long as it
+/// takes on a thread of the mods' own, and as long as the game can stand still on its own:
+/// [`crate::mod_threads::wait_until`]). Whether it is done.
+pub(crate) fn wait_for(rt: &mut Rt, future: V, until: Option<Instant>) -> bool {
+    if advance(rt, future) {
+        return true;
+    }
+    crate::mod_threads::wait_until(rt, future, until, |rt| advance(rt, future))
+}
+
+/// `Future.cancel`: work that has not begun never runs, work that repeats is not due again,
+/// and a stage whose future is still to come is given up. False for what is done or runs.
 pub(crate) fn cancel(rt: &mut Rt, future: V) -> bool {
-    if !waits(rt, future) {
+    let running = rt.get_field(future, RUNNING).i() != 0;
+    if running && rt.get_field(future, PERIOD).j() != 0 {
+        rt.put_field(future, CANCELLED, V::I(1));
+        return true;
+    }
+    let stage = pending(rt, future) && rt.get_field(future, AWAITS).r() != 0;
+    if running || !(waits(rt, future) || stage) {
         return false;
     }
     rt.put_field(future, TASK, V::Void);
     rt.put_field(future, CANCELLED, V::I(1));
+    if pending(rt, future) {
+        take_out(rt, future);
+        settle(rt, future);
+    }
     true
+}
+
+/// A pending future has its outcome (its work ran, it was cancelled or completed by hand):
+/// whoever waits for it is woken, and the stages added to it meanwhile run now, in the order
+/// they were added, as a JVM runs them on the thread that completes it. One whose own future
+/// is still to come (it gave a pool more work) hands that on when it is there.
+pub(crate) fn settle(rt: &mut Rt, future: V) {
+    if !pending(rt, future) {
+        return;
+    }
+    rt.put_field(future, PENDING, V::Void);
+    rt.put_field(future, AWAITS, V::Void);
+    crate::mod_threads::wake(rt, future, true);
+    let after = rt.get_field(future, AFTER);
+    if after.r() == 0 {
+        return;
+    }
+    // (The list holds each record while its stage runs.)
+    let mut at = 0;
+    while let Some(&record) = items(rt, after).get(at) {
+        at += 1;
+        // A stage for the game's own executor is the game's thread's to run.
+        let parts = items(rt, record);
+        let to_game = rt.thread_id() != 0
+            && parts
+                .first()
+                .and_then(|n| rt.str_of(*n))
+                .is_some_and(|n| n.ends_with("Async"))
+            && parts
+                .iter()
+                .skip(3)
+                .any(|e| crate::screens::game_executor(rt, *e));
+        if to_game {
+            let task = crate::functions::after_task(rt, future, record);
+            crate::screens::give_game(rt, task);
+        } else {
+            replay(rt, future, record);
+        }
+    }
+    rt.put_field(future, AFTER, V::Void);
+}
+
+/// Runs one record of [`AFTER`] for `source`, which is done.
+pub(crate) fn replay(rt: &mut Rt, source: V, record: V) {
+    let parts = items(rt, record).to_vec();
+    let (Some(what), Some(&stage)) = (parts.first().and_then(|n| rt.str_of(*n)), parts.get(1))
+    else {
+        return;
+    };
+    let what = what.to_owned();
+    match what.as_str() {
+        COPY => link(rt, source, stage),
+        ALL => {
+            let all = crate::jutil::elements(rt, parts.get(2).copied().unwrap_or_default());
+            if pending(rt, stage) && !all.iter().any(|f| pending(rt, *f)) {
+                // The first failure among them is the whole's.
+                let failed = all
+                    .iter()
+                    .map(|f| rt.get_field(*f, FAILED))
+                    .find(|e| e.r() != 0);
+                match failed {
+                    Some(e) => rt.put_field(stage, FAILED, e),
+                    None => rt.put_field(stage, "$value", V::NULL),
+                }
+                settle(rt, stage);
+            }
+        }
+        ANY => {
+            if pending(rt, stage) {
+                link(rt, source, stage);
+            }
+        }
+        name => {
+            let made = crate::jutil::future_stage(rt, name, &parts[2..]);
+            if rt.thrown.is_some() {
+                rt.report_thrown("a stage after work given to a pool");
+            }
+            match made {
+                Some(made) if made.r() != 0 => link(rt, made, stage),
+                _ => {
+                    rt.put_field(stage, "$value", V::NULL);
+                    settle(rt, stage);
+                }
+            }
+        }
+    }
+}
+
+/// `stage` takes `from`'s outcome: now when it is there, else when it is.
+fn link(rt: &mut Rt, from: V, stage: V) {
+    if from == stage || !pending(rt, stage) {
+        return;
+    }
+    if pending(rt, from) {
+        let what = rt.string(COPY);
+        let record = crate::jutil::new_list(rt, vec![what, stage]);
+        add_after(rt, from, record);
+        rt.put_field(stage, AWAITS, from);
+        return;
+    }
+    for field in ["$value", FAILED, CANCELLED] {
+        let v = rt.get_field(from, field);
+        rt.put_field(stage, field, v);
+    }
+    settle(rt, stage);
+}
+
+fn add_after(rt: &mut Rt, source: V, record: V) {
+    let list = match rt.get_field(source, AFTER) {
+        l if l.r() != 0 => l,
+        _ => {
+            let l = crate::jutil::new_list(rt, Vec::new());
+            rt.put_field(source, AFTER, l);
+            l
+        }
+    };
+    push(rt, list, record);
+}
+
+/// A stage (`name`, with all its arguments) added to `source`, which is pending: the future
+/// that stands for the stage's own, done when `source` is and the stage has run ([`settle`]).
+pub(crate) fn after(rt: &mut Rt, source: V, name: &str, args: &[V]) -> V {
+    let stage = rt.new_object(FUTURE);
+    rt.put_field(stage, PENDING, V::I(1));
+    rt.put_field(stage, AWAITS, source);
+    let mut record = vec![rt.string(name), stage];
+    record.extend_from_slice(args);
+    let record = crate::jutil::new_list(rt, record);
+    add_after(rt, source, record);
+    stage
+}
+
+/// `allOf` (`any`: `anyOf`) of futures some of which are pending: the future done when they
+/// all are (when the first is).
+pub(crate) fn after_all(rt: &mut Rt, futures: V, any: bool) -> V {
+    let stage = rt.new_object(FUTURE);
+    rt.put_field(stage, PENDING, V::I(1));
+    let what = rt.string(if any { ANY } else { ALL });
+    for f in crate::jutil::elements(rt, futures) {
+        if pending(rt, f) {
+            let record = crate::jutil::new_list(rt, vec![what, stage, futures]);
+            add_after(rt, f, record);
+            rt.put_field(stage, AWAITS, f);
+        }
+    }
+    stage
+}
+
+/// `future`'s work was given to the game's own executor from a thread of the mods': the
+/// game's thread runs it, and its outcome is pending until then.
+pub(crate) fn home(rt: &mut Rt, future: V) {
+    rt.put_field(future, PENDING, V::I(1));
+    rt.put_field(future, HOME, V::I(1));
+}
+
+/// A future completed by hand while it was pending (`complete`, `completeExceptionally`): its
+/// work, if no thread has begun it, never runs, and it is done with what it was given.
+pub(crate) fn completed_by_hand(rt: &mut Rt, future: V) {
+    if !pending(rt, future) {
+        return;
+    }
+    if rt.get_field(future, RUNNING).i() == 0 {
+        rt.put_field(future, TASK, V::Void);
+        take_out(rt, future);
+    }
+    settle(rt, future);
 }
 
 /// Set on a future while its work runs: a round of the queue begun inside that work (the work
@@ -135,7 +678,8 @@ fn run(rt: &mut Rt, future: V) {
     let work = rt.get_field(future, TASK);
     // (The runtime's own functions are no kind of a mod's work: each stands for many.)
     let kind = rt.class_of(work);
-    let timed = in_world(rt) && !kind.starts_with("compat:");
+    // (On a thread of the mods' own it holds nothing up.)
+    let timed = rt.thread_id() == 0 && in_world(rt) && !kind.starts_with("compat:");
     if timed && OVERRAN.with(|o| o.borrow().get(kind).copied().unwrap_or(0)) >= OVERRUNS {
         cancel(rt, future);
         return;
@@ -187,6 +731,10 @@ fn run_timed(rt: &mut Rt, future: V, work: V) {
             }
         }
     };
+    // (Completed by hand while its work ran: that stays its outcome.)
+    if !matches!(rt.get_field(future, "$value"), V::Void) || rt.get_field(future, FAILED).r() != 0 {
+        return;
+    }
     match rt.thrown {
         Some(thrown) => {
             let held = completion_of(rt, thrown);
@@ -228,16 +776,10 @@ fn round(rt: &mut Rt) -> bool {
     let Some(&queue) = rt.interned.get(QUEUE) else {
         return false;
     };
-    fn list(rt: &Rt, queue: V) -> &[V] {
-        match rt.heap.get(queue.r() as usize).map(|o| &o.data) {
-            Some(Data::List(l)) => l,
-            _ => &[],
-        }
-    }
-    let waiting = list(rt, queue).len();
+    let waiting = items(rt, queue).len();
     let mut ran = false;
     for _ in 0..waiting {
-        let next = list(rt, queue)
+        let next = items(rt, queue)
             .iter()
             .copied()
             .find(|f| rt.get_field(*f, RUNNING).i() == 0);
@@ -257,11 +799,7 @@ fn round(rt: &mut Rt) -> bool {
             rt.report_thrown("work given to a pool");
             ran = true;
         }
-        if let Some(Data::List(l)) = rt.heap.get_mut(queue.r() as usize).map(|o| &mut o.data)
-            && let Some(at) = l.iter().position(|f| *f == future)
-        {
-            l.remove(at);
-        }
+        remove(rt, queue, future);
     }
     ran
 }
@@ -601,6 +1139,204 @@ mod tests {
         // Nothing is left in the queue.
         assert!(!round(&mut rt));
         assert!(rt.thrown.is_none());
+    }
+
+    /// The mods' code of the tests below, where the pools have threads of their own.
+    fn pool_lambda(rt: &mut Rt, id: u32, args: &[V]) -> Option<V> {
+        Some(match id {
+            // A supplier that takes its time, then tells which thread ran it.
+            1 => {
+                call(rt, "java/lang/Thread.sleep.(J)V", &[V::J(20)]);
+                V::I(rt.thread_id() as i32)
+            }
+            // A function of that: one more.
+            2 => V::I(args.last().map_or(-100, |v| v.i()) + 1),
+            // Counts the latch kept for it down.
+            3 => {
+                let latch = rt.interned.get("t:latch").copied().unwrap_or_default();
+                call(rt, COUNT_DOWN, &[latch]);
+                V::Void
+            }
+            // Work that takes far longer than a window may be held: the mods' code as the
+            // linked runtime enters it, its calls into the runtime through the core.
+            4 => rt.entered(
+                |rt| {
+                    let began = std::time::Instant::now();
+                    while began.elapsed() < Duration::from_millis(60) && rt.thrown.is_none() {
+                        horizon_compat_core::api::call(rt, "java/lang/Math.abs.(I)I", &[V::I(-1)]);
+                    }
+                    let latch = rt.interned.get("t:latch").copied().unwrap_or_default();
+                    call(rt, COUNT_DOWN, &[latch]);
+                    V::Void
+                },
+                |_| V::Void,
+            ),
+            _ => V::Void,
+        })
+    }
+
+    /// A runtime in a running game: its thread lends it, and its pools have threads.
+    fn threaded() -> Rt {
+        let mut rt = runtime();
+        rt.vcall = Some(vcall);
+        rt.lambda_call = Some(pool_lambda);
+        rt.threads.lends = 1;
+        rt
+    }
+
+    const IS_DONE: &str = "java/util/concurrent/Future.isDone.()Z";
+    const JOIN: &str = "java/util/concurrent/CompletableFuture.join.()Ljava/lang/Object;";
+    const AWAIT: &str =
+        "java/util/concurrent/CountDownLatch.await.(JLjava/util/concurrent/TimeUnit;)Z";
+
+    /// In a running game a pool's work runs on the pool's own thread: its future is not done
+    /// when the work is given, nor is a stage added to it; who asks for the stage's value
+    /// waits for both, and the work ran on a thread that is not the game's.
+    #[test]
+    fn a_pools_work_runs_on_its_own_thread_and_its_stages_after_it() {
+        let mut rt = threaded();
+        let pool = call(&mut rt, POOL, &[]);
+        let supplier = rt.lambda_id("t/Work.get", 1, Vec::new());
+        let plus_one = rt.lambda_id("t/Work.next", 2, Vec::new());
+        let future = call(
+            &mut rt,
+            "java/util/concurrent/CompletableFuture.supplyAsync.(Ljava/util/function/Supplier;Ljava/util/concurrent/Executor;)Ljava/util/concurrent/CompletableFuture;",
+            &[supplier, pool],
+        );
+        assert!(pending(&rt, future));
+        assert_eq!(call(&mut rt, IS_DONE, &[future]), V::I(0));
+        let stage = call(
+            &mut rt,
+            "java/util/concurrent/CompletableFuture.thenApply.(Ljava/util/function/Function;)Ljava/util/concurrent/CompletableFuture;",
+            &[future, plus_one],
+        );
+        assert_eq!(call(&mut rt, IS_DONE, &[stage]), V::I(0));
+        assert_eq!(
+            call(&mut rt, IS_DONE, &[future]),
+            V::I(0),
+            "asking the stage ran nothing"
+        );
+        let began = std::time::Instant::now();
+        let value = call(&mut rt, JOIN, &[stage]);
+        assert!(
+            began.elapsed() >= Duration::from_millis(18),
+            "{:?}",
+            began.elapsed()
+        );
+        let ran_on = call(&mut rt, JOIN, &[future]);
+        assert!(ran_on.i() > 0, "on the pool's thread: {ran_on:?}");
+        assert_eq!(value, V::I(ran_on.i() + 1));
+        assert_eq!(call(&mut rt, IS_DONE, &[stage]), V::I(1));
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
+    }
+
+    /// Work that takes long holds no window: it is not stopped for its time, however often it
+    /// is given, and the game's thread goes on between its slices.
+    #[test]
+    fn long_work_on_a_pools_thread_is_not_stopped() {
+        let mut rt = threaded();
+        rt.interned.insert("side:client".into(), V::I(1));
+        assert!(in_world(&rt));
+        WORLD_TIME.set(Duration::from_millis(1));
+        let pool = call(&mut rt, POOL, &[]);
+        let latch = rt.new_object("java/util/concurrent/CountDownLatch");
+        call(
+            &mut rt,
+            "java/util/concurrent/CountDownLatch.<init>.(I)V",
+            &[latch, V::I(3)],
+        );
+        rt.interned.insert("t:latch".into(), latch);
+        for _ in 0..3 {
+            let work = rt.lambda_id("t/Map.draw", 4, Vec::new());
+            call(&mut rt, EXECUTE, &[pool, work]);
+        }
+        // The game's thread between two frames: a slice for them each time, and no more.
+        let began = std::time::Instant::now();
+        let mut longest = Duration::ZERO;
+        while call(&mut rt, COUNT, &[latch]) != V::J(0) && began.elapsed() < Duration::from_secs(20)
+        {
+            let lent = std::time::Instant::now();
+            rt.run_threads(Duration::from_millis(3));
+            longest = longest.max(lent.elapsed());
+        }
+        assert_eq!(call(&mut rt, COUNT, &[latch]), V::J(0), "all of it ran");
+        assert!(
+            longest < Duration::from_millis(40),
+            "the game was held {longest:?}"
+        );
+        assert!(rt.thrown.is_none());
+    }
+
+    /// Work with a time of its own runs when it is due, again and again, until it is cancelled.
+    #[test]
+    fn scheduled_work_runs_when_it_is_due_until_cancelled() {
+        let mut rt = threaded();
+        let pool = call(
+            &mut rt,
+            "java/util/concurrent/Executors.newScheduledThreadPool.(I)Ljava/util/concurrent/ScheduledExecutorService;",
+            &[V::I(1)],
+        );
+        let latch = rt.new_object("java/util/concurrent/CountDownLatch");
+        call(
+            &mut rt,
+            "java/util/concurrent/CountDownLatch.<init>.(I)V",
+            &[latch, V::I(3)],
+        );
+        rt.interned.insert("t:latch".into(), latch);
+        let tick = rt.lambda_id("t/Tick.run", 3, Vec::new());
+        let ms = crate::api::get_static(&mut rt, "java/util/concurrent/TimeUnit.MILLISECONDS");
+        let seconds = crate::api::get_static(&mut rt, "java/util/concurrent/TimeUnit.SECONDS");
+        let began = std::time::Instant::now();
+        let ticking = call(
+            &mut rt,
+            "java/util/concurrent/ScheduledExecutorService.scheduleAtFixedRate.(Ljava/lang/Runnable;JJLjava/util/concurrent/TimeUnit;)Ljava/util/concurrent/ScheduledFuture;",
+            &[pool, tick, V::J(10), V::J(10), ms],
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/concurrent/ScheduledFuture.isDone.()Z",
+                &[ticking]
+            ),
+            V::I(0)
+        );
+        assert_eq!(call(&mut rt, AWAIT, &[latch, V::J(5), seconds]), V::I(1));
+        assert!(
+            began.elapsed() >= Duration::from_millis(28),
+            "three periods: {:?}",
+            began.elapsed()
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/concurrent/ScheduledFuture.cancel.(Z)Z",
+                &[ticking, V::I(0)]
+            ),
+            V::I(1)
+        );
+        assert_eq!(
+            call(
+                &mut rt,
+                "java/util/concurrent/ScheduledFuture.isDone.()Z",
+                &[ticking]
+            ),
+            V::I(1)
+        );
+        // Cancelled, it runs no more: the pool's thread has nothing left.
+        for _ in 0..10 {
+            rt.run_threads(Duration::from_millis(3));
+            std::thread::sleep(Duration::from_millis(3));
+        }
+        assert!(idle(&rt, pool));
+        assert!(
+            rt.thrown.is_none() && rt.unmapped.is_empty(),
+            "{:?}",
+            rt.unmapped
+        );
     }
 
     /// Work that gives the pool more work: the pool runs that after it, in the order given,

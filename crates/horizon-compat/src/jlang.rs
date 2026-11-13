@@ -62,6 +62,29 @@ fn frames(rt: &mut Rt, known: &[(&str, &str)]) -> V {
 /// whose code asked, which the translated call tells ([`Rt::caller_class`]), then the unknown.
 /// Kotlin's null checks find themselves in it by their class's name and take the frame after
 /// for the caller's: without their class in it they looked past its end.
+/// Where the thread that runs keeps its value of thread-local `local`: the object, and the
+/// names of the value and of whether it was set. On the game's own thread the thread-local
+/// itself; on a thread of the mods' own that thread's `Thread`, under the thread-local's own
+/// number (given at its first use there), so each thread has its own and loses it when it ends.
+fn thread_local_slot(rt: &mut Rt, local: V) -> (V, &'static str, &'static str) {
+    let me = rt.thread_object();
+    if me.r() == 0 {
+        return (local, "$value", "$set");
+    }
+    static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+    let serial = match rt.get_field(local, "$serial") {
+        V::J(n) if n > 0 => n,
+        _ => {
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            rt.put_field(local, "$serial", V::J(n));
+            n
+        }
+    };
+    let value = rt.static_key(&format!("$local{serial}"));
+    let set = rt.static_key(&format!("$localSet{serial}"));
+    (me, value, set)
+}
+
 pub(crate) fn thread_frames(rt: &mut Rt) -> V {
     let asked = std::mem::replace(&mut rt.caller_class, "java/lang/Object");
     if asked == "java/lang/Object" {
@@ -1509,8 +1532,10 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         "java/lang/String" | "java/lang/CharSequence" => string(rt, name, desc, &ks, args),
         "java/lang/StringBuilder" | "java/lang/StringBuffer" | "java/lang/AbstractStringBuilder" => builder(rt, name, desc, &ks, args),
         "java/lang/Integer" | "java/lang/Long" | "java/lang/Short" | "java/lang/Byte" | "java/lang/Double" | "java/lang/Float" | "java/lang/Number" => number(rt, owner, name, desc, &ks, args),
-        // One runtime runs on one thread, so a thread-local is one value, made by its supplier on
-        // the first `get` (`ThreadLocal.withInitial(ArrayList::new)`).
+        // A thread-local is a value for each thread: one for the game's own, kept by the
+        // thread-local itself, and one for each thread of the mods' own that asks, kept by that
+        // thread ([`thread_local_slot`]). Made on the first `get`, by its supplier
+        // (`ThreadLocal.withInitial(ArrayList::new)`) or by a subclass's own `initialValue()`.
         "java/lang/ThreadLocal" | "java/lang/InheritableThreadLocal" => Some(match name {
             "withInitial" => {
                 let t = rt.new_object("java/lang/ThreadLocal");
@@ -1518,22 +1543,41 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 t
             }
             "<init>" => V::Void,
+            "initialValue" => V::NULL,
             "get" => {
-                if rt.get_field(a(0), "$set").i() == 0 {
+                let (holder, value, set) = thread_local_slot(rt, a(0));
+                if rt.get_field(holder, set).i() == 0 {
                     let supplier = rt.get_field(a(0), "$supplier");
-                    let v = if supplier.r() != 0 { rt.call_functional("java/util/function/Supplier.get.()Ljava/lang/Object;", supplier, &[]) } else { V::NULL };
-                    rt.put_field(a(0), "$value", v);
-                    rt.put_field(a(0), "$set", V::I(1));
+                    let v = if supplier.r() != 0 {
+                        rt.call_functional(
+                            "java/util/function/Supplier.get.()Ljava/lang/Object;",
+                            supplier,
+                            &[],
+                        )
+                    } else if rt.cid(a(0)) != 0 {
+                        rt.call_functional(
+                            "java/lang/ThreadLocal.initialValue.()Ljava/lang/Object;",
+                            a(0),
+                            &[],
+                        )
+                    } else {
+                        V::NULL
+                    };
+                    rt.put_field(holder, value, v);
+                    rt.put_field(holder, set, V::I(1));
                 }
-                rt.get_field(a(0), "$value")
+                rt.get_field(holder, value)
             }
             "set" => {
-                rt.put_field(a(0), "$value", a(1));
-                rt.put_field(a(0), "$set", V::I(1));
+                let (holder, value, set) = thread_local_slot(rt, a(0));
+                rt.put_field(holder, value, a(1));
+                rt.put_field(holder, set, V::I(1));
                 V::Void
             }
             "remove" => {
-                rt.put_field(a(0), "$set", V::I(0));
+                let (holder, value, set) = thread_local_slot(rt, a(0));
+                rt.put_field(holder, value, V::NULL);
+                rt.put_field(holder, set, V::I(0));
                 V::Void
             }
             _ => return None,
@@ -1744,10 +1788,23 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 for_each(rt, a(0), a(1), desc);
                 V::Void
             }
-            // One thread runs a runtime: nobody waits on a monitor to be woken, and a wait
-            // on one is over as any wait is ([`crate::jsystem::wait`]).
-            "notify" | "notifyAll" => V::Void,
-            "wait" => crate::jsystem::wait(rt),
+            // A monitor's wait and wake ([`crate::mod_threads`]): a thread of the mods' own
+            // waits until it is woken; on the game's thread, with none of theirs to wake it,
+            // a wait is over as any wait is ([`crate::jsystem::wait`]).
+            "notify" | "notifyAll" => {
+                crate::mod_threads::wake(rt, a(0), name == "notifyAll");
+                V::Void
+            }
+            // `wait()`, `wait(millis)`, `wait(millis, nanos)`: no time, or none given, is for
+            // as long as it takes.
+            "wait" => {
+                let time = match a(1) {
+                    V::J(ms) if ms > 0 => Some(std::time::Duration::from_millis(ms as u64)),
+                    _ => None,
+                };
+                crate::mod_threads::wait_on(rt, a(0), time);
+                V::Void
+            }
             "clone" => object_clone(rt, a(0)),
             _ => return None,
         }),
