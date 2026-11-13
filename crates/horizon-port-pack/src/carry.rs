@@ -145,6 +145,9 @@ pub struct Report {
     pub vanilla_tag_additions: BTreeMap<String, Vec<String>>,
     /// The mod's items in 1.21.1's `#minecraft:dyeable`, each given 26.3's `crafting_dye` recipe.
     pub dye_recipes: Vec<String>,
+    /// The game's own models and textures the mod's models name that 26.3 lacks, copied from the
+    /// player's 1.21.1 game under the mod's name ([`Pack::game`]): the names they have now.
+    pub vanilla_kept: Vec<String>,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -157,7 +160,14 @@ pub struct Pack<'a> {
     pub loaded: &'a dyn Fn(&str) -> bool,
     /// Every mod of the pack by id, ported or not: their namespaces are theirs.
     pub mods: &'a dyn Fn(&str) -> bool,
+    /// The player's 1.21.1 game's resources, a file by its path (`assets/minecraft/...`): what the
+    /// mod's models name of them and 26.3 lacks is copied from there
+    /// (`horizon_mod_translator::vanilla_assets`). None: nothing is copied.
+    pub game: Option<&'a GameFiles>,
 }
+
+/// [`Pack::game`]'s reader (`horizon_mod_translator::vanilla_assets::player_game`).
+pub type GameFiles = std::cell::RefCell<Box<dyn FnMut(&str) -> Option<Vec<u8>>>>;
 
 /// Vanilla blocks by their sorted property names.
 const TEMPLATES: &[(&str, &str)] = &[
@@ -1700,6 +1710,15 @@ pub fn carry(
     let owned: Vec<String> = owned.iter().map(|n| n.to_string()).collect();
     let owned: Vec<&str> = owned.iter().map(String::as_str).collect();
     unregistered_recipes(&inside, id, &owned, &mut report)?;
+    // What the mod's models name of 1.21.1's game that 26.3 lacks (a spawn egg's template, with its
+    // two textures), from the player's own.
+    if let Some(game) = pack.game {
+        let mut game = game.borrow_mut();
+        for ns in &owned {
+            let kept = horizon_mod_translator::vanilla_assets::keep_dropped(&inside, ns, &mut **game);
+            report.vanilla_kept.extend(kept);
+        }
+    }
     let q = |s: &str| toml::Value::String(s.to_owned()).to_string();
     let name = if info.name.is_empty() { id } else { &info.name };
     let mut manifest = format!(
@@ -1957,6 +1976,7 @@ mod tests {
                 &Pack {
                     loaded: &|_| true,
                     mods: &|_| false,
+                    game: None,
                 },
                 &BTreeMap::new(),
             )
@@ -2142,6 +2162,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|_| false,
+            game: None,
         };
         carry(jar, &info, out, None, &|_| true, &pack, &BTreeMap::new())
     }
@@ -2719,6 +2740,7 @@ mod tests {
             &Pack {
                 loaded: &|_| true,
                 mods: &|_| false,
+                game: None,
             },
             &BTreeMap::new(),
         )
@@ -2822,7 +2844,7 @@ mod tests {
         zip.finish().unwrap();
         let info = crate::jar::read(&jar).unwrap();
         let out = dir.join("work/mods/gem");
-        let pack = Pack { loaded: &|_| true, mods: &|_| false };
+        let pack = Pack { loaded: &|_| true, mods: &|_| false, game: None };
         carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
         let tag = |path: &str| -> Value {
             serde_json::from_slice(&fs::read(out.join(format!("carry/data/c/tags/item/{path}.json"))).unwrap()).unwrap()
@@ -2865,7 +2887,7 @@ mod tests {
         ]);
         let info = crate::jar::read(&jar).unwrap();
         let out = dir.join("work/mods/crops");
-        let pack = Pack { loaded: &|_| true, mods: &|_| false };
+        let pack = Pack { loaded: &|_| true, mods: &|_| false, game: None };
         let report = carry(&jar, &info, &out, None, &|_| true, &pack, &conventions).unwrap();
         let tags = out.join("carry/data/c/tags/worldgen/biome");
         let tag = |path: &str| -> Value { serde_json::from_slice(&fs::read(tags.join(format!("{path}.json"))).unwrap()).unwrap() };
@@ -3003,6 +3025,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|m| m == "cristel",
+            game: None,
         };
         let report = carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
         assert_eq!(report.namespaces, ["kaisyn", "towers_fx", "towers_wg"]);
@@ -3045,6 +3068,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(theirs, json!({"replace": true, "values": ["towers:pie"]}));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A 1.21.1 spawn egg's model stands on the game's template, which 26.3 lacks: carried
+    /// with the player's 1.21.1 game at hand, the mod has the template and its textures under
+    /// its own name and the egg names them; with no such game, the model is carried as it was.
+    #[test]
+    fn a_spawn_eggs_model_takes_its_template_from_the_players_game() {
+        let dir =
+            std::env::temp_dir().join(format!("horizon-port-pack-egg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let jar = dir.join("zoo-1.0.jar");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        for (name, text) in [
+            (
+                "META-INF/neoforge.mods.toml",
+                "license = \"MIT\"\n[[mods]]\nmodId = \"zoo\"\nversion = \"1.0\"\n",
+            ),
+            (
+                "assets/zoo/models/item/seal_spawn_egg.json",
+                r#"{"parent": "item/template_spawn_egg"}"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        let info = crate::jar::read(&jar).unwrap();
+        let game: GameFiles = std::cell::RefCell::new(Box::new(|name: &str| {
+            let text = match name {
+                "assets/minecraft/models/item/template_spawn_egg.json" => {
+                    r#"{"parent": "item/generated", "textures": {"layer0": "item/spawn_egg", "layer1": "item/spawn_egg_overlay"}}"#
+                }
+                "assets/minecraft/textures/item/spawn_egg.png" => "egg",
+                "assets/minecraft/textures/item/spawn_egg_overlay.png" => "spots",
+                _ => return None,
+            };
+            Some(text.as_bytes().to_vec())
+        }));
+        let model = |out: &Path| -> Value {
+            let path = out.join("carry/assets/zoo/models/item/seal_spawn_egg.json");
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        };
+        let with = dir.join("with");
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+            game: Some(&game),
+        };
+        let report = carry(&jar, &info, &with, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            report.vanilla_kept,
+            [
+                "zoo:item/minecraft_1_21_template_spawn_egg",
+                "zoo:item/minecraft_1_21_spawn_egg",
+                "zoo:item/minecraft_1_21_spawn_egg_overlay",
+            ]
+        );
+        assert_eq!(
+            model(&with),
+            json!({"parent": "zoo:item/minecraft_1_21_template_spawn_egg"})
+        );
+        let carried = with.join("carry");
+        let texture = carried.join("assets/zoo/textures/item/minecraft_1_21_spawn_egg.png");
+        assert_eq!(fs::read(texture).unwrap(), b"egg");
+        // The game takes the content mod with the copies in it.
+        let package = horizon_mods::Package::read(&carried).unwrap();
+        let content = horizon_mods::Content::read(&carried, &package.manifest).unwrap();
+        for file in [
+            "assets/zoo/models/item/minecraft_1_21_template_spawn_egg.json",
+            "assets/zoo/textures/item/minecraft_1_21_spawn_egg_overlay.png",
+        ] {
+            assert!(content.files.contains(&file.to_owned()), "{file}");
+        }
+        let without = dir.join("without");
+        let pack = Pack {
+            loaded: &|_| true,
+            mods: &|_| false,
+            game: None,
+        };
+        let report =
+            carry(&jar, &info, &without, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
+        assert!(report.vanilla_kept.is_empty());
+        assert_eq!(
+            model(&without),
+            json!({"parent": "item/template_spawn_egg"})
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3091,6 +3203,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|_| false,
+            game: None,
         };
         let facts: Facts = serde_json::from_value(json!({"blocks": {}, "items": {
             "gem:shard": {"class": "net.minecraft.world.item.Item", "max_stack_size": 64, "rarity": "common"}}}))
@@ -3171,6 +3284,7 @@ mod tests {
         let pack = Pack {
             loaded: &|m| m == "gem",
             mods: &|_| false,
+            game: None,
         };
         let facts: Facts = serde_json::from_value(json!({"blocks": {}, "items": {},
             "recipes": {"gem:on": {"type": "minecraft:stonecutting"}}}))
@@ -3251,6 +3365,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|_| false,
+            game: None,
         };
         let out = dir.join("out");
         let report = carry(
@@ -3306,6 +3421,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|_| false,
+            game: None,
         };
         let report = carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
         assert_eq!(report.copied, 0);
@@ -3374,6 +3490,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|_| false,
+            game: None,
         };
         let report = carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
         let read = |file: &str| -> Option<Value> {
@@ -3472,6 +3589,7 @@ mod tests {
         let pack = Pack {
             loaded: &|_| true,
             mods: &|_| false,
+            game: None,
         };
         carry(&jar, &info, &out, None, &|_| true, &pack, &BTreeMap::new()).unwrap();
         let model: Value = serde_json::from_slice(

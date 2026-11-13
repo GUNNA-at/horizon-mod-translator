@@ -142,9 +142,13 @@ pub fn check_with(
         return done(check);
     }
     let alone = |m: &str| m == info.mod_id || m == "minecraft";
+    let game: carry::GameFiles = std::cell::RefCell::new(Box::new(
+        horizon_mod_translator::vanilla_assets::player_game(),
+    ));
     let pack = carry::Pack {
         loaded: &alone,
         mods: &alone,
+        game: Some(&game),
     };
     let report = match carry::carry(jar_path, &info, out, None, &|_| true, &pack, conventions) {
         Ok(r) => r,

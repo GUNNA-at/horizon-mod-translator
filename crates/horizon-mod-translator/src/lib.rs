@@ -178,6 +178,24 @@ pub fn find_game_jars() -> Option<Vec<std::path::PathBuf>> {
     places.iter().find_map(|p| game_jars_in(p))
 }
 
+/// The jar of the game's own resources (its `assets/` and `data/`) in the player's NeoForge
+/// 1.21.1 install: `client-<stamp>-extra.jar`, beside the game's classes ([`find_game_jars`]).
+/// What a 1.21.1 mod's models name of the game's and 26.3 no longer has is read from it
+/// ([`vanilla_assets`]).
+pub fn find_game_assets() -> Option<std::path::PathBuf> {
+    game_assets_of(&find_game_jars()?)
+}
+
+/// [`find_game_assets`] for an install's jars as [`game_jars_in`] lists them.
+pub fn game_assets_of(jars: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let classes = jars.iter().find(|j| {
+        let name = j.file_name().unwrap_or_default().to_string_lossy();
+        name.starts_with("client-") && name.ends_with("-srg.jar")
+    })?;
+    let name = classes.file_name()?.to_string_lossy().replace("-srg.jar", "-extra.jar");
+    Some(classes.with_file_name(name)).filter(|extra| extra.is_file())
+}
+
 /// The Java runtime's classes that are plain code over what the runtime models, with no state of
 /// the machine's behind them: a class by name (with those nested in it) or every class of a
 /// package (`/` at the end). The translator takes them from the player's own Java runtime
@@ -1749,6 +1767,7 @@ pub mod codegen;
 pub mod insn;
 pub mod props;
 pub mod split;
+pub mod vanilla_assets;
 pub mod weave;
 
 /// A registration the mod's code makes: registry and name.

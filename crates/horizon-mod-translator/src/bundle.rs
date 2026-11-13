@@ -5945,6 +5945,8 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
     let registered = crate::registrations(classes);
     let props = crate::props::block_properties(classes);
     let owners: Vec<std::collections::HashSet<String>> = members[1..].iter().map(|(j, _)| crate::class_names(j)).collect();
+    // The player's 1.21.1 game's resources, for what the mods' models name of them.
+    let mut game = crate::vanilla_assets::player_game();
     for (n, (j, ns)) in members.iter().enumerate() {
         let blocks: Vec<String> = registered
             .iter()
@@ -5985,6 +5987,8 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
         }
         // A mod without blocks still has its look (lang, screens' textures) for its client code.
         copy_assets(j, ns, &content)?;
+        // What its models name of 1.21.1's game that 26.3 lacks, from the player's own.
+        crate::vanilla_assets::keep_dropped(&content, ns, &mut game);
         if content.is_dir() {
             put(content.join("horizon-mod.toml"), manifest(ns, &program.metadata)).map_err(|e| e.to_string())?;
         }
@@ -6002,6 +6006,7 @@ pub fn write_group(jars: &[&Path], classes: &[ClassFile], out: &Path, runtime: O
             if let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) {
                 let item_models = copy_namespace_assets(&mut zip, &nid, &content);
                 write_item_definitions(&nid, &item_models, &content)?;
+                crate::vanilla_assets::keep_dropped(&content, &nid, &mut game);
             }
             if content.is_dir() {
                 put(content.join("horizon-mod.toml"), manifest(&nid, &program.metadata)).map_err(|e| e.to_string())?;

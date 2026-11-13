@@ -520,6 +520,8 @@ struct ItemFile {
     components: BTreeMap<String, serde_json::Value>,
     crafting_remainder: Option<String>,
     place_block: Option<String>,
+    #[serde(default)]
+    tints: Vec<u32>,
 }
 
 /// An item the mod adds: a vanilla template item's components under a new
@@ -540,7 +542,15 @@ pub struct Item {
     /// An ordinary `BlockItem` binding to a vanilla block or this namespace's block.
     /// Components still come from `template`; placement retains this item's identity.
     pub place_block: Option<String>,
+    /// The colours of its model's tint layers, RGB, by tint index: what a 1.21.1 mod's code gives
+    /// (`ItemColors`; a spawn egg's two colours, which every such egg's model is drawn in). The
+    /// game writes them into the item's definition as constant tints, where the definition is
+    /// one model without tints of its own.
+    pub tints: Vec<u32>,
 }
+
+/// Tint layers an item's definition may be given ([`Item::tints`]).
+pub const MAX_ITEM_TINTS: usize = 8;
 
 /// `MobEffectCategory`.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -980,6 +990,7 @@ impl Content {
             components: file.components,
             crafting_remainder: file.crafting_remainder,
             place_block: file.place_block,
+            tints: file.tints,
         };
         check_item(&item).map_err(|e| format!("{id}: {e}"))?;
         if self.blocks.iter().any(|b| b.item && b.id == id) {
@@ -1184,6 +1195,7 @@ impl Content {
                 components: file.components,
                 crafting_remainder: file.crafting_remainder,
                 place_block: file.place_block,
+                tints: file.tints,
             };
             check_item(&item).map_err(|e| format!("{name}: {e}"))?;
             if !ids.insert(item.id.clone()) {
@@ -1477,6 +1489,11 @@ fn check_item(item: &Item) -> Result<(), String> {
                 && !vanilla_id(block))
     {
         return Err("place_block is a vanilla block or a block in this item's namespace".into());
+    }
+    if item.tints.len() > MAX_ITEM_TINTS || item.tints.iter().any(|c| *c > 0xFF_FFFF) {
+        return Err(format!(
+            "tints are at most {MAX_ITEM_TINTS} colours, each 0x000000 to 0xFFFFFF"
+        ));
     }
     check_components(&item.components, &["max_stack_size", "rarity"])
 }
@@ -3225,6 +3242,11 @@ capabilities = ["registries"]
         assert_eq!(c.blocks[0].template, "minecraft:glass");
         assert_eq!(c.blocks[0].default_state["axis"], "y");
         assert_eq!(c.items[0].max_stack_size, Some(1));
+        assert!(c.items[0].tints.is_empty());
+        // A spawn egg's two colours, as its constructor took them.
+        c.declare_item("ruby:golem_spawn_egg", r#"{"template": "minecraft:stick", "tints": [1118481, 16777215]}"#).unwrap();
+        assert_eq!(c.items[1].tints, [0x11_1111, 0xFF_FFFF]);
+        assert!(c.leave_out("ruby:golem_spawn_egg"));
         // Another mod's id, a block's item again, or what a file couldn't hold either.
         for (id, json, item) in [
             ("minecraft:shaft", r#"{"template": "minecraft:stone"}"#, false),
@@ -3233,6 +3255,9 @@ capabilities = ["registries"]
             ("ruby:press", r#"{"template": "create:casing"}"#, false),
             ("ruby:press", r#"{"template": "minecraft:stone", "speed": 1}"#, false),
             ("ruby:gear", r#"{"template": "minecraft:stick", "max_stack_size": 100}"#, true),
+            // A colour with an alpha, or more layers than a definition is given.
+            ("ruby:egg", r#"{"template": "minecraft:stick", "tints": [4294967295]}"#, true),
+            ("ruby:egg", r#"{"template": "minecraft:stick", "tints": [1, 2, 3, 4, 5, 6, 7, 8, 9]}"#, true),
         ] {
             let r = if item { c.declare_item(id, json) } else { c.declare_block(id, json) };
             assert!(r.is_err(), "{id} {json}");

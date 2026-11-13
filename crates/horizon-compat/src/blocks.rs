@@ -3766,6 +3766,12 @@ pub fn item_declarations(rt: &mut Rt) -> Vec<(String, String)> {
             if !components.is_empty() {
                 fields.push(format!("\"components\": {{{}}}", components.join(", ")));
             }
+            // A spawn egg's two colours, as its constructor took them: 1.21.1 draws every egg's
+            // model in them (its two layers, by `SpawnEggItem.getColor(layer)`), and the game
+            // makes them the item's tints.
+            if let (V::I(background), V::I(highlight)) = (rt.get_field(i, "backgroundColor"), rt.get_field(i, "highlightColor")) {
+                fields.push(format!("\"tints\": [{}, {}]", background & 0xFF_FFFF, highlight & 0xFF_FFFF));
+            }
             (name, format!("{{{}}}", fields.join(", ")))
         })
         .collect()

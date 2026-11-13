@@ -1165,6 +1165,10 @@ mod tests {
             ),
             (0x11_2233, 0x44_5566)
         );
+        // And the game is told them with the item: its model's two layers are drawn in them.
+        let declared = crate::blocks::item_declarations(&mut rt);
+        let egg_declared: Vec<&str> = declared.iter().filter(|(id, _)| id == "test:cart_spawn_egg").map(|(_, json)| json.as_str()).collect();
+        assert_eq!(egg_declared, [r#"{"template": "minecraft:stick", "tints": [1122867, 4478310]}"#]);
 
         let cow = api::get_static(&mut rt, "net/minecraft/world/entity/EntityType.COW");
         let set = "net/minecraft/world/item/ItemStack.set.(Lnet/minecraft/core/component/DataComponentType;Ljava/lang/Object;)Ljava/lang/Object;";

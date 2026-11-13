@@ -3217,6 +3217,22 @@ pub fn build(base: &Path, mods: &[ContentMod], out: &Path) -> Result<Vec<String>
             merge_atlas(vanilla.as_deref(), sources, file)?.as_bytes(),
         )?;
     }
+    // The colours a mod's code gives an item's tint layers (a spawn egg's two): constant tints of
+    // the item's definition.
+    for m in mods {
+        for item in m.content.items.iter().filter(|i| !i.tints.is_empty()) {
+            let Some((ns, path)) = item.id.split_once(':') else {
+                continue;
+            };
+            let file = format!("assets/{ns}/items/{path}.json");
+            let tinted = fs::read_to_string(out.join(&file))
+                .ok()
+                .and_then(|text| tinted_definition(&text, &item.tints));
+            if let Some(tinted) = tinted {
+                overlay.write(&file, tinted.as_bytes())?;
+            }
+        }
+    }
     // A tag naming an id nobody registers fails as a whole in vanilla, and
     // carried-over mods name blocks left out or other mods' ids: such
     // entries are dropped instead, so the rest of the tag holds.
@@ -3643,6 +3659,25 @@ fn is_tag_file(file: &str) -> bool {
         .strip_prefix("data/")
         .and_then(|rest| rest.split('/').nth(1));
     third == Some("tags") && file.ends_with(".json")
+}
+
+/// An item definition (`assets/<ns>/items/<id>.json`) with `tints` (RGB, by tint index) as its
+/// model's constant tints. None where it is not one plain model (a `select` or a `condition`
+/// draws several, and whose layers the colours are is not said), has tints of its own, or isn't
+/// a definition.
+fn tinted_definition(text: &str, tints: &[u32]) -> Option<String> {
+    let mut doc: serde_json::Value = serde_json::from_str(text).ok()?;
+    let model = doc.get_mut("model")?.as_object_mut()?;
+    let plain = matches!(
+        model.get("type").and_then(|t| t.as_str()),
+        Some("minecraft:model" | "model")
+    );
+    if !plain || model.contains_key("tints") {
+        return None;
+    }
+    let constant = |c: &u32| serde_json::json!({"type": "minecraft:constant", "value": c});
+    model.insert("tints".into(), tints.iter().map(constant).collect());
+    serde_json::to_string_pretty(&doc).ok()
 }
 
 /// An atlas definition, `assets/<ns>/atlases/<atlas>.json`.

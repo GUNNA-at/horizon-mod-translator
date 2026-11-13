@@ -179,9 +179,13 @@ pub fn carry(
     });
     let shared = shared_namespaces(claims, log);
     let in_pack = |m: &str| in_pack.contains(m) || shared.contains(m);
+    let game: carry::GameFiles = std::cell::RefCell::new(Box::new(
+        horizon_mod_translator::vanilla_assets::player_game(),
+    ));
     let pack = carry::Pack {
         loaded: &loaded,
         mods: &in_pack,
+        game: Some(&game),
     };
     let mut done = 0;
     for r in &records {

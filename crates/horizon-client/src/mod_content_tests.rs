@@ -2430,6 +2430,54 @@ fn atlas_additions_merge_after_the_bases_sources() {
     let _ = fs::remove_dir_all(&scratch);
 }
 
+/// The colours a mod's code gives an item (a 1.21.1 spawn egg's two, which its model's two layers
+/// are drawn in) are its definition's constant tints in the root, each layer its own; an item
+/// whose definition picks among models, or has tints already, keeps its file.
+#[test]
+fn a_content_root_tints_an_item_by_the_colours_its_code_gave() {
+    let Some(base) = prepared() else {
+        return;
+    };
+    let scratch = std::env::temp_dir().join(format!("horizon-mod-item-tints-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    let plain = r#"{"model": {"type": "minecraft:model", "model": "zoo:item/seal_spawn_egg"}}"#;
+    let picked = r#"{"model": {"type": "minecraft:select", "property": "minecraft:display_context", "cases": [], "fallback": {"type": "minecraft:model", "model": "zoo:item/net"}}}"#;
+    let own = r#"{"model": {"type": "minecraft:model", "model": "zoo:item/cap", "tints": [{"type": "minecraft:dye", "default": 255}]}}"#;
+    let tinted = r#"{"template": "minecraft:stick", "tints": [1118481, 16777215]}"#;
+    let m = folder_mod(
+        &scratch.join("zoo"),
+        &[
+            ("horizon-mod.toml", &manifest("zoo", "")),
+            ("data/zoo/horizon/item/seal_spawn_egg.json", tinted),
+            ("data/zoo/horizon/item/net.json", tinted),
+            ("data/zoo/horizon/item/cap.json", tinted),
+            ("data/zoo/horizon/item/fish.json", r#"{"template": "minecraft:stick"}"#),
+            ("assets/zoo/items/seal_spawn_egg.json", plain),
+            ("assets/zoo/items/net.json", picked),
+            ("assets/zoo/items/cap.json", own),
+            ("assets/zoo/items/fish.json", plain),
+        ],
+    );
+    let root = scratch.join("root");
+    build(&base, &[m], &root).unwrap();
+    let definition = |item: &str| -> serde_json::Value {
+        let path = root.join(format!("assets/zoo/items/{item}.json"));
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    };
+    assert_eq!(
+        definition("seal_spawn_egg"),
+        serde_json::json!({"model": {"type": "minecraft:model", "model": "zoo:item/seal_spawn_egg", "tints": [
+            {"type": "minecraft:constant", "value": 0x11_1111},
+            {"type": "minecraft:constant", "value": 0xFF_FFFF},
+        ]}})
+    );
+    for (item, as_written) in [("net", picked), ("cap", own), ("fish", plain)] {
+        let written: serde_json::Value = serde_json::from_str(as_written).unwrap();
+        assert_eq!(definition(item), written, "{item}");
+    }
+    let _ = fs::remove_dir_all(&scratch);
+}
+
 /// A mod's `assets/minecraft/atlases/blocks.json` adds its sources after vanilla's.
 #[test]
 fn a_content_root_appends_a_mods_atlas_sources() {
