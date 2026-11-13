@@ -611,10 +611,15 @@ pub fn installed_mods(home: &Path) -> Result<PathBuf, String> {
     installed_mods_into(home, &root().join("installed.incoming"))
 }
 
+/// In a translated mod's folder: the ids the translator gave its classes, kept for the next
+/// translation into the folder (`horizon_mod_translator::bundle::IDS`). No source of the build.
+const TRANSLATION_IDS: &str = "ids.txt";
+
 /// The files of the mod folder `dir` a build takes, by their paths in it: its sources, manifests
 /// and data, the files a registry bundle may carry (`horizon_mods::index::native::allowed`). Any
 /// other file, or a link, is an error. The translator's content mods (`content/`, `content-<id>/`),
-/// which [`add_java`] moves to `horizon-mods/`, are left out.
+/// which [`add_java`] moves to `horizon-mods/`, and its own notes ([`TRANSLATION_IDS`]) are left
+/// out.
 fn sources(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     let mut out = Vec::new();
     let mut todo = vec![String::new()];
@@ -637,6 +642,8 @@ fn sources(dir: &Path) -> Result<Vec<(String, PathBuf)>, String> {
                 if !(rel.is_empty() && (name == "content" || name.starts_with("content-"))) {
                     todo.push(path);
                 }
+            } else if kind.is_file() && path == TRANSLATION_IDS {
+                // The translator's, not the build's.
             } else if kind.is_file() && horizon_mods::index::native::allowed(&path) {
                 out.push((path, entry.path()));
             } else {

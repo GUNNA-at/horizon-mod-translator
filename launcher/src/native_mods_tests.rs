@@ -635,6 +635,8 @@ fn installed_mods_are_the_checked_files_of_those_turned_on() {
     fs::write(at.join("code-waddles-0/src/lib.rs"), "pub fn f() {}").unwrap();
     fs::create_dir_all(at.join("content/assets")).unwrap();
     fs::write(at.join("content/assets/waddles.png"), b"png").unwrap();
+    // The ids the translator gave the mod's classes, which it keeps beside the bundle.
+    fs::write(at.join("ids.txt"), "waddles/Penguin 7\n").unwrap();
     assert!(installed_mods(&home).is_err(), "off until turned on");
     crate::browser::java::set_enabled(&home, "waddles_translated", true).unwrap();
     let out = installed_mods(&home).unwrap();
@@ -644,6 +646,10 @@ fn installed_mods_are_the_checked_files_of_those_turned_on() {
     let copy = out.join("waddles_translated");
     assert!(copy.join("code-waddles-0/src/lib.rs").is_file());
     assert!(!copy.join("content").exists());
+    assert!(
+        !copy.join("ids.txt").exists(),
+        "the translator's notes are no source"
+    );
     // Up to date once built: the Mods page reads what a build of it records.
     assert_eq!(
         crate::native_status::enabled(&home),
