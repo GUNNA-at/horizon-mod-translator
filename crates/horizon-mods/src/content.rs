@@ -1803,7 +1803,7 @@ capabilities = ["registries"]
             property: String::new(),
             properties: vec![],
             values: BTreeMap::new(),
-            default: Some(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]; 17]),
+            default: Some(vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]; MAX_SHAPE_BOXES + 1]),
         };
         assert!(oversized.check().is_err());
         let mut nonfinite = oversized;
@@ -3141,6 +3141,168 @@ capabilities = ["registries"]
             "assets\\ruby\\a",
         ] {
             assert!(check_path(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn blocks_copy_a_vanilla_blocks_properties_and_may_not_collide() {
+        let block = |properties: &str| {
+            let text = format!(r#"{{"template": "minecraft:stone", "properties": {properties}}}"#);
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/reed.json", text.as_bytes())];
+            hmod("copy", MANIFEST_TEXT, files).map(|c| c.blocks[0].properties.clone())
+        };
+        // A wild plant: tall grass's properties, nothing in its way; its own hardness still wins.
+        let p = block(r#"{"copy": "minecraft:tall_grass", "collision": false, "hardness": 0.5}"#).unwrap();
+        assert_eq!(p.copy.as_deref(), Some("minecraft:tall_grass"));
+        assert_eq!((p.collision, p.hardness), (Some(false), Some(0.5)));
+        // Unset: the template's.
+        let p = block("{}").unwrap();
+        assert_eq!((p.copy, p.collision), (None, None));
+        // Only a vanilla block is copied.
+        let e = block(r#"{"copy": "ruby:reed"}"#).unwrap_err();
+        assert!(e.contains("copy"), "{e}");
+    }
+
+    #[test]
+    fn blocks_declare_what_tints_their_models() {
+        let own = r#""state_properties": {"power": {"type": "enum", "values": ["0", "1", "2"]}}"#;
+        let block = |tints: &str| {
+            let text = format!(
+                r#"{{"template": "minecraft:stone", {own}, "properties": {{"tints": {tints}}}}}"#
+            );
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/rail.json", text.as_bytes())];
+            hmod("tints", MANIFEST_TEXT, files)
+        };
+        let tints = |c: Result<Content, String>| c.unwrap().blocks[0].properties.tints.clone();
+        let state = |v: &str| [("power".to_owned(), v.to_owned())];
+        // Leaves: the biome's foliage colour at every index.
+        let all = tints(block(r#"["foliage"]"#)).unwrap();
+        assert_eq!(all.sources(&state("0")), [TintSource::Foliage]);
+        // A wire: its colour by power, untinted where the declaration lists no value.
+        let by_power = tints(block(
+            r#"{"property": "power", "values": {"1": [16711680], "2": ["grass", 255]}}"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            by_power.sources(&state("1")),
+            [TintSource::Constant(0xFF_0000)]
+        );
+        assert_eq!(
+            by_power.sources(&state("2")),
+            [TintSource::Grass, TintSource::Constant(0x00_00FF)]
+        );
+        assert!(by_power.sources(&state("0")).is_empty());
+        // An unknown source, a colour past 0xRRGGBB, a property that isn't the block's own or a
+        // value it doesn't have.
+        for bad in [
+            r#"["sky"]"#,
+            r#"[16777216]"#,
+            r#"{"property": "lit", "values": {"true": ["grass"]}}"#,
+            r#"{"property": "power", "values": {"9": ["grass"]}}"#,
+        ] {
+            assert!(block(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn code_declares_blocks_and_items_as_files_do() {
+        // A native mod's registrations, declared at startup: checked as files, replacing one of
+        // the same id.
+        let files: &[(&str, &[u8])] = &[(
+            "data/ruby/horizon/block/shaft.json",
+            br#"{"template": "minecraft:stone"}"#,
+        )];
+        let mut c = hmod("declared", MANIFEST_TEXT, files).unwrap();
+        c.declare_block(
+            "ruby:shaft",
+            r#"{"template": "minecraft:glass", "state_properties": {"axis": {"type": "enum", "values": ["x", "y", "z"]}}, "default_state": {"axis": "y"}}"#,
+        )
+        .unwrap();
+        c.declare_block("ruby:cogwheel", r#"{"template": "minecraft:stone", "item": false}"#).unwrap();
+        c.declare_item("ruby:wrench", r#"{"template": "minecraft:stick", "max_stack_size": 1}"#).unwrap();
+        let ids: Vec<&str> = c.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["ruby:shaft", "ruby:cogwheel"]);
+        assert_eq!(c.blocks[0].template, "minecraft:glass");
+        assert_eq!(c.blocks[0].default_state["axis"], "y");
+        assert_eq!(c.items[0].max_stack_size, Some(1));
+        // Another mod's id, a block's item again, or what a file couldn't hold either.
+        for (id, json, item) in [
+            ("minecraft:shaft", r#"{"template": "minecraft:stone"}"#, false),
+            ("ruby:wrench", r#"{"template": "minecraft:stone"}"#, false),
+            ("ruby:shaft", r#"{"template": "minecraft:stick"}"#, true),
+            ("ruby:press", r#"{"template": "create:casing"}"#, false),
+            ("ruby:press", r#"{"template": "minecraft:stone", "speed": 1}"#, false),
+            ("ruby:gear", r#"{"template": "minecraft:stick", "max_stack_size": 100}"#, true),
+        ] {
+            let r = if item { c.declare_item(id, json) } else { c.declare_block(id, json) };
+            assert!(r.is_err(), "{id} {json}");
+        }
+        assert_eq!(c.blocks.len(), 2);
+        assert_eq!(c.items.len(), 1);
+    }
+
+    #[test]
+    fn code_declares_effects_as_files_do() {
+        let files: &[(&str, &[u8])] = &[(
+            "data/ruby/horizon/mob_effect/glow.json",
+            br#"{"category": "beneficial", "color": 16777215}"#,
+        )];
+        let mut c = hmod("declared-effects", MANIFEST_TEXT, files).unwrap();
+        c.declare_effect("ruby:glow", EffectCategory::Harmful, 0x3366ff).unwrap();
+        c.declare_effect("ruby:comfort", EffectCategory::Beneficial, 14545909).unwrap();
+        let effects: Vec<(&str, EffectCategory, u32)> = c.effects.iter().map(|e| (e.id.as_str(), e.category, e.color)).collect();
+        assert_eq!(effects, [("ruby:glow", EffectCategory::Harmful, 0x3366ff), ("ruby:comfort", EffectCategory::Beneficial, 14545909)]);
+        // Another mod's id, or a colour no file could hold.
+        assert!(c.declare_effect("minecraft:glow", EffectCategory::Neutral, 0).is_err());
+        assert!(c.declare_effect("ruby:bright", EffectCategory::Neutral, 0x100_0000).is_err());
+        assert_eq!(c.effects.len(), 2);
+    }
+
+    #[test]
+    fn only_what_code_declared_is_left_out() {
+        let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/casing.json", br#"{"template": "minecraft:stone"}"#)];
+        let mut c = hmod("leave-out", MANIFEST_TEXT, files).unwrap();
+        c.declare_block("ruby:shaft", r#"{"template": "minecraft:glass"}"#).unwrap();
+        c.declare_item("ruby:wrench", r#"{"template": "minecraft:stick"}"#).unwrap();
+        // A block its files declare stays (its mod is refused, as before); the code's go one by one.
+        assert!(!c.leave_out("ruby:casing"));
+        assert!(c.leave_out("ruby:shaft"));
+        assert!(c.leave_out("ruby:wrench"));
+        assert!(!c.leave_out("ruby:shaft"));
+        let ids: Vec<&str> = c.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, ["ruby:casing"]);
+        assert!(c.items.is_empty());
+    }
+
+    #[test]
+    fn blocks_say_which_states_their_renderer_draws_instead_of_the_chunk() {
+        let own = r#""state_properties": {"running": {"type": "boolean"}}"#;
+        let block = |properties: &str| {
+            let text = format!(
+                r#"{{"template": "minecraft:stone", {own}, "properties": {properties}}}"#
+            );
+            let files: &[(&str, &[u8])] = &[("data/ruby/horizon/block/shaft.json", text.as_bytes())];
+            hmod("render-shape-states", MANIFEST_TEXT, files)
+                .map(|c| c.blocks[0].properties.clone())
+        };
+        let state = |v: &str| [("running".to_owned(), v.to_owned())];
+        // Drawn by its renderer only while it runs, as its template otherwise.
+        let p = block(
+            r#"{"render_shape_states": {"shape": "INVISIBLE", "property": "running", "values": ["true"]}}"#,
+        )
+        .unwrap();
+        let states = p.render_shape_states.unwrap();
+        assert_eq!(states.shape, RenderShape::Invisible);
+        assert!(states.applies(&state("true")) && !states.applies(&state("false")));
+        assert_eq!(p.render_shape, None);
+        // A property that isn't the block's own, no value, a value it doesn't have.
+        for bad in [
+            r#"{"render_shape_states": {"shape": "INVISIBLE", "property": "lit", "values": ["true"]}}"#,
+            r#"{"render_shape_states": {"shape": "INVISIBLE", "property": "running", "values": []}}"#,
+            r#"{"render_shape_states": {"shape": "INVISIBLE", "property": "running", "values": ["on"]}}"#,
+            r#"{"render_shape_states": {"shape": "invisible", "property": "running", "values": ["true"]}}"#,
+        ] {
+            assert!(block(bad).is_err(), "{bad}");
         }
     }
 }

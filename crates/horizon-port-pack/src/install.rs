@@ -296,6 +296,11 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 /// tag, its foods in Create's `upright_on_belt`), which a content mod may add to without owning
 /// the namespace. A file the content mod has stays; another namespace's other files stay out
 /// (the translated manifest claims none).
+///
+/// The mod's own data the carry-over set aside (`outside/data/<id>/` beside it) comes too: recipes
+/// of the mod's own types and of types the game doesn't have, and those for the blocks a content
+/// port leaves out, are nothing a content mod alone can use, but a translated mod has its code
+/// for them and declares those blocks itself.
 fn merge_data(carry: &Path, content: &Path, id: &str) {
     let mut namespaces: Vec<String> = fs::read_dir(carry.join("data"))
         .into_iter()
@@ -306,21 +311,29 @@ fn merge_data(carry: &Path, content: &Path, id: &str) {
         .collect();
     namespaces.sort();
     for ns in &namespaces {
-        let from = carry.join("data").join(ns);
-        for rel in files_under(&from) {
-            let wanted = if ns == id { !rel.starts_with("horizon") } else { rel.starts_with("tags") };
-            if !wanted {
-                continue;
-            }
-            let target = content.join("data").join(ns).join(&rel);
-            if target.exists() {
-                continue;
-            }
-            if let Some(parent) = target.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let _ = fs::copy(from.join(&rel), &target);
+        merge_namespace(&carry.join("data").join(ns), content, ns, ns == id);
+    }
+    if let Some(aside) = carry.parent().map(|out| out.join("outside").join("data").join(id)) {
+        merge_namespace(&aside, content, id, true);
+    }
+}
+
+/// One namespace's files from `from` into `content`'s: all of the mod's own but its declarations,
+/// another's tags alone. A file the content mod has stays.
+fn merge_namespace(from: &Path, content: &Path, ns: &str, own: bool) {
+    for rel in files_under(from) {
+        let wanted = if own { !rel.starts_with("horizon") } else { rel.starts_with("tags") };
+        if !wanted {
+            continue;
         }
+        let target = content.join("data").join(ns).join(&rel);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::copy(from.join(&rel), &target);
     }
 }
 
@@ -692,6 +705,11 @@ mod tests {
         put("carry/data/minecraft/recipe/stone.json", "carried");
         put("carry/data/quark/tags/item/gems.json", "carried");
         put("carry/data/quark/recipe/gem_block.json", "carried");
+        // What the carry-over set aside: the mod's recipes of its own kind, and another
+        // namespace's files, which are not the mod's.
+        put("outside/data/rubies/recipe/polishing/ruby.json", "aside");
+        put("outside/data/rubies/horizon/block/ruby_lamp.json", "aside");
+        put("outside/data/quark/recipe/ruby_pillar.json", "aside");
         put("content/data/rubies/horizon/block/ruby_block.json", "code");
         put("content/data/rubies/recipe/ruby.json", "own");
         merge_data(&root.join("carry"), &root.join("content"), "rubies");
@@ -713,6 +731,13 @@ mod tests {
         );
         assert_eq!(read("data/minecraft/recipe/stone.json"), None);
         assert_eq!(read("data/quark/recipe/gem_block.json"), None);
+        // The mod's own data that was set aside is its data again, its declarations aside.
+        assert_eq!(
+            read("data/rubies/recipe/polishing/ruby.json").as_deref(),
+            Some("aside")
+        );
+        assert_eq!(read("data/rubies/horizon/block/ruby_lamp.json"), None);
+        assert_eq!(read("data/quark/recipe/ruby_pillar.json"), None);
         fs::remove_dir_all(&root).unwrap();
     }
 
