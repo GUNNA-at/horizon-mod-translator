@@ -2908,6 +2908,7 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
             let (fmt, rest) = if desc.starts_with("(Ljava/util/Locale;") { (a(1), a(2)) } else { (a(0), a(1)) };
             let f = text(rt, fmt);
             let vals = crate::jutil::elements(rt, rest);
+            let vals = format_values(rt, vals);
             let s = format_java(rt, &f, &vals);
             return Some(new_str(rt, s));
         }
@@ -3008,6 +3009,7 @@ fn string(rt: &mut Rt, name: &str, desc: &str, ks: &[char], args: &[V]) -> Optio
     Some(match name {
         "formatted" => {
             let vals = crate::jutil::elements(rt, a(1));
+            let vals = format_values(rt, vals);
             let out = format_java(rt, &s, &vals);
             new_str(rt, out)
         }
@@ -3187,8 +3189,26 @@ fn unescape_regex(p: &str) -> Option<String> {
     Some(out)
 }
 
+/// A format's arguments as [`format_java`] takes them: an object of a class that writes
+/// itself (a mod's own `toString()`, an enum's name), and a collection of such, is asked for
+/// its text first, as `%s` asks it; a box stays the number it holds. (Unasked, it printed as
+/// `Class@hash`: JourneyMap names its world's folder and writes its settings with
+/// `String.format("%s", anEnum)`, and could read neither back.)
+pub(crate) fn format_values(rt: &mut Rt, vals: Vec<V>) -> Vec<V> {
+    vals.into_iter()
+        .map(|v| {
+            if matches!(v, V::R(r) if r != 0) && rt.str_of(v).is_none() {
+                crate::linked::java_string(rt, v)
+            } else {
+                v
+            }
+        })
+        .collect()
+}
+
 /// `String.format` for the conversions mods use: `%s %d %f %.Nf %x %c %b %%` and `%n`, an argument
 /// by its index (`%2$s`, from 1) or the one before again (`%<s`), and `,` grouping thousands.
+/// (The arguments as [`format_values`] gives them.)
 pub(crate) fn format_java(rt: &Rt, f: &str, vals: &[V]) -> String {
     let mut out = String::new();
     let mut it = f.chars().peekable();
@@ -7632,6 +7652,7 @@ fn print_stream(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
             };
             let f = text(rt, a(at));
             let values = crate::jutil::elements(rt, a(at + 1));
+            let values = format_values(rt, values);
             format_java(rt, &f, &values)
         }
         "write" => match ks.as_slice() {

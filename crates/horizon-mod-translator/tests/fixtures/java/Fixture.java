@@ -1309,4 +1309,36 @@ public class Fixture {
         }
         return s.toString().hashCode();
     }
+    // An object in a format string is asked for its own text (`%s`): an enum its name, a class
+    // its `toString()`, inside a collection too.
+    enum Shade { light, Dark }
+    static class Tagged {
+        final int n;
+        Tagged(int n) { this.n = n; }
+        @Override public String toString() { return "#" + n; }
+    }
+    public static int formats(int part) {
+        Tagged t = new Tagged(part);
+        switch (part) {
+            case 1: return String.format("%s/%s-%s", Shade.light, Shade.Dark, t).hashCode();
+            case 2: return String.format("|%5s|%-5s|%S|%b", t, Shade.light, t, t).hashCode();
+            case 3: return "%s and %s".formatted(t, Shade.Dark).hashCode();
+            case 4: {
+                java.io.StringWriter text = new java.io.StringWriter();
+                java.io.PrintWriter writer = new java.io.PrintWriter(text);
+                writer.printf("%s=%s;", Shade.Dark, t);
+                writer.flush();
+                return text.toString().hashCode();
+            }
+            case 5: {
+                java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+                java.io.PrintStream stream = new java.io.PrintStream(bytes);
+                stream.printf("[%s]", t);
+                stream.flush();
+                return bytes.size();
+            }
+            case 6: return String.format("%s %s", java.util.List.of(t, Shade.Dark), java.util.Map.of("k", t)).hashCode();
+            default: return String.format("%s|%s", (Object) null, "x").hashCode();
+        }
+    }
 }
