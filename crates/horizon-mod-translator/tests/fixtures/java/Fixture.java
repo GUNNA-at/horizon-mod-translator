@@ -179,6 +179,40 @@ public class Fixture {
         String id = "mod:" + s.name().toLowerCase(java.util.Locale.ROOT) + "/" + s;
         return id.hashCode() + s.compareTo(Form.SLAB) * 7 + s.ordinal();
     }
+    // An enum held as an `Object` (a config field's default in a map of attributes): still an `Enum` to
+    // `instanceof`, and its `toString()` its name, through whatever type it is asked.
+    interface HasKey { String key(); }
+    enum GridKind implements HasKey {
+        SQUARES("grid.squares", true), REGIONS("grid.regions", false);
+        private final String key; private final boolean lines;
+        GridKind(String key, boolean lines) { this.key = key; this.lines = lines; }
+        public String key() { return key; }
+    }
+    static String attribute(java.util.Map<String, Object> attributes, String name) {
+        Object value = attributes.get(name);
+        if (value == null) return null;
+        if (value instanceof Enum) return ((Enum) value).name();
+        if (value instanceof Class) return ((Class) value).getCanonicalName();
+        return value.toString();
+    }
+    public static int enumObjects(int part) {
+        java.util.Map<String, Object> attributes = new java.util.HashMap<>();
+        GridKind grid = GridKind.values()[part & 1];
+        attributes.put("default", grid);
+        attributes.put("enumType", grid.getClass().getName());
+        attributes.put("class", grid.getClass());
+        Object held = attributes.get("default");
+        switch (part) {
+            case 1: return attribute(attributes, "default").hashCode();
+            case 2: return held.toString().hashCode();
+            case 3: return String.valueOf(held).hashCode();
+            case 4: return (held instanceof HasKey ? 5 : 0) + (held instanceof Comparable ? 3 : 0) + (held instanceof Enum ? 11 : 0);
+            case 5: return attribute(attributes, "enumType").hashCode();
+            case 6: return attribute(attributes, "class").hashCode();
+            case 7: return Enum.valueOf(GridKind.class, attribute(attributes, "default")).key().hashCode();
+            default: return attribute(attributes, "default").length() * 31 + held.toString().length() + (grid.lines ? 1000 : 0);
+        }
+    }
     interface Spins { }
     static class Gear implements Spins { }
     static class BigGear extends Gear { }

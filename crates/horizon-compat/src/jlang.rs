@@ -97,7 +97,19 @@ pub(crate) fn thread_frames(rt: &mut Rt) -> V {
 }
 
 pub(crate) fn text(rt: &Rt, v: V) -> String {
-    rt.str_of(v).map(str::to_owned).unwrap_or_else(|| rt.to_java_string(v, 'L'))
+    if let Some(s) = rt.str_of(v) {
+        return s.to_owned();
+    }
+    // An enum's is its name (`Enum.toString`), whatever type it is asked through: a mod's enum
+    // has no `toString` of its own, and asked as an `Object` (a value out of a map of
+    // attributes) it was answered as any object, `Class@hash`.
+    if v.r() != 0
+        && rt.instance_of_static(v, "java/lang/Enum")
+        && let Some(name) = rt.str_of(rt.get_field(v, "$name"))
+    {
+        return name.to_owned();
+    }
+    rt.to_java_string(v, 'L')
 }
 
 /// `Iterable.forEach(action)` (or fastutil's typed form) on `this`, a mod's object: its own
