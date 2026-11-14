@@ -334,9 +334,12 @@ fn data_color(v: &serde_json::Value) -> Option<i32> {
 /// Biome `id`'s colour of `color` (`Biome.getGrassColor(x, z)`, `getFoliageColor()`,
 /// `getWaterColor()`), from its data; plains' where the host has none.
 fn biome_color(rt: &mut Rt, id: &str, color: BiomeColor) -> i32 {
-    let json: serde_json::Value = match rt
-        .host()
-        .and_then(|h| h.biome_json(id))
+    // (Asked for every block a renderer tints: a biome's colour is read from its file once.)
+    let kept = format!("compat:biome-color/{}/{id}", color.index());
+    if let Some(V::I(c)) = rt.interned.get(&kept) {
+        return *c;
+    }
+    let json: serde_json::Value = match crate::worldgen::biome_file(rt, id)
         .and_then(|t| serde_json::from_str(&t).ok())
     {
         Some(j) => j,
@@ -345,7 +348,7 @@ fn biome_color(rt: &mut Rt, id: &str, color: BiomeColor) -> i32 {
     let effects = &json["effects"];
     let climate = |key: &str| json[key].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
     let (temperature, downfall) = (climate("temperature"), climate("downfall"));
-    match color {
+    let c = match color {
         BiomeColor::Water => data_color(&effects["water_color"]).unwrap_or(PLAINS[2]),
         BiomeColor::Foliage => data_color(&effects["foliage_color"])
             .unwrap_or_else(|| foliage_at(rt, temperature, downfall)),
@@ -359,7 +362,9 @@ fn biome_color(rt: &mut Rt, id: &str, color: BiomeColor) -> i32 {
                 _ => c,
             }
         }
-    }
+    };
+    rt.interned.insert(kept, V::I(c));
+    c
 }
 
 thread_local! {
@@ -481,7 +486,7 @@ fn special_effects(rt: &mut Rt, biome: V) -> V {
     let json: serde_json::Value = rt
         .str_of(rt.get_field(biome, "$id"))
         .map(str::to_owned)
-        .and_then(|id| rt.host().and_then(|h| h.biome_json(&id)))
+        .and_then(|id| crate::worldgen::biome_file(rt, &id))
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
     let looks = |name: &str| {

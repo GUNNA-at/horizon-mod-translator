@@ -566,9 +566,12 @@ pub(crate) fn vanilla_type(rt: &mut Rt, id: &str) -> V {
     })
 }
 
-/// The id of entity type `ty`: the name a mod registered it under, or vanilla's own.
+/// The id of entity type `ty`: vanilla's own, which its type carries, or the name a mod
+/// registered it under. (Vanilla's first: a type no registration names costs a look through
+/// every registration, and this is asked at every capability lookup on an entity.)
 pub(crate) fn type_id(rt: &Rt, ty: V) -> Option<&str> {
-    rt.registered_name(ty, "entity_type").or_else(|| rt.str_of(rt.get_field(ty, "$id")))
+    rt.str_of(rt.get_field(ty, "$id"))
+        .or_else(|| rt.registered_name(ty, "entity_type"))
 }
 
 /// The keys [`call`] may answer, by owner, name and descriptor alone: the dispatcher offers a key only

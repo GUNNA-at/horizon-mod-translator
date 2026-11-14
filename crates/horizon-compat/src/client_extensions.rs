@@ -219,7 +219,8 @@ fn water_color(rt: &mut Rt, pos: V) -> i32 {
     let p = api::pos_of(rt, pos);
     let rgb = rt
         .host()
-        .and_then(|h| h.biome(p).and_then(|b| h.biome_json(&b)))
+        .and_then(|h| h.biome(p))
+        .and_then(|b| crate::worldgen::biome_file(rt, &b))
         .and_then(|json| biome_water_color(&json))
         .unwrap_or(0x3F_76E4);
     rgb | 0xFF00_0000_u32 as i32

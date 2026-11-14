@@ -758,6 +758,14 @@ fn registry_name_of(rt: &Rt, registry: &str, obj: V) -> Option<String> {
     if registry == "entity_type" {
         return crate::mod_entities::type_id(rt, obj).map(str::to_owned);
     }
+    // A biome is the game's data and knows its own id: asked first (a value no registration
+    // names costs a look through every registration to find that out, and a map mod asks for
+    // each column's biome's key).
+    if registry == "biome"
+        && let Some(id) = rt.str_of(rt.get_field(obj, "$id"))
+    {
+        return Some(id.to_owned());
+    }
     // Vanilla's potions and effects know their own ids, and its blocks and items are their names
     // (`api::block`, `api_common::item`); a mod's are registrations.
     rt.registered_name(obj, registry)
@@ -1024,7 +1032,7 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         // Biomes are data, the game's: one it has a file for is the object a level's
         // `getBiome` gives for it (a map mod looks each biome up by its key, and took every
         // one it did not find for the void).
-        "biome" if rt.host().is_some_and(|h| h.biome_json(id).is_some()) => {
+        "biome" if crate::worldgen::biome_file(rt, id).is_some() => {
             crate::level_env::biome_object(rt, id)
         }
         _ => V::NULL,

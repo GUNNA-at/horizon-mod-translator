@@ -1681,11 +1681,20 @@ pub(crate) fn item_description_id(rt: &Rt, item: V) -> String {
 }
 
 pub(crate) fn item_like_name(rt: &Rt, v: V) -> String {
-    rt.str_of(v)
-        .map(str::to_owned)
-        .or_else(|| rt.registered_name(v, "item").map(str::to_owned))
-        .or_else(|| rt.registered_name(v, "block").map(str::to_owned))
-        .unwrap_or_else(|| "minecraft:air".into())
+    if let Some(name) = rt.str_of(v) {
+        return name.to_owned();
+    }
+    // A block is asked among the blocks first, anything else among the items: the registry
+    // that does not name it costs a look through every registration.
+    let order = if v.r() != 0 && rt.instance_of_static(v, "net/minecraft/world/level/block/Block") {
+        ["block", "item"]
+    } else {
+        ["item", "block"]
+    };
+    order
+        .into_iter()
+        .find_map(|registry| rt.registered_name(v, registry))
+        .map_or_else(|| "minecraft:air".into(), str::to_owned)
 }
 
 /// The next value of the runtime's random stream (xorshift64*).

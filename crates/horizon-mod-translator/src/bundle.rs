@@ -2914,6 +2914,9 @@ fn world_reads(get: &str, c: &str) -> String {
         fn world_height(&self) -> (i32, i32) {{
             {get}.native_world_height()
         }}
+        fn biome(&self, pos: [i32; 3]) -> Option<String> {{
+            {get}.native_biome(pos)
+        }}
         fn height(&mut self, heightmap: &str, x: i32, z: i32) -> Option<i32> {{
             use crate::game::NativeHeightmap as Kind;
             let kind = match heightmap {{

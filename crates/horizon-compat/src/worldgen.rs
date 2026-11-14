@@ -305,8 +305,23 @@ pub(crate) fn get_static(rt: &mut Rt, owner: &str, field: &str) -> Option<V> {
 }
 
 /// Biome `id` as `Holder<Biome>.value()` gives it: what modifiers read of it, from its data.
+/// Biome `id`'s file as the game has it: what the host tells of its biomes (a region being
+/// generated keeps them itself), else the file among the game's resources
+/// (`data/<namespace>/worldgen/biome/<path>.json`), which a running game's hosts read. None
+/// for a biome nothing has.
+pub(crate) fn biome_file(rt: &Rt, id: &str) -> Option<String> {
+    let h = rt.host()?;
+    h.biome_json(id).or_else(|| {
+        let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
+        h.resource(&format!("data/{namespace}/worldgen/biome/{path}.json"))
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+    })
+}
+
 pub(crate) fn biome_value(rt: &mut Rt, id: &str) -> V {
-    let data: Json = rt.host().and_then(|h| h.biome_json(id)).and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Json::Null);
+    let data: Json = biome_file(rt, id)
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Json::Null);
     let b = rt.new_object(BIOME);
     let name = rt.string(id);
     rt.put_field(b, "$id", name);
