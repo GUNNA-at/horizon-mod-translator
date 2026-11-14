@@ -2916,7 +2916,8 @@ fn strip_launcher_render_env(cmd: &mut Command) {
 pub fn client_command(tag: &str) -> Command {
     let home = game_home();
     let _ = fs::create_dir_all(&home);
-    let mut cmd = Command::new(client_program(tag));
+    // (A game as large as a pack's native mods make it starts at its linked address.)
+    let mut cmd = crate::fixed_address::command(&client_program(tag));
     #[cfg(windows)]
     crate::windows_runtime::mark(&mut cmd, &version_dir(tag));
     strip_launcher_render_env(&mut cmd);
@@ -2954,7 +2955,7 @@ fn client_program(tag: &str) -> PathBuf {
 }
 
 pub fn server_command(tag: &str, folder: &Path) -> Command {
-    let mut cmd = Command::new(version_dir(tag).join(CLIENT));
+    let mut cmd = crate::fixed_address::command(&version_dir(tag).join(CLIENT));
     cmd.current_dir(folder)
         .arg("--resources")
         .arg(resources(tag))

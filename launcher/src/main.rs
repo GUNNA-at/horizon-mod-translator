@@ -5692,6 +5692,10 @@ fn main() {
     if let Some(code) = horizon_launcher::installer::run_quiet() {
         std::process::exit(code);
     }
+    // A large game started at its linked address: this process becomes it (`fixed_address`).
+    if let Some(code) = horizon_launcher::fixed_address::run_worker() {
+        std::process::exit(code);
+    }
     if let Some(code) = horizon_launcher::relocation::run_worker() {
         std::process::exit(code);
     }
