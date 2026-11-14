@@ -137,6 +137,7 @@ pub mod recipes;
 pub mod palette;
 pub mod particle_engine;
 pub mod game_classes;
+pub mod native_memory;
 pub mod nio;
 pub mod channels;
 pub mod particles;
@@ -170,6 +171,7 @@ pub mod vanilla_tags;
 pub mod value_providers;
 pub mod vitals;
 pub mod worldgen;
+pub mod zip_coders;
 pub mod zips;
 pub mod guava_io;
 

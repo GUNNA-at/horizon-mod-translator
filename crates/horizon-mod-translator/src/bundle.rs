@@ -99,7 +99,7 @@ const CORE: &str = include_str!("../../horizon-compat-core/src/lib.rs");
 /// The mapping's root: its runtime helpers (between the `RUNTIME HELPERS` markers) go into the
 /// inlined `compat` module beside the core's.
 const COMPAT_ROOT: &str = include_str!("../../horizon-compat/src/lib.rs");
-const COMPAT: [(&str, &str); 147] = [
+const COMPAT: [(&str, &str); 149] = [
     ("host.rs", include_str!("../../horizon-compat-core/src/host.rs")),
     ("gc.rs", include_str!("../../horizon-compat-core/src/gc.rs")),
     ("linked.rs", include_str!("../../horizon-compat-core/src/linked.rs")),
@@ -128,6 +128,7 @@ const COMPAT: [(&str, &str); 147] = [
     ("entities.rs", include_str!("../../horizon-compat/src/entities.rs")),
     ("tanks.rs", include_str!("../../horizon-compat/src/tanks.rs")),
     ("tasks.rs", include_str!("../../horizon-compat/src/tasks.rs")),
+    ("zip_coders.rs", include_str!("../../horizon-compat/src/zip_coders.rs")),
     ("zips.rs", include_str!("../../horizon-compat/src/zips.rs")),
     ("guava_io.rs", include_str!("../../horizon-compat/src/guava_io.rs")),
     ("energy.rs", include_str!("../../horizon-compat/src/energy.rs")),
@@ -160,6 +161,7 @@ const COMPAT: [(&str, &str); 147] = [
     ("palette.rs", include_str!("../../horizon-compat/src/palette.rs")),
     ("particle_engine.rs", include_str!("../../horizon-compat/src/particle_engine.rs")),
     ("game_classes.rs", include_str!("../../horizon-compat/src/game_classes.rs")),
+    ("native_memory.rs", include_str!("../../horizon-compat/src/native_memory.rs")),
     ("nio.rs", include_str!("../../horizon-compat/src/nio.rs")),
     ("channels.rs", include_str!("../../horizon-compat/src/channels.rs")),
     ("places.rs", include_str!("../../horizon-compat/src/places.rs")),

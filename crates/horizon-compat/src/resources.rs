@@ -1582,13 +1582,17 @@ fn image_address(image: V) -> i64 {
 /// chunk's tile into its own `ComparableNativeImage`).
 fn image_at(rt: &Rt, address: i64) -> Option<(V, usize)> {
     let image = V::R(u32::try_from(address >> 32).ok().filter(|&r| r != 0)?);
+    open_image(rt, image).then_some((image, (address & 0xffff_ffff) as usize))
+}
+
+/// Whether `image` is an image with its pixels, not yet closed: one whose memory an address
+/// may name ([`image_address`], [`crate::native_memory`]).
+pub(crate) fn open_image(rt: &Rt, image: V) -> bool {
     let pixels = matches!(
         rt.heap.get(image.r() as usize).map(|o| &o.data),
         Some(Data::Bytes(..))
     );
-    let open =
-        pixels && rt.instance_of(image, NATIVE_IMAGE) && rt.get_field(image, "$closed").i() == 0;
-    open.then_some((image, (address & 0xffff_ffff) as usize))
+    pixels && rt.instance_of(image, NATIVE_IMAGE) && rt.get_field(image, "$closed").i() == 0
 }
 
 /// `nstbir_resize_uint8(from, size, stride, to, to_size, to_stride, channels)` on images'

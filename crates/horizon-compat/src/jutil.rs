@@ -5368,6 +5368,47 @@ fn set_call(rt: &mut Rt, name: &str, args: &[V]) -> Option<V> {
     })
 }
 
+/// Puts `k` with `v` at the first or the last place of ordered table `m`, wherever it was.
+fn move_to_end(rt: &mut Rt, m: V, k: V, v: V, first: bool) {
+    table_remove(rt, m, k);
+    if !first {
+        table_put(rt, m, k, v);
+        return;
+    }
+    let rest = table_entries(rt, m);
+    let empty = emptied(rt, m);
+    put_table(rt, m, empty);
+    table_put(rt, m, k, v);
+    for (k, v) in rest {
+        table_put(rt, m, k, v);
+    }
+}
+
+/// A fastutil ordered map's end by a primitive's name: `firstIntKey`, `lastLongKey` (the key
+/// there), `removeFirst`, `removeLastLong` (the entry there taken out); from the back, and
+/// whether it removes.
+fn map_end(name: &str) -> Option<(bool, bool)> {
+    const KINDS: [&str; 8] = [
+        "Int", "Long", "Float", "Double", "Boolean", "Byte", "Short", "Char",
+    ];
+    let (rest, removes) = match name.strip_prefix("remove") {
+        Some(rest) => (rest, true),
+        None => (name, false),
+    };
+    let (kind, from_back) = match (rest.strip_prefix("First"), rest.strip_prefix("Last")) {
+        (Some(kind), _) if removes => (kind, false),
+        (_, Some(kind)) if removes => (kind, true),
+        _ => match (rest.strip_prefix("first"), rest.strip_prefix("last")) {
+            (Some(kind), _) if !removes => (kind.strip_suffix("Key")?, false),
+            (_, Some(kind)) if !removes => (kind.strip_suffix("Key")?, true),
+            _ => return None,
+        },
+    };
+    // `firstKey` and `lastKey` are a sorted map's own, answered with it.
+    let named = KINDS.contains(&kind) || (removes && kind.is_empty());
+    named.then_some((from_back, removes))
+}
+
 /// What a map gives for a missing key: null, or for a fastutil map of primitive values its
 /// `defaultReturnValue` (zero unless set, kept in an unsorted table's unused comparator slot).
 fn missing(rt: &Rt, m: V, desc: &str) -> V {
@@ -5601,6 +5642,39 @@ fn map_call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         "removeInt" | "removeLong" | "removeFloat" | "removeDouble" | "removeBoolean" => {
             let v = table_remove(rt, this, a(1));
             found(rt, v)
+        }
+        // A fastutil linked map keeps its entries in an order its caller moves by hand, which
+        // is how a cache of what was used last is made of one (`getAndMoveToFirst` at every
+        // read, `removeLast` when it is full; JourneyMap's store of chunks is one): the entry
+        // is at that end afterwards, with the value put where one is; the value it had, or
+        // the map's own for a missing key.
+        "getAndMoveToFirst" | "getAndMoveToLast" | "putAndMoveToFirst" | "putAndMoveToLast" => {
+            let had = table_get(rt, this, a(1));
+            let value = if name.starts_with("put") {
+                Some(a(2))
+            } else {
+                had
+            };
+            if let Some(v) = value {
+                move_to_end(rt, this, a(1), v, name.ends_with("First"));
+            }
+            found(rt, had)
+        }
+        // Such a map's ends: the key there (`firstLongKey`), or the entry there taken out for
+        // its value (`removeFirst`, `removeLastInt`). An empty map has none.
+        n if map_end(n).is_some() => {
+            let (from_back, removes) = map_end(n)?;
+            let es = table_entries(rt, this);
+            let Some(&(k, v)) = (if from_back { es.last() } else { es.first() }) else {
+                rt.throw_new("java/util/NoSuchElementException");
+                return Some(V::NULL);
+            };
+            if removes {
+                table_remove(rt, this, k);
+                v
+            } else {
+                k
+            }
         }
         // `Object2IntOpenHashMap.addTo`: adds to the value (the default when missing); the old one.
         "addTo" => {
@@ -7685,6 +7759,145 @@ mod tests {
         c(&mut rt, "removeLastLong.()J", &[set]);
         let thrown = rt.thrown.take().expect("an empty set has no last element");
         assert_eq!(rt.class_of(thrown), "java/util/NoSuchElementException");
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
+    /// A linked map whose order its caller moves by hand, as a cache of what was used last is
+    /// made of one (JourneyMap's store of chunks: `getAndMoveToFirst` at a read,
+    /// `putAndMoveToFirst` at a write, `removeLast` when full). Every answer and every order
+    /// below is fastutil 8.5.18's on a JVM for the same calls.
+    #[test]
+    fn a_linked_map_moves_its_entries_to_its_ends() {
+        const MAP: &str = "it/unimi/dsi/fastutil/longs/Long2ObjectLinkedOpenHashMap";
+        const COUNTS: &str = "it/unimi/dsi/fastutil/objects/Object2IntLinkedOpenHashMap";
+        let mut rt = Rt::new();
+        let c = |rt: &mut Rt, class: &str, name: &str, args: &[V]| {
+            let key = rt.static_key(&format!("{class}.{name}"));
+            crate::api::call(rt, key, args)
+        };
+        let text = |rt: &Rt, v: V| rt.str_of(v).map(str::to_owned);
+        let keys = |rt: &mut Rt, m: V| -> Vec<i64> {
+            table_entries(rt, m)
+                .into_iter()
+                .map(|(k, _)| k.j())
+                .collect()
+        };
+        let m = rt.new_object(MAP);
+        c(&mut rt, MAP, "<init>.()V", &[m]);
+        for (k, v) in [(1i64, "a"), (2, "b"), (3, "c")] {
+            let v = rt.string(v);
+            c(
+                &mut rt,
+                MAP,
+                "put.(JLjava/lang/Object;)Ljava/lang/Object;",
+                &[m, V::J(k), v],
+            );
+        }
+        let get_first = "getAndMoveToFirst.(J)Ljava/lang/Object;";
+        let got = c(&mut rt, MAP, get_first, &[m, V::J(3)]);
+        assert_eq!(
+            (text(&rt, got).as_deref(), keys(&mut rt, m)),
+            (Some("c"), vec![3, 1, 2])
+        );
+        // A key it lacks: nothing, and nothing moves.
+        let got = c(&mut rt, MAP, get_first, &[m, V::J(9)]);
+        assert_eq!((got, keys(&mut rt, m)), (V::NULL, vec![3, 1, 2]));
+        let got = c(
+            &mut rt,
+            MAP,
+            "getAndMoveToLast.(J)Ljava/lang/Object;",
+            &[m, V::J(3)],
+        );
+        assert_eq!(
+            (text(&rt, got).as_deref(), keys(&mut rt, m)),
+            (Some("c"), vec![1, 2, 3])
+        );
+        let put_first = "putAndMoveToFirst.(JLjava/lang/Object;)Ljava/lang/Object;";
+        let put_last = "putAndMoveToLast.(JLjava/lang/Object;)Ljava/lang/Object;";
+        let big = rt.string("B");
+        let had = c(&mut rt, MAP, put_first, &[m, V::J(2), big]);
+        assert_eq!(
+            (text(&rt, had).as_deref(), keys(&mut rt, m)),
+            (Some("b"), vec![2, 1, 3])
+        );
+        let now = c(&mut rt, MAP, "get.(J)Ljava/lang/Object;", &[m, V::J(2)]);
+        assert_eq!(text(&rt, now).as_deref(), Some("B"));
+        let (g, h) = (rt.string("g"), rt.string("h"));
+        assert_eq!(c(&mut rt, MAP, put_last, &[m, V::J(7), g]), V::NULL);
+        assert_eq!(c(&mut rt, MAP, put_first, &[m, V::J(8), h]), V::NULL);
+        assert_eq!(keys(&mut rt, m), [8, 2, 1, 3, 7]);
+        assert_eq!(c(&mut rt, MAP, "firstLongKey.()J", &[m]), V::J(8));
+        assert_eq!(c(&mut rt, MAP, "lastLongKey.()J", &[m]), V::J(7));
+        let first = c(&mut rt, MAP, "removeFirst.()Ljava/lang/Object;", &[m]);
+        let last = c(&mut rt, MAP, "removeLast.()Ljava/lang/Object;", &[m]);
+        assert_eq!(
+            (text(&rt, first).as_deref(), text(&rt, last).as_deref()),
+            (Some("h"), Some("g"))
+        );
+        assert_eq!(keys(&mut rt, m), [2, 1, 3]);
+
+        // A map of counts gives its own value for a missing key.
+        let counts = rt.new_object(COUNTS);
+        c(&mut rt, COUNTS, "<init>.()V", &[counts]);
+        c(
+            &mut rt,
+            COUNTS,
+            "defaultReturnValue.(I)V",
+            &[counts, V::I(-1)],
+        );
+        let (x, y, q, zz) = (
+            rt.string("x"),
+            rt.string("y"),
+            rt.string("q"),
+            rt.string("zz"),
+        );
+        c(
+            &mut rt,
+            COUNTS,
+            "put.(Ljava/lang/Object;I)I",
+            &[counts, x, V::I(5)],
+        );
+        c(
+            &mut rt,
+            COUNTS,
+            "put.(Ljava/lang/Object;I)I",
+            &[counts, y, V::I(6)],
+        );
+        let names = |rt: &mut Rt| -> Vec<String> {
+            table_entries(rt, counts)
+                .into_iter()
+                .map(|(k, _)| rt.str_of(k).unwrap_or("").to_owned())
+                .collect()
+        };
+        let get_first = "getAndMoveToFirst.(Ljava/lang/Object;)I";
+        assert_eq!(c(&mut rt, COUNTS, get_first, &[counts, zz]), V::I(-1));
+        assert_eq!(names(&mut rt), ["x", "y"]);
+        let get_last = "getAndMoveToLast.(Ljava/lang/Object;)I";
+        assert_eq!(c(&mut rt, COUNTS, get_last, &[counts, x]), V::I(5));
+        assert_eq!(names(&mut rt), ["y", "x"]);
+        let put_first = "putAndMoveToFirst.(Ljava/lang/Object;I)I";
+        assert_eq!(
+            c(&mut rt, COUNTS, put_first, &[counts, q, V::I(9)]),
+            V::I(-1)
+        );
+        let put_last = "putAndMoveToLast.(Ljava/lang/Object;I)I";
+        assert_eq!(
+            c(&mut rt, COUNTS, put_last, &[counts, y, V::I(60)]),
+            V::I(6)
+        );
+        assert_eq!(names(&mut rt), ["q", "x", "y"]);
+        assert_eq!(c(&mut rt, COUNTS, "removeLastInt.()I", &[counts]), V::I(60));
+        assert_eq!(c(&mut rt, COUNTS, "removeFirstInt.()I", &[counts]), V::I(9));
+        assert_eq!(names(&mut rt), ["x"]);
+
+        // An empty map has no end to give or take.
+        let empty = rt.new_object(MAP);
+        c(&mut rt, MAP, "<init>.()V", &[empty]);
+        for end in ["removeFirst.()Ljava/lang/Object;", "firstLongKey.()J"] {
+            c(&mut rt, MAP, end, &[empty]);
+            let thrown = rt.thrown.take().expect("an empty map has no end");
+            assert_eq!(rt.class_of(thrown), "java/util/NoSuchElementException");
+        }
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 

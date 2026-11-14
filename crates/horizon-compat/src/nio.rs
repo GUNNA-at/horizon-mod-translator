@@ -7,6 +7,11 @@
 //! mark and byte order. Every read and write goes to the array, so a duplicate or a slice sees
 //! its buffer's bytes, as Java's do. A direct buffer is the same here: nothing outside the
 //! runtime reads its memory.
+//!
+//! A buffer can also lie over memory that is no Java array: an image's pixels, or a block a mod
+//! allocated by its address (LWJGL's `memByteBuffer(address, capacity)`,
+//! [`crate::native_memory`]). Such a buffer ([`view`]) reads and writes that memory, has no
+//! array to give, and says it is direct, as Java's buffer over native memory does.
 use crate::{Data, Rt, V};
 
 pub(crate) const BYTE_BUFFER: &str = "java/nio/ByteBuffer";
@@ -21,6 +26,8 @@ const CAPACITY: &str = "$capacity";
 const MARK: &str = "$mark";
 const LITTLE: &str = "$little";
 const READ_ONLY: &str = "$readOnly";
+/// Set on a buffer LWJGL allocated: it says it is direct and gives no array, as on a JVM.
+const DIRECT: &str = "$direct";
 
 /// Whether this module answers `owner.name desc`.
 pub fn claims(owner: &str, _name: &str, _desc: &str) -> bool {
@@ -62,6 +69,7 @@ struct Buf {
     mark: i32,
     little: bool,
     read_only: bool,
+    direct: bool,
 }
 
 /// The state of buffer `b`; None for what is no buffer of this module's.
@@ -80,6 +88,7 @@ fn state(rt: &Rt, b: V) -> Option<Buf> {
         mark: int(MARK),
         little: int(LITTLE) != 0,
         read_only: int(READ_ONLY) != 0,
+        direct: int(DIRECT) != 0,
     })
 }
 
@@ -95,6 +104,7 @@ fn make(rt: &mut Rt, s: Buf) -> V {
         (MARK, s.mark),
         (LITTLE, i32::from(s.little)),
         (READ_ONLY, i32::from(s.read_only)),
+        (DIRECT, i32::from(s.direct)),
     ] {
         rt.put_field(b, field, V::I(v));
     }
@@ -115,6 +125,7 @@ pub(crate) fn allocate(rt: &mut Rt, capacity: i32) -> V {
             mark: -1,
             little: false,
             read_only: false,
+            direct: false,
         },
     )
 }
@@ -137,6 +148,7 @@ pub(crate) fn of_bytes(rt: &mut Rt, bytes: &[i8]) -> V {
             mark: -1,
             little: false,
             read_only: false,
+            direct: false,
         },
     )
 }
@@ -196,38 +208,111 @@ fn throw(rt: &mut Rt, class: &'static str) -> V {
     V::Void
 }
 
-/// The bytes of `array` at `at..at + n`, or None past its end.
-fn read(rt: &Rt, array: V, at: i32, n: usize) -> Option<Vec<u8>> {
-    let Some(Data::Array(items)) = rt.heap.get(array.r() as usize).map(|o| &o.data) else {
-        return None;
-    };
+/// The bytes of `array` at `at..at + n`, or None past its end. `array` is a Java `byte[]`, or
+/// other memory a buffer lies over ([`view`]).
+pub(crate) fn read(rt: &Rt, array: V, at: i32, n: usize) -> Option<Vec<u8>> {
     let at = usize::try_from(at).ok()?;
-    items
-        .get(at..at + n)
-        .map(|s| s.iter().map(|v| v.i() as u8).collect())
-}
-
-/// Writes `bytes` into `array` from `at`; false past its end.
-fn write(rt: &mut Rt, array: V, at: i32, bytes: &[u8]) -> bool {
-    let Some(Data::Array(items)) = rt.heap.get_mut(array.r() as usize).map(|o| &mut o.data) else {
-        return false;
-    };
-    let Ok(at) = usize::try_from(at) else {
-        return false;
-    };
-    match items.get_mut(at..at + bytes.len()) {
-        Some(slots) => {
-            for (slot, b) in slots.iter_mut().zip(bytes) {
-                *slot = V::I(i32::from(*b as i8));
-            }
-            true
-        }
-        None => false,
+    let end = at.checked_add(n)?;
+    match rt.heap.get(array.r() as usize).map(|o| &o.data) {
+        Some(Data::Array(items)) => items
+            .get(at..end)
+            .map(|s| s.iter().map(|v| v.i() as u8).collect()),
+        Some(Data::Bytes(bytes, _)) => bytes.get(at..end).map(<[u8]>::to_vec),
+        _ => None,
     }
 }
 
+/// Writes `bytes` into `array` from `at`; false past its end.
+pub(crate) fn write(rt: &mut Rt, array: V, at: i32, bytes: &[u8]) -> bool {
+    let Ok(at) = usize::try_from(at) else {
+        return false;
+    };
+    let Some(end) = at.checked_add(bytes.len()) else {
+        return false;
+    };
+    match rt.heap.get_mut(array.r() as usize).map(|o| &mut o.data) {
+        Some(Data::Array(items)) => match items.get_mut(at..end) {
+            Some(slots) => {
+                for (slot, b) in slots.iter_mut().zip(bytes) {
+                    *slot = V::I(i32::from(*b as i8));
+                }
+                true
+            }
+            None => false,
+        },
+        Some(Data::Bytes(held, _)) => match held.get_mut(at..end) {
+            Some(slots) => {
+                slots.copy_from_slice(bytes);
+                true
+            }
+            None => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `array` is a Java `byte[]`: the memory under a [`view`] is not.
+fn is_array(rt: &Rt, array: V) -> bool {
+    matches!(
+        rt.heap.get(array.r() as usize).map(|o| &o.data),
+        Some(Data::Array(_))
+    )
+}
+
+/// A buffer over `capacity` bytes of `memory` from its byte `offset` on, in the machine's byte
+/// order (little-endian), ready to be read or written from its start: what LWJGL's
+/// `memByteBuffer(address, capacity)` gives for memory the runtime holds.
+pub(crate) fn view(rt: &mut Rt, memory: V, offset: i32, capacity: i32) -> V {
+    make(
+        rt,
+        Buf {
+            array: memory,
+            offset,
+            position: 0,
+            limit: capacity,
+            capacity,
+            mark: -1,
+            little: true,
+            read_only: false,
+            direct: false,
+        },
+    )
+}
+
+/// A buffer of `capacity` zero bytes in the machine's byte order, as LWJGL allocates one
+/// (`memAlloc`, `memCalloc`).
+pub(crate) fn allocate_native(rt: &mut Rt, capacity: i32) -> V {
+    let b = allocate(rt, capacity);
+    rt.put_field(b, LITTLE, V::I(1));
+    rt.put_field(b, DIRECT, V::I(1));
+    b
+}
+
+/// Whether a buffer in state `s` is a direct one: over memory that is no array ([`view`]), or
+/// of LWJGL's allocating (and so are its duplicates and slices).
+fn is_direct(rt: &Rt, s: &Buf) -> bool {
+    s.direct || !is_array(rt, s.array)
+}
+
+/// The memory under buffer `b`, the byte of it the buffer begins at, and the buffer's position
+/// and limit; None for what is no buffer of this module's.
+pub(crate) fn memory(rt: &Rt, b: V) -> Option<(V, i32, i32, i32)> {
+    let s = state(rt, b)?;
+    Some((s.array, s.offset, s.position, s.limit))
+}
+
+/// Buffer `b`'s capacity (0 for what is no buffer of this module's).
+pub(crate) fn capacity(rt: &Rt, b: V) -> i32 {
+    state(rt, b).map_or(0, |s| s.capacity)
+}
+
+/// Moves buffer `b`'s position to `to`, a place within its limit.
+pub(crate) fn set_position(rt: &mut Rt, b: V, to: i32) {
+    rt.put_field(b, POSITION, V::I(to));
+}
+
 /// The value of kind `kind` (`B`, `C`, `S`, `I`, `J`, `F`, `D`) `bytes` hold in the buffer's order.
-fn decode(kind: char, bytes: &[u8], little: bool) -> V {
+pub(crate) fn decode(kind: char, bytes: &[u8], little: bool) -> V {
     let mut wide = [0u8; 8];
     let n = bytes.len();
     for (i, b) in bytes.iter().enumerate() {
@@ -247,7 +332,7 @@ fn decode(kind: char, bytes: &[u8], little: bool) -> V {
 }
 
 /// The bytes of `v`, a value of kind `kind`, in the buffer's order.
-fn encode(kind: char, v: V, little: bool) -> Vec<u8> {
+pub(crate) fn encode(kind: char, v: V, little: bool) -> Vec<u8> {
     let (raw, n) = match kind {
         'B' => (v.i() as u8 as u64, 1),
         'C' | 'S' => (v.i() as u16 as u64, 2),
@@ -263,7 +348,8 @@ fn encode(kind: char, v: V, little: bool) -> Vec<u8> {
     bytes
 }
 
-fn width(kind: char) -> i32 {
+/// How many bytes a value of kind `kind` takes.
+pub(crate) fn width(kind: char) -> i32 {
     match kind {
         'B' => 1,
         'C' | 'S' => 2,
@@ -346,6 +432,7 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                     mark: -1,
                     little: false,
                     read_only: false,
+                    direct: false,
                 },
             ));
         }
@@ -361,10 +448,13 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         ("remaining", 0) => V::I((s.limit - s.position).max(0)),
         ("hasRemaining", 0) => V::I(i32::from(s.position < s.limit)),
         ("isReadOnly", 0) => V::I(i32::from(s.read_only)),
-        ("isDirect", 0) => V::I(0),
-        ("hasArray", 0) => V::I(i32::from(!s.read_only)),
+        ("isDirect", 0) => V::I(i32::from(is_direct(rt, &s))),
+        ("hasArray", 0) => V::I(i32::from(!s.read_only && !is_direct(rt, &s))),
         ("array" | "arrayOffset", 0) if s.read_only => {
             throw(rt, "java/nio/ReadOnlyBufferException")
+        }
+        ("array" | "arrayOffset", 0) if is_direct(rt, &s) => {
+            throw(rt, "java/lang/UnsupportedOperationException")
         }
         ("array", 0) => s.array,
         ("arrayOffset", 0) => V::I(s.offset),

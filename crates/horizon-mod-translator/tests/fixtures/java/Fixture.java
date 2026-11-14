@@ -217,6 +217,116 @@ public class Fixture {
             default: return attribute(attributes, "default").length() * 31 + held.toString().length() + (grid.lines ? 1000 : 0);
         }
     }
+    // java.util.zip's compressor and its reverse on their own, as a mod packs a file's or a
+    // packet's bytes. Nothing below depends on the packed bytes themselves, which are zlib's.
+    static byte[] sample(int n) {
+        byte[] b = new byte[n];
+        for (int i = 0; i < n; i++) b[i] = (byte) ((i * 7 + i / 13) % 61);
+        return b;
+    }
+    static byte[] deflated(java.util.zip.Deflater d, byte[] in) {
+        d.setInput(in);
+        d.finish();
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[64];
+        while (!d.finished()) { int n = d.deflate(buf); out.write(buf, 0, n); }
+        return out.toByteArray();
+    }
+    static byte[] inflated(byte[] in, boolean nowrap, int room) throws java.util.zip.DataFormatException {
+        java.util.zip.Inflater f = new java.util.zip.Inflater(nowrap);
+        f.setInput(in);
+        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[room];
+        while (!f.finished()) {
+            int n = f.inflate(buf);
+            if (n == 0 && f.needsInput()) break;
+            out.write(buf, 0, n);
+        }
+        f.end();
+        return out.toByteArray();
+    }
+    public static int deflaters(int part) {
+        byte[] in = sample(5000);
+        try {
+            switch (part) {
+                // There and back: with zlib's wrapper at its best level, bare at its fastest.
+                case 1: return java.util.Arrays.hashCode(inflated(deflated(new java.util.zip.Deflater(9, false), in), false, 100));
+                case 2: return java.util.Arrays.hashCode(inflated(deflated(new java.util.zip.Deflater(1, true), in), true, 7000));
+                // What a compressor says of itself from new to done, and after a reset.
+                case 3: {
+                    java.util.zip.Deflater d = new java.util.zip.Deflater();
+                    int r = (d.needsInput() ? 1 : 0) + (d.finished() ? 2 : 0);
+                    d.setInput(in);
+                    r += (d.needsInput() ? 4 : 0) + (d.finished() ? 8 : 0);
+                    d.finish();
+                    r += d.finished() ? 16 : 0;
+                    byte[] packed = deflated(d, new byte[0]);
+                    r += (d.finished() ? 32 : 0) + (d.needsInput() ? 64 : 0) + (d.getTotalIn() == 5000 ? 128 : 0) + (d.getTotalOut() == packed.length ? 256 : 0);
+                    r += (d.getBytesRead() == 5000L ? 512 : 0) + (packed.length < 5000 ? 1024 : 0);
+                    d.reset();
+                    r += (d.finished() ? 2048 : 0) + (d.needsInput() ? 4096 : 0) + (d.getTotalIn() == 0 ? 8192 : 0);
+                    byte[] again = deflated(d, sample(300));
+                    d.end();
+                    return r * 31 + java.util.Arrays.hashCode(inflated(again, false, 64)) + java.util.Arrays.hashCode(inflated(packed, false, 512));
+                }
+                // A stream a JVM's zlib made, written out here.
+                case 4: {
+                    byte[] packed = {120, -38, 43, -55, 72, 85, 40, 78, -52, 77, 85, 40, -49, 47, 74, 41, -42, 81, 40, -63, -53, 7, 0, -125, -25, 16, -101};
+                    java.util.zip.Inflater f = new java.util.zip.Inflater();
+                    f.setInput(packed);
+                    byte[] buf = new byte[200];
+                    int n = f.inflate(buf);
+                    String text = new String(buf, 0, n, java.nio.charset.StandardCharsets.UTF_8);
+                    int r = (f.finished() ? 1 : 0) + (f.needsInput() ? 2 : 0) + (f.getRemaining() == 0 ? 4 : 0) + (f.getTotalOut() == 46 ? 8 : 0) + (f.getTotalIn() == 27 ? 16 : 0) + (f.needsDictionary() ? 32 : 0);
+                    return text.hashCode() * 31 + r + n * 1000;
+                }
+                // Given in two halves: it wants more after the first, and is done after the second.
+                case 5: {
+                    byte[] packed = deflated(new java.util.zip.Deflater(6), in);
+                    int half = packed.length / 2;
+                    java.util.zip.Inflater f = new java.util.zip.Inflater();
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[333];
+                    f.setInput(packed, 0, half);
+                    for (int n = f.inflate(buf); n > 0; n = f.inflate(buf)) out.write(buf, 0, n);
+                    int r = (f.needsInput() ? 1 : 0) + (f.finished() ? 2 : 0);
+                    f.setInput(packed, half, packed.length - half);
+                    r += f.needsInput() ? 4 : 0;
+                    for (int n = f.inflate(buf, 3, 300); n > 0; n = f.inflate(buf, 3, 300)) out.write(buf, 3, n);
+                    r += (f.needsInput() ? 8 : 0) + (f.finished() ? 16 : 0) + (f.getTotalOut() == 5000 ? 32 : 0) + (f.getBytesWritten() == 5000L ? 64 : 0);
+                    return r * 31 + java.util.Arrays.hashCode(out.toByteArray());
+                }
+                // What is no such stream.
+                case 6: return inflated(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, false, 64).length;
+                // Input given before the end is asked for, in two pieces, and a part of an array.
+                case 7: {
+                    java.util.zip.Deflater d = new java.util.zip.Deflater(5);
+                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[128];
+                    d.setInput(in, 0, 2000);
+                    while (!d.needsInput()) { int n = d.deflate(buf, 0, buf.length); out.write(buf, 0, n); }
+                    d.setInput(in, 2000, 3000);
+                    d.finish();
+                    while (!d.finished()) { int n = d.deflate(buf, 10, 100); out.write(buf, 10, n); }
+                    int total = d.getTotalIn();
+                    d.end();
+                    return java.util.Arrays.hashCode(inflated(out.toByteArray(), false, 4096)) + total;
+                }
+                // Bytes after the stream's end are left over.
+                default: {
+                    byte[] packed = deflated(new java.util.zip.Deflater(), sample(100));
+                    byte[] more = java.util.Arrays.copyOf(packed, packed.length + 5);
+                    java.util.zip.Inflater f = new java.util.zip.Inflater();
+                    f.setInput(more);
+                    byte[] buf = new byte[400];
+                    int n = f.inflate(buf);
+                    return n * 100 + f.getRemaining() * 10 + (f.finished() ? 1 : 0) + (f.needsInput() ? 2 : 0);
+                }
+            }
+        } catch (java.util.zip.DataFormatException e) {
+            return -77 - part;
+        }
+    }
     interface Spins { }
     static class Gear implements Spins { }
     static class BigGear extends Gear { }
