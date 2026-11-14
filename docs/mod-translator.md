@@ -11708,6 +11708,142 @@ Pass `--game-dir`: the game folder defaults to the working directory.
       as the server started) and still ended at their first wait.
     - The client's thread spends 17.5 of every 20 s in the mods' hooks (15 to 17 before): 9.0 s drawing in the
       level, 5.5 s in its ticks, the lent slices among them; it draws 21 frames a second.
+- [x] 2026-11-14 Part 197: what the map mod still lacked once its work ran: a column's height, the game's block
+  states by id, a sprite's own image, the biome at a place; threads started before the game runs; and a game
+  that did not start one time in five.
+  - Launch 40's tiles were blank, and the reason was no thread's and no palette's. JourneyMap finds each column's
+    surface with `chunk.getHeight(WORLD_SURFACE, x, z)` and draws the block there.
+    - `chunk.getHeight(heightmap, x, z)` was answered as `getHeight()` with no arguments is: the world's height,
+      384, for every column. The map looked at y 384, found air, and drew nothing.
+    - `level.getHeight(heightmap, x, z)` was no better in a running game: only a region being generated kept
+      heightmaps, and any other level answered the world's bottom, -64, whatever stood in the column. Every mod
+      that looks for the surface (a spawn, a strike of lightning, a teleport to the top) got the bottom.
+    - Now the level being ticked asks the game itself (`native_surface_heights`, upstream's API 127). A window's
+      own world, which that native refuses, and a column that is not loaded are read from their blocks, down
+      from the top of the world, as vanilla's four heightmaps count them: any block for the world's surface, one
+      that blocks motion for the ocean's floor, one that does or holds a fluid for motion blocking, and no
+      leaves where the heightmap leaves them out. The chunk's own `getHeight` names the top block itself, one
+      below the level's answer, as vanilla's does; `getNoiseBiome` asks the level.
+  - `Block.BLOCK_STATE_REGISTRY` was an object with nothing in it: `size`, `getId`, `byId` and a walk through it
+    were unmapped or empty (five keys in launch 40). It answers from the game's table of states now
+    (`Host::state_id`, `state_of_id`; the table's size is found once, where the game's answer turns to air), and
+    an `IdMapper` a mod makes itself holds what the mod adds.
+  - A sprite's own image (`sprite.contents().byMipLevel`, a field the map mod reads for a block's colour, the
+    mean of its texture's pixels): the texture's file among the game's resources, read once.
+  - Threads started before their runtime's thread lends. Part 196 left them as they were: run inside `start`, to
+    their first wait, where an `InterruptedException` (three times, then an `Error`) ended them. Five of the
+    pack's threads went so in launch 40: two while the mods loaded, three as the server started, among them a
+    mod's loop that takes tasks from a queue ("Error while waiting for next task", three times).
+    - Such a body now ends at its first wait with a `ThreadDeath`, which no `catch (InterruptedException)`
+      takes for its own, so the loop's own handling of an interrupt (a logged error, a flag set to stop) does
+      not run. The thread is remembered, and started again, from its beginning and on a stack of its own, when
+      its runtime's thread first lends: in each copy of the runtime that does, as each has its own copy of
+      everything else the mod keeps. Where no game ever runs (a probe, a test) that is the end of it.
+  - Launch 41 (round 41: 734 s, 10 crates) showed the next layer, and one mistake of Part 196's.
+    - The early threads live: the server has 3 to 5 threads of the mods' (1 or 2 before), the client 4 to 9;
+      "Error while waiting for next task" is gone. One thread started from a mod's constructor, before the
+      mods' registration, still went the old way (the test was "while the mods load, or in a game"): any
+      thread whose body waits where it was started is started again later now.
+    - The map mod reached the blocks and stopped there. Its work asks `level.getLightEngine()` for every
+      block's light, which nothing mapped; after a million such calls, 206 seconds into its work, the runtime
+      took the work for a loop stuck on a stand-in answer and threw at every call from then on: 189,654 lines of
+      the mod's errors, a log of 388,035 lines. The rule was made for a hook, which must end; a thread's work
+      runs for minutes. On a thread of the mods' own a loop is now told by how fast such calls come (a million
+      within 30 seconds), not by how many came since the work began.
+    - What it asked for and nothing answered:
+      - `Level.getLightEngine()`: a real level's engine tells each layer's light as the game has it
+        (`getLayerListener(layer).getLightValue(pos)`); an engine a mod makes for a world of its own keeps
+        none, as before.
+      - A biome's special effects (`getSpecialEffects()`, `getFogColor()`, `getSkyColor()`,
+        `getWaterFogColor()`), its climate (`climateSettings`, through an accessor) and
+        `getGrassColorFromTexture()`. 26.3 keeps a biome's sky, fog and water fog as attributes of how it looks
+        (`minecraft:visual/sky_color`) and its water, foliage and grass among its effects; a biome whose file
+        names no sky gets the one 1.21.1 made of its temperature (plains: 0x78A7FF, vanilla's own). The object
+        is built through the records' table, which answers its getters.
+      - The biomes' registry (`registryOrThrow(Registries.BIOME).getOptional(key)`) held nothing: every biome
+        the mod looked up was "treated like the void". It holds the game's biomes, each the object a level's
+        `getBiome` gives.
+      - `BlockState.getMapColor(level, pos)`: its block's default map colour.
+    - An enum's text again. The config still could not be read: the value is written by a joiner
+      (`Joiner.on(",").join(style, color, ...)`), which asks no method of the mod's; the runtime wrote the
+      object as `Class@hash` itself. Whatever writes an object's text now writes an enum's constant by its name
+      (the core's `object_string`), and the fixture's case has three more parts for it.
+    - Create's and Flywheel's renderers reach a pose stack's own deque through an accessor and push a pose of
+      their own (`poseStack.addLast(new Pose(matrix, normal))`): 6.3 million calls nothing mapped in that
+      launch. The stack is that deque here (its poses, the top last), and a pose is made of the matrices it is
+      given.
+  - Launch 42 (round 42, every crate again for the core's change: 2,228 s, 575 crates, 2,068,964,032 bytes):
+    - Ready after 361 s, resources 236.0 s, 758 unmapped (771), 112 uncaught, the mods' own errors 499 lines of
+      477 kinds (506, 479); the log is 8,491 lines again. JourneyMap reads its config back (no "No enum
+      constant"), its world's folder is `mp/...`, it reports no bad block, and the pose stack's deque is asked
+      for by nothing unmapped. No thread ends at a wait any more: the client has 6 to 11 threads of the mods'
+      (18% of its thread on average), the server 5 to 7.
+    - The map mod draws surfaces now, slowly: "SurfaceRenderer.renderSurface: Avg 6477.4ms ... Count 10",
+      and every biome it looks up is still "treated like the void" (10,200 times). Two things the sample of
+      its thread and of the client's showed:
+      - A running game's hosts told no biome at all. Only the host of a region being generated answered
+        `Host::biome` and `Host::biome_json`: every `level.getBiome(pos)` in a game was plains, with plains'
+        colours. The game's hosts ask the game (`native_biome`, the biome the chunk has there), and a biome's
+        file is read from the game's resources where the host keeps none (`worldgen::biome_file`); a biome's
+        colours are kept once read (they were parsed from the file at every block tinted).
+      - `Rt::registered_name` looks through every registration when no registration names the object, which is
+        each time for a vanilla value. Of the client's thread 6.5% was that (and its string compares 5% more):
+        247 of 440 samples from the entity type asked at every capability lookup, 192 from an item or block
+        asked by name. Vanilla's own id is asked first now, a block among the blocks first, a biome by the id
+        it carries. (The look itself is the core's, for its next change.)
+  - Launch 43 (round 43: 718 s, 5 crates, 2,068,933,648 bytes):
+    - Ready after 331 s (361), resources 202.6 s (236.0), 754 unmapped (758), 112 uncaught, the mods' own
+      errors 498 lines of 476 kinds (499, 477), a log of 8,284 lines.
+    - No biome is "treated like the void" (10,200 times in launch 42). The map mod's surface renderer is off
+      its own list of slow work, where it stood with 6.5 s a chunk; its topographic renderer is on it with
+      183 ms a chunk ("TopoRenderer.renderSurface: Avg: 182.99ms ... Count: 602"), and a whole map task takes
+      10.2 s (16 of them).
+    - The mods' threads: 6 to 9 on the client, a quarter of its thread on average (18% in launch 42), 5 to 7 on
+      the server. The client's thread spends 17.4 to 18.5 of every 20 s in the mods' hooks, the server's 6.0
+      to 6.5.
+    - The tiles are still blank: 34 PNG files of 2,197 bytes each. What is drawn into them is the next part's.
+    - Two of the map mod's complaints are its own, and no translation's fault. "Skipping unsafe zip entry"
+      (200 lines: its themes' files, out of its jar) is what its own check answers on a JVM for the same
+      names: the name it cuts off an entry keeps its leading slash, and
+      `ArchivePathGuard.isSafeEntryName("/container/htoolbar_begin.png")` is false there too (run on JDK 21
+      with the mod's class). The three "Image is null: journeymap:ui/img/minimap/minimap-square-N.png" name
+      files its jar does not hold.
+  - The pack's game did not start, about one time in five. Launch 43's first try ended before the game's
+    first line: "dyld cache '(null)' not loaded: syscall to map cache into shared region failed", then "Library
+    not loaded: .../IOKit".
+    - macOS on Apple silicon loads an executable in the 2 GiB of addresses below the system's shared libraries
+      (the wall itself was met after Part 154), at a place the kernel moves by a random amount each time.
+      Measured over 4,000 starts of a small program: 0, 32 or 64 MiB, and up to 16 MiB more in steps of
+      16 KiB; 80 MiB at most.
+    - How much room a program needs to start every time, measured with programs that leave a chosen room (a
+      zero-filled array of that size), 300 starts each: with 64 MiB left 94 died in dyld; 72: 71; 75: 47;
+      78: 33; 80: 29; 82: 5; 84: 2; with 88, 96 and 112 MiB none.
+    - The pack's game is 2,068,933,648 bytes and its image ends 74.9 MiB under the libraries: 14 of 64 starts
+      died (4 of 24, then 10 of 40). With the move turned off for the process (`posix_spawn` with the flag a
+      debugger sets for the program it starts) none of 64 did.
+    - The launcher starts such a game through itself: `--exec-at-linked-address <program> ...` becomes the
+      program, by `posix_spawn`'s exec, with the move off (`launcher/src/fixed_address.rs`). Only on macOS on
+      Apple silicon, and only for a program that leaves under 128 MiB of the room (88 was enough in every
+      start measured; the rest is margin). Any other game keeps its random address: the price is that
+      process's address randomisation, paid only where a start could fail. The process is the game's own
+      (same pid, streams and environment). The test scenario starts the game the same way now, and starts it
+      again when a bare start dies so.
+    - This keeps a pack of this size starting, no more: the room itself is the limit, and a pack much larger
+      than this one needs the mods' code in a library of its own, which loads above the shared libraries.
+  - `mods add-java --build` called itself. Part 194's merge kept upstream's `native-build` command inline and
+    left the function the one-step path ends with (drop a jar, translate, build) as a call to itself. Part 195
+    tried the two commands one after the other, so it did not show, and the compiler's warning ("function
+    cannot return without recursing") went unread.
+    - The build after a translation is the `native-build` command itself now, run through the CLI's own
+      dispatcher: no copy of upstream's code to keep in step. A test holds it to what the parser gives for
+      `native-build --instance A --trust-native-code`. Tried on a scratch launcher home with no game
+      installed: Waddles is translated and turned on, then the command says "No version is installed yet",
+      as `native-build` does there.
+    - `upgrade::feature_file` of horizon-port-pack had lost its only caller in the same merge (upstream's
+      `worldgen::features` does that work); the file is upstream's again.
+  - Tests: core 32, runtime 930, the translator's suites plain and under collector stress. The launcher's
+    binary 121; its library 684, and one that fails on this machine for a reason no change here reaches
+    (`an_app_bundle_updates_in_place` runs a re-signed copy of `/usr/bin/true`, which this macOS kills).
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
