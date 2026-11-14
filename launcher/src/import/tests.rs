@@ -192,7 +192,10 @@ fn says_what_a_dropped_file_is() {
             zip_file(
                 &p,
                 &[
-                    ("META-INF/neoforge.mods.toml", b"[[mods]]\nmodId = \"waddles\"\n"),
+                    (
+                        "META-INF/neoforge.mods.toml",
+                        b"[[mods]]\nmodId = \"waddles\"\n",
+                    ),
                     ("com/girafi/waddles/Waddles.class", b"\xca\xfe"),
                 ],
             );
@@ -326,7 +329,10 @@ fn java_mods_get_an_instance_of_their_own() {
     assert_ne!(second.home, first.home);
 
     let lib = dir.join("drop/lib.jar");
-    zip_file(&lib, &[("META-INF/neoforge.mods.toml", toml("lib", "Lib").as_bytes())]);
+    zip_file(
+        &lib,
+        &[("META-INF/neoforge.mods.toml", toml("lib", "Lib").as_bytes())],
+    );
     let err = translate_new_with(&lib, &|_| {}, &create).unwrap_err();
     assert!(err.contains("lib.jar"), "{err}");
     assert!(!homes.join("lib").exists());

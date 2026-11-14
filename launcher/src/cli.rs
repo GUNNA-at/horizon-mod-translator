@@ -2282,18 +2282,21 @@ fn github_native(
     Ok(())
 }
 
-/// Builds the native mods of `folder` (default: the ones installed and turned on in `instance`'s
-/// game folder) into the game the instance then plays (`native-build`, `mods add-java --build`).
-fn native_build(
-    folder: Option<PathBuf>,
-    instance: Option<String>,
-    version: Option<String>,
-    update: bool,
-    allow_version_mismatch: bool,
-    profile: Option<String>,
-) -> Result<(), String> {
-    native_build(folder, instance, version, update, allow_version_mismatch, profile)?;
-    Ok(())
+/// The `native-build` command `mods add-java --build` ends with: the native mods installed and
+/// turned on in `instance`'s game folder, built into the game the instance then plays. Its caller
+/// has asked for the trust the command asks for.
+fn native_build_command(instance: Option<String>) -> Cmd {
+    Cmd::NativeBuild {
+        folder: None,
+        server_output: None,
+        instance,
+        version: None,
+        update: false,
+        trust_native_code: true,
+        allow_version_mismatch: false,
+        ignore_pins: false,
+        profile: None,
+    }
 }
 
 fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
@@ -2702,11 +2705,28 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                 for m in &out.mods {
                     match (&m.path, &m.native) {
                         (content, Some(native)) => {
-                            println!("{}: its code translated into Rust ({}){}.", m.mod_id, native.display(),
-                                if content.is_some() { ", its content into horizon-mods" } else { "" });
-                            println!("  Without its code it would be: {}. {}", m.verdict.label(), m.summary);
+                            println!(
+                                "{}: its code translated into Rust ({}){}.",
+                                m.mod_id,
+                                native.display(),
+                                if content.is_some() {
+                                    ", its content into horizon-mods"
+                                } else {
+                                    ""
+                                }
+                            );
+                            println!(
+                                "  Without its code it would be: {}. {}",
+                                m.verdict.label(),
+                                m.summary
+                            );
                         }
-                        (Some(_), None) => println!("{}: {}, carried over. {}", m.mod_id, m.verdict.label(), m.summary),
+                        (Some(_), None) => println!(
+                            "{}: {}, carried over. {}",
+                            m.mod_id,
+                            m.verdict.label(),
+                            m.summary
+                        ),
                         (None, None) => println!("{}: not installed. {}", m.mod_id, m.summary),
                     }
                 }
@@ -2725,9 +2745,11 @@ fn mods(action: ModsCmd, as_json: bool) -> Result<(), String> {
                 return Ok(());
             }
             if build {
-                native_build(None, instance, None, false, false, None)?;
+                execute(native_build_command(instance), false)?;
             } else if !as_json {
-                let which = instance.map(|i| format!(" --instance '{i}'")).unwrap_or_default();
+                let which = instance
+                    .map(|i| format!(" --instance '{i}'"))
+                    .unwrap_or_default();
                 println!("Build the game with them next: horizon-launcher native-build{which} --trust-native-code");
             }
         }
@@ -4022,6 +4044,46 @@ mod tests {
             parse(&["--instance", "A"]).unwrap().command,
             Some(Cmd::NativeBuild { instance: Some(i), server_output: None, .. }) if i == "A"
         ));
+    }
+
+    /// `mods add-java --build` ends with what `native-build --instance A --trust-native-code`
+    /// is: every field as the parser gives it for that command line.
+    #[test]
+    fn add_java_builds_as_the_native_build_command_does() {
+        let fields = |command: Option<Cmd>| match command {
+            Some(Cmd::NativeBuild {
+                folder,
+                server_output,
+                instance,
+                version,
+                update,
+                trust_native_code,
+                allow_version_mismatch,
+                ignore_pins,
+                profile,
+            }) => (
+                (folder, server_output, instance, version, profile),
+                (
+                    update,
+                    trust_native_code,
+                    allow_version_mismatch,
+                    ignore_pins,
+                ),
+            ),
+            _ => panic!("expected native-build"),
+        };
+        let typed = [
+            "horizon-launcher",
+            "native-build",
+            "--trust-native-code",
+            "--instance",
+            "A",
+        ];
+        let parsed = Cli::try_parse_from(typed).unwrap().command;
+        assert_eq!(
+            fields(Some(native_build_command(Some("A".into())))),
+            fields(parsed)
+        );
     }
 
     #[test]

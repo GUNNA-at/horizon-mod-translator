@@ -316,7 +316,10 @@ fn stem(path: &Path) -> String {
 /// What the Java mods at `path` are called: a mod jar's mod's name, a modpack's name, else the
 /// file's or folder's.
 pub fn name_of(path: &Path) -> String {
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jar")) {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("jar"))
+    {
         return horizon_port_pack::jar::read(path)
             .ok()
             .map(|info| info.name.trim().to_string())

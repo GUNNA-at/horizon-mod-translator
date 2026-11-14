@@ -109,7 +109,12 @@ impl Launcher {
     /// Translates the Java mod `file` into `instance` on a background thread: its content mods
     /// and its code, translated into Rust, turned on; the Mods page's Build then builds the game
     /// with them.
-    fn translate_java(&mut self, file: PathBuf, instance: instances::Instance, cx: &mut Context<Self>) {
+    fn translate_java(
+        &mut self,
+        file: PathBuf,
+        instance: instances::Instance,
+        cx: &mut Context<Self>,
+    ) {
         self.importing.translating += 1;
         self.importing.note = None;
         let task = cx.background_executor().spawn(async move {
