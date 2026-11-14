@@ -11844,6 +11844,65 @@ Pass `--game-dir`: the game folder defaults to the working directory.
   - Tests: core 32, runtime 930, the translator's suites plain and under collector stress. The launcher's
     binary 121; its library 684, and one that fails on this machine for a reason no change here reaches
     (`an_app_bundle_updates_in_place` runs a re-signed copy of `/usr/bin/true`, which this macOS kills).
+- [x] 2026-11-14 Part 198: memory by its address, a linked map's ends, and zlib's two coders.
+  - Why every tile the map mod wrote was blank. JourneyMap draws a region into an image and, to write it,
+    copies that image first: a new `NativeImage` of the same size filled with `MemoryUtil.memCopy(from.pixels,
+    to.pixels, width * height * 4)` (`ImageHolder.writeImageToFile`). Nothing answered `memCopy`: the copy
+    stayed empty and the file was 2,197 bytes of nothing, whatever the region held.
+  - `native_memory`: LWJGL's `MemoryUtil` on what the runtime gives an address of.
+    - Measured over the pack: nine classes reach an image's pixels by their address (two mods read their
+      leaves' colours with `memGetInt(pixels + (x + y * width) * 4)`, the map mod copies a region and lays a
+      buffer over another's pixels, a menu mod keeps an animated texture's frames in blocks of its own), and
+      eight jars name `MemoryUtil` at all (most of the rest write vertices into a renderer's buffers).
+    - An address names an object of the runtime's heap in its upper half and a byte of that object's memory in
+      its lower: an open image, a block a mod allocated by address (`nmemAlloc`, kept in a list until it is
+      freed: an address is no reference, and the collector would take the block), or the array under a byte
+      buffer (`memAlloc`, `memAddress`). An address of anything else is not answered, and the call stays one
+      nothing maps.
+    - Answered: `memGet`/`memPut` of a byte, short, int, long, float, double and address; `memCopy`; `memSet`
+      of an address and of a buffer; `memByteBuffer(address, capacity)`; `nmemAlloc`, `nmemCalloc`,
+      `nmemAlignedAlloc`, `nmemRealloc`, `nmemFree`; `memAlloc`, `memCalloc`, `memAlignedAlloc`, `memRealloc`,
+      `memFree`; `memAddress` of a buffer at its position, at an index and at its start.
+    - A byte buffer can lie over memory that is no Java array now (`nio::view`): it reads and writes that
+      memory, is direct and has no array, in the machine's byte order, as LWJGL's is on a JVM.
+    - The expected values of its tests are LWJGL 3.3.3's on JDK 21, run with the game's own jar: the byte
+      orders, `memSet`'s low byte, a grown block's bytes, a buffer's address at its position and what a
+      reallocated buffer keeps.
+  - A fastutil linked map moved by hand: `getAndMoveToFirst`, `getAndMoveToLast`, `putAndMoveToFirst`,
+    `putAndMoveToLast`, `removeFirst`, `removeLast` (and by a primitive's name: `removeLastInt`), `firstLongKey`,
+    `lastLongKey`. A cache of what was used last is made of one: JourneyMap's store of chunk files keeps 256
+    open so, and every read and write of it went unanswered. Expected values: fastutil 8.5.18's on a JVM.
+  - `java.util.zip.Deflater` and `Inflater` on their own (`zip_coders`; the streams built on them were there).
+    Five of the pack's jars use each; the map mod packs its chunk files and its far-away tiles with them.
+    - Neither is a zlib kept open between calls: a `Deflater` gathers the input its `deflate` calls take and
+      packs all of it at the first `deflate` after `finish()`; an `Inflater` unpacks all the input it has
+      whenever more came, and hands the result out as it is asked for. What a caller sees through
+      `needsInput`, `finished`, `getRemaining` and the counts is what a JVM shows for the same calls.
+    - The fixture's new `deflaters` case (eight parts: both wrappers, a level, a reset, a stream a JVM's zlib
+      made, input in two halves, what is no stream, input before `finish()`, bytes left after the end)
+      matches the JVM. Its third part found that `setInput` takes the place of input not yet taken, where
+      the first draft added to it.
+    - Not answered: a preset dictionary, and a flush that asks for the bytes so far before `finish()`.
+  - Tests: core 32, runtime 936 (memory by address: a pixel, a copy, a buffer over pixels, a block, a buffer's
+    address; a linked map's ends), the translator's suites plain and under collector stress, the fixture's
+    `deflaters`.
+  - Round 44 (751 s, 11 crates, 2,068,982,576 bytes) and launch 44, the first started through the launcher's
+    worker (`--exec-at-linked-address`: one start, the game's own process):
+    - The tiles hold the map: 34 PNG files, every one with pixels (none of 34 in launch 43): the forest around
+      the spawn, its ground, a ruin's roof, snow, in each of the mod's four kinds (`day`, `night`, `topo`,
+      `biome`). Water is missing from them: its sprite is asked of `ModelManager.getAtlas`, which nothing
+      answered yet.
+    - `memCopy`, the linked map's two methods and `Deflater` are gone from the unmapped: 742 lines (754). The
+      map mod's chunk files open ("JMChunkCache: opened"); a map task takes 8.7 s (10.2), its topographic
+      renderer 163 ms a chunk over 838 chunks (183 over 602).
+    - Ready after 333 s (331), resources 204.7 s (202.6), 110 uncaught (112), the mods' own errors 498 lines of
+      476 kinds (the same), a log of 8,249 lines. The client's thread spends 17.4 to 18.3 of every 20 s in the
+      mods' hooks and draws 19.7 frames a second (16.3); the mods' threads are 6 to 12 on the client (26% of
+      its thread), 5 to 7 on the server.
+    - The press did not get its ingot in this launch, for a reason of the scenario's own: the player's place is
+      drawn anew at each start, this time under a tree, and the ingot was summoned into a block of leaves
+      between the depot and the press (the depot stayed empty, the press idle). The scenario clears that block
+      first now.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
