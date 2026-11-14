@@ -26,6 +26,12 @@ const RESOLVER: &str = "net/minecraft/world/level/ColorResolver";
 const REDSTONE_WIRE: &str = "net/minecraft/world/level/block/RedStoneWireBlock";
 const MINECRAFT: &str = "net/minecraft/client/Minecraft";
 const BIOME: &str = "net/minecraft/world/level/biome/Biome";
+const CLIMATE: &str = "net/minecraft/world/level/biome/Biome$ClimateSettings";
+const GRASS_MODIFIER: &str =
+    "net/minecraft/world/level/biome/BiomeSpecialEffects$GrassColorModifier";
+/// 1.21.1's own fog and water fog where a biome's file names none (the overworld's).
+const FOG: i32 = 0xC0_D8FF;
+const WATER_FOG: i32 = 0x05_0533;
 const BLOCK_COLOR: &str = "net/minecraft/client/color/block/BlockColor.getColor.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/BlockAndTintGetter;Lnet/minecraft/core/BlockPos;I)I";
 const ITEM_COLOR: &str =
     "net/minecraft/client/color/item/ItemColor.getColor.(Lnet/minecraft/world/item/ItemStack;I)I";
@@ -456,6 +462,93 @@ fn biome_object_color(rt: &mut Rt, biome: V, color: BiomeColor) -> i32 {
     }
 }
 
+/// `BiomeSpecialEffects`' constructor, as the records' table makes one ([`crate::records`]): fog,
+/// water, water fog, sky; what it sets its foliage and its grass to; its grass's modifier; and
+/// five things of its particles, sounds and music, which are the game's own here.
+const EFFECTS_INIT: &str = "(IIIILjava/util/Optional;Ljava/util/Optional;Lnet/minecraft/world/level/biome/BiomeSpecialEffects$GrassColorModifier;Ljava/util/Optional;Ljava/util/Optional;Ljava/util/Optional;Ljava/util/Optional;Ljava/util/Optional;)V";
+
+/// `Biome.getSpecialEffects()`, as 1.21.1 had it, for the biome object `biome`: made once from
+/// the biome's file as the game has it now. Its water, and the foliage and grass it sets, are
+/// still among the file's `effects`; its sky, fog and water fog are attributes of how the
+/// biome looks (`minecraft:visual/sky_color`...), and where the file names none they are
+/// 1.21.1's own defaults: the overworld's fog and water fog, and the sky its temperature gives
+/// (`OverworldBiomes.calculateSkyColor`).
+fn special_effects(rt: &mut Rt, biome: V) -> V {
+    let made = rt.get_field(biome, "$effects");
+    if made.r() != 0 {
+        return made;
+    }
+    let json: serde_json::Value = rt
+        .str_of(rt.get_field(biome, "$id"))
+        .map(str::to_owned)
+        .and_then(|id| rt.host().and_then(|h| h.biome_json(&id)))
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let looks = |name: &str| {
+        data_color(&json["effects"][name])
+            .or_else(|| data_color(&json["attributes"][format!("minecraft:visual/{name}")]))
+    };
+    let temperature = json["temperature"].as_f64().unwrap_or(0.8) as f32;
+    let set = |rt: &mut Rt, name: &str| {
+        let held = match data_color(&json["effects"][name]) {
+            Some(c) => crate::api_common::integer(rt, c),
+            None => V::NULL,
+        };
+        crate::api_common::optional(rt, held)
+    };
+    let (foliage, grass) = (set(rt, "foliage_color"), set(rt, "grass_color"));
+    let which = match json["effects"]["grass_color_modifier"].as_str() {
+        Some("dark_forest") => "DARK_FOREST",
+        Some("swamp") => "SWAMP",
+        _ => "NONE",
+    };
+    let key = rt.static_key(&format!("{GRASS_MODIFIER}.{which}"));
+    let modifier = crate::api::get_static(rt, key);
+    let mut args = vec![
+        V::I(looks("fog_color").unwrap_or(FOG)),
+        V::I(looks("water_color").unwrap_or(PLAINS[2])),
+        V::I(looks("water_fog_color").unwrap_or(WATER_FOG)),
+        V::I(looks("sky_color").unwrap_or_else(|| sky_of(temperature))),
+        foliage,
+        grass,
+        modifier,
+    ];
+    for _ in 0..5 {
+        args.push(crate::api_common::optional(rt, V::NULL));
+    }
+    // (A data class of the records' table: the table answers its getters. On one line, with
+    // the call that makes it: the records' test tells a class built so from one modelled here.)
+    #[rustfmt::skip]
+    let effects = crate::records::make_data(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects", EFFECTS_INIT, &args);
+    rt.put_field(biome, "$effects", effects);
+    effects
+}
+
+/// 1.21.1's sky for a biome of `temperature` (`OverworldBiomes.calculateSkyColor`): a hue and
+/// a saturation that go with the temperature, at full brightness.
+fn sky_of(temperature: f32) -> i32 {
+    let f = (temperature / 3.0).clamp(-1.0, 1.0);
+    let (h, s, v) = (0.622_222_24 - f * 0.05, 0.5 + f * 0.1, 1.0f32);
+    // `Mth.hsvToRgb`.
+    let i = (h * 6.0) as i32 % 6;
+    let fr = h * 6.0 - (h * 6.0).floor();
+    let (p, q, t) = (
+        v * (1.0 - s),
+        v * (1.0 - fr * s),
+        v * (1.0 - (1.0 - fr) * s),
+    );
+    let (r, g, b) = match i {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    let byte = |c: f32| (c * 255.0) as i32 & 0xFF;
+    (byte(r) << 16) | (byte(g) << 8) | byte(b)
+}
+
 /// `ItemColors.getColor(stack, tintIndex)`: the handler registered for the stack's item, else none.
 fn item_color(rt: &mut Rt, stack: V, index: i32) -> i32 {
     let item = rt.get_field(stack, "$item");
@@ -492,7 +585,22 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
         ),
         REDSTONE_WIRE => name == "getColorForPower",
         RESOLVER => name == "getColor",
-        BIOME => matches!(name, "getGrassColor" | "getFoliageColor" | "getWaterColor"),
+        BIOME => matches!(
+            name,
+            "getGrassColor"
+                | "getFoliageColor"
+                | "getWaterColor"
+                | "getFogColor"
+                | "getSkyColor"
+                | "getWaterFogColor"
+                | "getSpecialEffects"
+                | "getModifiedSpecialEffects"
+                | "$climateSettings"
+                | "getGrassColorFromTexture"
+                | "getFoliageColorFromTexture"
+        ),
+        CLIMATE => matches!(name, "temperature" | "downfall" | "hasPrecipitation"),
+        GRASS_MODIFIER => name == "modifyColor",
         _ => name == "getBlockTint" && desc == BLOCK_TINT,
     }
 }
@@ -544,6 +652,66 @@ pub(crate) fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
         (BIOME, "getGrassColor") => V::I(biome_object_color(rt, a(0), BiomeColor::Grass)),
         (BIOME, "getFoliageColor") => V::I(biome_object_color(rt, a(0), BiomeColor::Foliage)),
         (BIOME, "getWaterColor") => V::I(biome_object_color(rt, a(0), BiomeColor::Water)),
+        // 1.21.1's special effects of a biome, and its colours that live there.
+        (BIOME, "getSpecialEffects" | "getModifiedSpecialEffects") => special_effects(rt, a(0)),
+        (BIOME, "getFogColor" | "getSkyColor" | "getWaterFogColor") => {
+            let effects = special_effects(rt, a(0));
+            rt.get_field(
+                effects,
+                match name {
+                    "getFogColor" => "fogColor",
+                    "getSkyColor" => "skyColor",
+                    _ => "waterFogColor",
+                },
+            )
+        }
+        // `modifyColor(x, z, color)`: a dark forest's darker green; a swamp's, the lighter of
+        // its two (vanilla's noise picks one by position).
+        (GRASS_MODIFIER, "modifyColor") => {
+            let c = a(3).i();
+            let which = crate::api_common::enum_name(rt, a(0), false);
+            V::I(match rt.str_of(which) {
+                Some("DARK_FOREST") => ((c & 0xFE_FEFE) + 0x28_340A) >> 1,
+                Some("SWAMP") => 0x6A_7039,
+                _ => c,
+            })
+        }
+        // Its climate (`climateSettings`, a field mods read through an accessor).
+        (BIOME, "$climateSettings") => {
+            let biome = a(0);
+            match rt.get_field(biome, "$climate") {
+                made if made.r() != 0 => made,
+                _ => {
+                    let climate = rt.new_object(CLIMATE);
+                    rt.put_field(climate, "$biome", biome);
+                    rt.put_field(biome, "$climate", climate);
+                    climate
+                }
+            }
+        }
+        (CLIMATE, "temperature" | "downfall" | "hasPrecipitation") => {
+            let biome = rt.get_field(a(0), "$biome");
+            rt.get_field(
+                biome,
+                match name {
+                    "temperature" => "$temperature",
+                    "downfall" => "$downfall",
+                    _ => "$precipitation",
+                },
+            )
+        }
+        // The colour maps' own answer for its climate, whatever its file sets instead.
+        (BIOME, "getGrassColorFromTexture" | "getFoliageColorFromTexture") => {
+            let climate = |rt: &Rt, field: &'static str| {
+                f64::from(rt.get_field(a(0), field).f()).clamp(0.0, 1.0)
+            };
+            let (temperature, downfall) = (climate(rt, "$temperature"), climate(rt, "$downfall"));
+            V::I(if name == "getGrassColorFromTexture" {
+                grass_at(rt, temperature, downfall)
+            } else {
+                foliage_at(rt, temperature, downfall)
+            })
+        }
         (_, "getBlockTint") if desc == BLOCK_TINT => V::I(block_tint(rt, a(0), a(1), a(2))),
         _ => return None,
     })
@@ -859,6 +1027,83 @@ mod tests {
     /// The biome a level hands out at a position is there to ask (`getBiome(pos).value()`): it
     /// snows where its temperature is under 0.15, which height brings a temperate biome to far
     /// above the clouds, and nothing falls in one without precipitation.
+    /// 1.21.1's special effects of a biome, from the biome's file as the game has it now: its
+    /// sky and fog are attributes of how it looks there, its water and what it sets its foliage
+    /// to are still its effects. Where the file names no sky it is the one 1.21.1 made of the
+    /// temperature (plains at 0.8: 0x78A7FF, vanilla's own), and no fog is the overworld's.
+    #[test]
+    fn a_biomes_special_effects_are_read_from_its_file() {
+        struct Biomes;
+        impl Host for Biomes {
+            fn block_state(&self, _pos: [i32; 3]) -> String {
+                "minecraft:air".into()
+            }
+            fn set_block_state(&mut self, _pos: [i32; 3], _state: &str) -> bool {
+                false
+            }
+            fn biome(&self, pos: [i32; 3]) -> Option<String> {
+                Some(
+                    if pos[0] < 0 {
+                        "minecraft:swamp"
+                    } else {
+                        "minecraft:plains"
+                    }
+                    .into(),
+                )
+            }
+            fn biome_json(&self, id: &str) -> Option<String> {
+                Some(match id {
+                    "minecraft:swamp" => r##"{"temperature":0.8,"downfall":0.9,"has_precipitation":true,
+                        "attributes":{"minecraft:visual/sky_color":"#78a7ff","minecraft:visual/fog_color":"#ccd8e2","minecraft:visual/water_fog_color":"#232317"},
+                        "effects":{"water_color":"#617b64","foliage_color":"#6a7039","grass_color_modifier":"swamp"}}"##.into(),
+                    _ => r##"{"temperature":0.8,"downfall":0.4,"has_precipitation":true,"effects":{"water_color":"#3f76e4"}}"##.into(),
+                })
+            }
+        }
+        let mut rt = runtime();
+        let mut host = Biomes;
+        rt.with_host(&mut host, |rt| {
+            use crate::api::call as ask;
+            let level = crate::glue::level(rt);
+            let biome_at = |rt: &mut Rt, x: i64| {
+                let pos = crate::api::block_pos(rt, x, 64, 0);
+                let holder = ask(rt, "net/minecraft/world/level/Level.getBiome.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/Holder;", &[level, pos]);
+                ask(rt, "net/minecraft/core/Holder.value.()Ljava/lang/Object;", &[holder])
+            };
+            let plains = biome_at(rt, 5);
+            // The biomes' registry holds that very object under its key.
+            assert_eq!(crate::neo::registry_get(rt, "biome", "minecraft:plains"), plains);
+            assert_eq!(ask(rt, "net/minecraft/world/level/biome/Biome.getSkyColor.()I", &[plains]), V::I(0x78_A7FF));
+            assert_eq!(ask(rt, "net/minecraft/world/level/biome/Biome.getFogColor.()I", &[plains]), V::I(0xC0_D8FF));
+            let swamp = biome_at(rt, -5);
+            const EFFECTS_OF: &str = "net/minecraft/world/level/biome/Biome.getSpecialEffects.()Lnet/minecraft/world/level/biome/BiomeSpecialEffects;";
+            let effects = ask(rt, EFFECTS_OF, &[swamp]);
+            assert_eq!(ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects.getFogColor.()I", &[effects]), V::I(0xCC_D8E2));
+            assert_eq!(ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects.getWaterColor.()I", &[effects]), V::I(0x61_7B64));
+            assert_eq!(ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects.getWaterFogColor.()I", &[effects]), V::I(0x23_2317));
+            let foliage = ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects.getFoliageColorOverride.()Ljava/util/Optional;", &[effects]);
+            let held = ask(rt, "java/util/Optional.get.()Ljava/lang/Object;", &[foliage]);
+            assert_eq!(crate::mixin::unbox(rt, held, 'I'), V::I(0x6A_7039));
+            let grass = ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects.getGrassColorOverride.()Ljava/util/Optional;", &[effects]);
+            assert_eq!(ask(rt, "java/util/Optional.isPresent.()Z", &[grass]), V::I(0));
+            let modifier = ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects.getGrassColorModifier.()Lnet/minecraft/world/level/biome/BiomeSpecialEffects$GrassColorModifier;", &[effects]);
+            let name = crate::api_common::enum_name(rt, modifier, false);
+            assert_eq!(rt.str_of(name), Some("SWAMP"));
+            // A dark forest's grass is darkened so (vanilla's own arithmetic on plains' green).
+            let dark = crate::api::get_static(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects$GrassColorModifier.DARK_FOREST");
+            assert_eq!(
+                ask(rt, "net/minecraft/world/level/biome/BiomeSpecialEffects$GrassColorModifier.modifyColor.(DDI)I", &[dark, V::D(0.0), V::D(0.0), V::I(0x91_BD59)]),
+                V::I(0x5C_7831)
+            );
+            // Its climate, as the accessor reads the field.
+            let climate = ask(rt, "net/minecraft/world/level/biome/Biome.$climateSettings.()Lnet/minecraft/world/level/biome/Biome$ClimateSettings;", &[swamp]);
+            assert_eq!(ask(rt, "net/minecraft/world/level/biome/Biome$ClimateSettings.downfall.()F", &[climate]), V::F(0.9));
+            // The same object each time.
+            assert_eq!(ask(rt, EFFECTS_OF, &[swamp]), effects);
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+
     #[test]
     fn a_levels_biome_says_whether_it_rains_or_snows() {
         struct Climates;

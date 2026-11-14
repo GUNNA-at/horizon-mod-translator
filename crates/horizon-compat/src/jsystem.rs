@@ -369,12 +369,11 @@ pub(crate) fn in_started_thread() -> bool {
 /// the pools hold run meanwhile as their threads would run it beside the one waiting
 /// ([`crate::tasks`]): what the code waits for may be that work's doing. In the body of a
 /// thread a mod started, which runs where it was started ([`thread`]), it can't be waited out:
-/// - in a game, or while the mods load for one, the body ends there ([`LATER`]) and the thread
-///   is started again, from its beginning, on a stack of its own once the game's thread lends
-///   its runtime ([`crate::mod_threads::start_later`]): a loop that takes work from a queue,
-///   or sleeps between two looks, lives then as it does on a JVM;
-/// - with no game (a probe, a test) the thread is interrupted, as a mod stops one of its own,
-///   and its loop ends the way the mod wrote it to.
+/// the body ends there ([`LATER`]), and the thread is started again, from its beginning, on a
+/// stack of its own once the game's thread lends its runtime
+/// ([`crate::mod_threads::start_later`]): a loop that takes work from a queue, or sleeps between
+/// two looks, lives then as it does on a JVM. (Where no game ever runs, a probe or a test, that
+/// is the end of it. A wait asked with no such thread known is an interrupt, as before.)
 pub(crate) fn wait(rt: &mut Rt) -> V {
     let (depth, waits) = STARTED.with(|s| s.get());
     if depth == 0 {
@@ -382,9 +381,7 @@ pub(crate) fn wait(rt: &mut Rt) -> V {
         return V::Void;
     }
     STARTED.with(|s| s.set((depth, waits + 1)));
-    if (crate::neo::loading(rt) || rt.host().is_some())
-        && let Some(thread) = INLINE.with(|i| i.borrow().last().copied())
-    {
+    if let Some(thread) = INLINE.with(|i| i.borrow().last().copied()) {
         crate::mod_threads::start_later(rt, thread);
         return crate::jlang::throw_with(
             rt,

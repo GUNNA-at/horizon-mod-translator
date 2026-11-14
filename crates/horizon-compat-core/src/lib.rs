@@ -1459,6 +1459,16 @@ impl Rt {
             Some(Data::Native("Plane", h)) => {
                 if h[0] != 0 { "VERTICAL" } else { "HORIZONTAL" }.into()
             }
+            // An enum's constant, known by what `Enum.<init>` kept of it (its name and its
+            // ordinal): `Enum.toString`, its name. Whatever writes an object's text comes
+            // through here (a joiner, a format, a concatenation), and a mod's enum has no
+            // `toString` of its own to be asked first: it was written `Class@hash`.
+            Some(Data::Fields(f))
+                if matches!(f.get("$ordinal"), Some(V::I(_)))
+                    && f.get("$name").is_some_and(|n| self.str_of(*n).is_some()) =>
+            {
+                self.str_of(f["$name"]).unwrap_or_default().to_owned()
+            }
             _ => format!("{}@{:x}", class.replace('/', "."), v.r()),
         }
     }

@@ -1163,6 +1163,11 @@ fn pose_stack(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
         }
         return Some(V::Void);
     }
+    // Its poses themselves (`poseStack`, a field mods read through an accessor: Create's
+    // renderers push a pose of their own on it): the stack is that deque here, its top last.
+    if name == "$poseStack" {
+        return Some(this);
+    }
     let top = last(rt, this);
     let (pm, nm) = pose_mats(rt, top);
     let (m, n) = (mat4(rt, pm), mat3(rt, nm));
@@ -1243,6 +1248,15 @@ fn pose_stack(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
 fn pose(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V> {
     let a = |i| arg(args, i);
     let this = a(0);
+    // `new PoseStack.Pose(pose, normal)`: a pose of the matrices given, themselves (a mod that
+    // pushes a pose of its own on the stack's deque keeps writing to them).
+    if name == "<init>" {
+        if desc.starts_with("(Lorg/joml/Matrix4f;Lorg/joml/Matrix3f;)") {
+            rt.put_field(this, "pose", a(1));
+            rt.put_field(this, "normal", a(2));
+        }
+        return Some(V::Void);
+    }
     let (pm, nm) = pose_mats(rt, this);
     Some(match (name, desc) {
         ("pose", _) => pm,
@@ -2318,6 +2332,81 @@ fn model_of(rt: &Rt, model: V) -> Option<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pose stack's own deque, as a mod reaches it through an accessor: its last is the
+    /// stack's top pose, and a pose a mod adds to it (`new Pose(matrix, normal)`) is the top
+    /// from then on, with the very matrices it was made of.
+    #[test]
+    fn a_pose_stacks_deque_is_its_poses() {
+        let mut rt = Rt::new();
+        crate::install();
+        let stack = new_pose_stack(&mut rt, IDENTITY);
+        let ask = |rt: &mut Rt, key: &'static str, args: &[V]| crate::api::call(rt, key, args);
+        let deque = ask(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/PoseStack.$poseStack.()Ljava/util/Deque;",
+            &[stack],
+        );
+        let top = ask(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/PoseStack.last.()Lcom/mojang/blaze3d/vertex/PoseStack$Pose;",
+            &[stack],
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "java/util/Deque.getLast.()Ljava/lang/Object;",
+                &[deque]
+            ),
+            top
+        );
+        // A pose of a mod's own: moved two blocks up.
+        let mut moved = IDENTITY;
+        moved[13] = 2.0;
+        let (m4, m3) = (new_mat4(&mut rt, moved), new_mat3(&mut rt, IDENTITY3));
+        let pose = rt.new_object("com/mojang/blaze3d/vertex/PoseStack$Pose");
+        ask(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/PoseStack$Pose.<init>.(Lorg/joml/Matrix4f;Lorg/joml/Matrix3f;)V",
+            &[pose, m4, m3],
+        );
+        ask(
+            &mut rt,
+            "java/util/Deque.addLast.(Ljava/lang/Object;)V",
+            &[deque, pose],
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "com/mojang/blaze3d/vertex/PoseStack.last.()Lcom/mojang/blaze3d/vertex/PoseStack$Pose;",
+                &[stack]
+            ),
+            pose
+        );
+        assert_eq!(last_pose(&rt, stack)[13], 2.0);
+        assert_eq!(
+            ask(
+                &mut rt,
+                "com/mojang/blaze3d/vertex/PoseStack$Pose.pose.()Lorg/joml/Matrix4f;",
+                &[pose]
+            ),
+            m4
+        );
+        ask(
+            &mut rt,
+            "com/mojang/blaze3d/vertex/PoseStack.popPose.()V",
+            &[stack],
+        );
+        assert_eq!(
+            ask(
+                &mut rt,
+                "com/mojang/blaze3d/vertex/PoseStack.last.()Lcom/mojang/blaze3d/vertex/PoseStack$Pose;",
+                &[stack]
+            ),
+            top
+        );
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     /// A sprite's own image, as a map mod reads it for a block's colour
     /// (`sprite.contents().byMipLevel[0]`): the texture's file among the game's resources, its

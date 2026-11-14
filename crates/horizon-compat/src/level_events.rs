@@ -486,3 +486,42 @@ mod height_tests {
         assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
     }
 }
+
+#[cfg(test)]
+mod light_tests {
+    use crate::host::MemoryHost;
+    use crate::{Rt, V};
+
+    /// A real level's light engine, as a map mod asks it for a block's light
+    /// (`level.getLightEngine().getLayerListener(LightLayer.BLOCK).getLightValue(pos)`): the
+    /// game's light there, each layer its own. An engine a mod makes for a world of its own
+    /// keeps no light, as before.
+    #[test]
+    fn a_levels_light_engine_tells_each_layers_light() {
+        let mut h = MemoryHost::default();
+        h.light.insert([3, 70, -2], (11, 4));
+        let mut rt = Rt::new();
+        crate::install();
+        rt.with_host(&mut h, |rt| {
+            let level = crate::glue::level(rt);
+            let pos = crate::api::block_pos(rt, 3, 70, -2);
+            let engine = crate::api::call(rt, "net/minecraft/world/level/Level.getLightEngine.()Lnet/minecraft/world/level/lighting/LevelLightEngine;", &[level]);
+            let layer = |rt: &mut Rt, name: &str| {
+                let key: &'static str = format!("net/minecraft/world/level/LightLayer.{name}").leak();
+                crate::api::get_static(rt, key)
+            };
+            const LISTENER: &str = "net/minecraft/world/level/lighting/LevelLightEngine.getLayerListener.(Lnet/minecraft/world/level/LightLayer;)Lnet/minecraft/world/level/lighting/LayerLightEventListener;";
+            const VALUE: &str = "net/minecraft/world/level/lighting/LayerLightEventListener.getLightValue.(Lnet/minecraft/core/BlockPos;)I";
+            for (name, light) in [("BLOCK", 11), ("SKY", 4)] {
+                let l = layer(rt, name);
+                let listener = crate::api::call(rt, LISTENER, &[engine, l]);
+                assert_eq!(crate::api::call(rt, VALUE, &[listener, pos]), V::I(light), "{name}");
+            }
+            assert_eq!(
+                crate::api::call(rt, "net/minecraft/world/level/lighting/LevelLightEngine.getRawBrightness.(Lnet/minecraft/core/BlockPos;I)I", &[engine, pos, V::I(0)]),
+                V::I(11)
+            );
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
+}

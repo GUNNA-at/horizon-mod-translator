@@ -65,6 +65,7 @@ const STATE_PROGRESS: &str = "(Lnet/minecraft/world/entity/player/Player;Lnet/mi
 const STATE_HARVEST: &str = "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;)Z";
 const STATE_DESTROYED: &str = "(Lnet/minecraft/world/level/Level;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/entity/player/Player;ZLnet/minecraft/world/level/material/FluidState;)Z";
 const STATE_AFTER_BREAK: &str = "(Lnet/minecraft/server/level/ServerLevel;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/item/ItemStack;Z)V";
+const STATE_MAP_COLOR: &str = "(Lnet/minecraft/world/level/BlockGetter;Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/material/MapColor;";
 const STATE_SOUND: &str = "()Lnet/minecraft/world/level/block/SoundType;";
 const STATE_EXP: &str = "(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)I";
 const STATE_EXP_KEY: &str = "net/minecraft/world/level/block/state/BlockState.getExpDrop.(Lnet/minecraft/world/level/LevelAccessor;Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/entity/BlockEntity;Lnet/minecraft/world/entity/Entity;Lnet/minecraft/world/item/ItemStack;)I";
@@ -187,6 +188,7 @@ pub(crate) fn claims(owner: &str, name: &str, desc: &str) -> bool {
                 | ("onDestroyedByPlayer", STATE_DESTROYED)
                 | ("spawnAfterBreak", STATE_AFTER_BREAK)
                 | ("getSoundType", STATE_SOUND | STATE_SOUND_AT)
+                | ("getMapColor", STATE_MAP_COLOR)
         ),
         ITEM_STACK => matches!((name, desc), ("getDestroySpeed", STACK_SPEED) | ("isCorrectToolForDrops", STACK_CORRECT) | ("mineBlock", STACK_MINE)),
         COMMON_HOOKS => name == "fireBlockBreak",
@@ -241,6 +243,20 @@ pub fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 },
                 "requiresCorrectToolForDrops" => V::I(requires_tool(rt, &text) as i32),
                 "getExpDrop" => V::I(exp_drop(rt, st, &text, [a(1), a(2), a(3), a(4), a(5)])),
+                // `getMapColor(level, pos)`: its block's (`defaultMapColor()`: what a mod's block
+                // was made with, or the vanilla block it copies; none for any other).
+                "getMapColor" => {
+                    let block = api::call(
+                        rt,
+                        "net/minecraft/world/level/block/state/BlockState.getBlock.()Lnet/minecraft/world/level/block/Block;",
+                        &[st],
+                    );
+                    api::call(
+                        rt,
+                        "net/minecraft/world/level/block/Block.defaultMapColor.()Lnet/minecraft/world/level/material/MapColor;",
+                        &[block],
+                    )
+                }
                 "isSolid" => V::I(solid(rt, &text) as i32),
                 // `liquid()`: a water or lava block (a mod's fluid's own `LiquidBlock` too).
                 "liquid" => V::I(liquid(rt, &text) as i32),

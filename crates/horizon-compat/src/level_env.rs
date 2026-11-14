@@ -53,9 +53,21 @@ pub(crate) fn sky_darken(rt: &Rt) -> i32 {
     ((1.0 - d2 * d0 * d1) * 11.0) as i32
 }
 
-fn light(rt: &Rt, pos: [i32; 3]) -> (i32, i32) {
+pub(crate) fn light(rt: &Rt, pos: [i32; 3]) -> (i32, i32) {
     let (block, sky) = rt.host().map_or((0, 15), |h| h.light(pos));
     (i32::from(block), i32::from(sky))
+}
+
+/// The biome `name` itself (`minecraft:plains`), one object a name: what a level's
+/// `getBiome(pos).value()` is, and what the biomes' registry holds under that key.
+pub(crate) fn biome_object(rt: &mut Rt, name: &str) -> V {
+    let key = format!("compat:biome/{name}");
+    if let Some(biome) = rt.interned.get(&key).copied() {
+        return biome;
+    }
+    let biome = crate::worldgen::biome_value(rt, name);
+    rt.interned.insert(key, biome);
+    biome
 }
 
 /// `getRawBrightness(pos, darkening)`: the brighter of the block light and the sky's less `darkening`.
@@ -322,14 +334,7 @@ pub(crate) fn call(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<V>
             let name = rt.host().and_then(|h| h.biome(p)).unwrap_or_else(|| "minecraft:plains".to_owned());
             // With the biome itself, one object each (`getBiome(pos).value()`: a mod asks it
             // whether it snows there).
-            let value = match rt.interned.get(&format!("compat:biome/{name}")).copied() {
-                Some(biome) => biome,
-                None => {
-                    let biome = crate::worldgen::biome_value(rt, &name);
-                    rt.interned.insert(format!("compat:biome/{name}"), biome);
-                    biome
-                }
-            };
+            let value = biome_object(rt, &name);
             crate::neo::registry_holder(rt, "biome", &name, value)
         }
         _ => return None,

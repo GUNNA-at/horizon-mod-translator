@@ -1021,6 +1021,12 @@ pub(crate) fn registry_get(rt: &mut Rt, registry: &str, id: &str) -> V {
         "damage_type" if crate::recipes::valid_location(id) => crate::damage::damage_type(rt, id),
         // Vanilla's component types (`DataComponents.CUSTOM_NAME`'s), one object a name.
         "data_component_type" if id.starts_with("minecraft:") => crate::components::vanilla_type(rt, id),
+        // Biomes are data, the game's: one it has a file for is the object a level's
+        // `getBiome` gives for it (a map mod looks each biome up by its key, and took every
+        // one it did not find for the void).
+        "biome" if rt.host().is_some_and(|h| h.biome_json(id).is_some()) => {
+            crate::level_env::biome_object(rt, id)
+        }
         _ => V::NULL,
     }
 }

@@ -849,6 +849,9 @@ const RUNAWAY_OBJECTS: usize = 8_000_000;
 /// at every tick: each took [`RUNAWAY_TIME`] to be stopped, and the game stood at ten seconds a
 /// tick for as long as it ran.)
 const RUNAWAY_AGAIN: u64 = 10_000;
+/// On a thread of the mods' own, the time over which [`RUNAWAY_MISSES`] such calls tell a loop:
+/// fewer in that long, and the count begins again.
+const RUNAWAY_SPAN: std::time::Duration = std::time::Duration::from_secs(30);
 
 thread_local! {
     /// What the runtime had allocated at the running hook's first unmapped call: bytes of text
@@ -881,7 +884,20 @@ fn runaway(rt: &mut Rt, key: &'static str) -> bool {
         rt.largest = 0;
         HOOK_ALLOCATED.set((0, rt.heap.len()));
     }
-    let first = *rt.hook_first_miss.get_or_insert_with(std::time::Instant::now);
+    let mut first = *rt
+        .hook_first_miss
+        .get_or_insert_with(std::time::Instant::now);
+    // A thread of the mods' own runs one piece of work for minutes, a slice at a time: what
+    // tells a loop there is how fast such calls come, not how many came since the work began
+    // (a map mod's work asked for each block's light, which nothing mapped, a million times
+    // in 206 seconds, and was stopped as stuck: every call after that threw).
+    if rt.thread_id() != 0 && rt.hook_misses < RUNAWAY_MISSES && first.elapsed() >= RUNAWAY_SPAN {
+        first = std::time::Instant::now();
+        rt.hook_first_miss = Some(first);
+        rt.hook_misses = 1;
+        rt.largest = 0;
+        HOOK_ALLOCATED.set((0, rt.heap.len()));
+    }
     let (_, objects) = HOOK_ALLOCATED.get();
     let grown =
         rt.largest >= RUNAWAY_BYTES || rt.heap.len().saturating_sub(objects) >= RUNAWAY_OBJECTS;
@@ -2455,6 +2471,7 @@ pub(crate) const CAN_SURVIVE_KEY: &str =
     "net/minecraft/world/level/block/state/BlockBehaviour.canSurvive.(Lnet/minecraft/world/level/block/state/BlockState;Lnet/minecraft/world/level/LevelReader;Lnet/minecraft/core/BlockPos;)Z";
 const LEVEL_DATA: &str = "net/minecraft/world/level/storage/LevelData";
 const LEVEL_CHUNK: &str = "net/minecraft/world/level/chunk/LevelChunk";
+const LIGHT_LISTENER: &str = "net/minecraft/world/level/lighting/LayerLightEventListener";
 const CHUNK_ACCESS: &str = "net/minecraft/world/level/chunk/ChunkAccess";
 const CHUNK_CACHE: &str = "net/minecraft/server/level/ServerChunkCache";
 const CHUNK_SOURCE: &str = "net/minecraft/world/level/chunk/ChunkSource";
@@ -3285,12 +3302,38 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
                 pos_of(rt, a(1)),
                 a(2).i(),
             )),
+            // A real level's engine tells each layer's light as the game has it; one a mod made
+            // for a world of its own keeps none.
+            "getLayerListener" if rt.get_field(a(0), "$real").i() != 0 => {
+                let block = rt.str_of(rt.get_field(a(1), "$name")) == Some("BLOCK");
+                rt.intern(format!("compat:light-listener/{}", u8::from(block)), |rt| {
+                    let l = rt.new_object(LIGHT_LISTENER);
+                    rt.put_field(l, "$block", V::I(i32::from(block)));
+                    l
+                })
+            }
             "getLayerListener" => get_static(
                 rt,
                 "net/minecraft/world/level/lighting/LayerLightEventListener$DummyLightLayerEventListener.INSTANCE",
             ),
             _ => return None,
         },
+        // A layer's light at a place (`getLightValue(pos)`), from a real level's engine: the
+        // game's block light or sky light there.
+        (LIGHT_LISTENER, "getLightValue") if rt.class_of(a(0)) == LIGHT_LISTENER => {
+            let (block, sky) = crate::level_env::light(rt, pos_of(rt, a(1)));
+            V::I(if rt.get_field(a(0), "$block").i() != 0 {
+                block
+            } else {
+                sky
+            })
+        }
+        // A level's own light engine (`getLightEngine()`): the game's light, by layer.
+        (_, "getLightEngine") if level => rt.intern("compat:light-engine".into(), |rt| {
+            let engine = rt.new_object("net/minecraft/world/level/lighting/LevelLightEngine");
+            rt.put_field(engine, "$real", V::I(1));
+            engine
+        }),
         // A level's chunk cache, its dimension's (its saved data is that level's).
         (_, "getChunkSource") if level => {
             let d = crate::glue::level_dimension(rt, a(0));

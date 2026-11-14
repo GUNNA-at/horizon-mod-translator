@@ -210,6 +210,10 @@ public class Fixture {
             case 5: return attribute(attributes, "enumType").hashCode();
             case 6: return attribute(attributes, "class").hashCode();
             case 7: return Enum.valueOf(GridKind.class, attribute(attributes, "default")).key().hashCode();
+            // Written among other things, as a config's serializer joins a grid's parts.
+            case 8: return String.format("%s,%s,%s", held, "#808080", -1).hashCode();
+            case 9: return java.util.Objects.toString(held).hashCode() + new StringBuilder().append(held).append(':').toString().hashCode() + new java.util.StringJoiner(",").add(String.valueOf(held)).toString().hashCode();
+            case 10: return java.util.List.of(held, grid).toString().hashCode() + java.util.Map.of("style", held).toString().hashCode();
             default: return attribute(attributes, "default").length() * 31 + held.toString().length() + (grid.lines ? 1000 : 0);
         }
     }
