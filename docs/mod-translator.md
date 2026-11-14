@@ -11610,6 +11610,104 @@ Pass `--game-dir`: the game folder defaults to the working directory.
     A hook that is a free function with no game at hand (a fall, a heal, a jump) gives its helper nothing to
     make a host of. A mod's item colours other than a spawn egg's (`RegisterColorHandlersEvent.Item`) are not
     the item's tints. Collective's listener for an entity a player begins to be told of costs 1.5 ms a call.
+- [x] 2026-11-14 Part 196: threads of the mods' own.
+  - Until here one runtime ran on one thread of the game's and that was all the threads a mod had. A thread it
+    started ran inside `start`, to its end or to its first wait, where it was interrupted. Work it gave a pool
+    ran on the game's thread once the mod's code was done, and held the game while it ran: in a world it had
+    5 seconds, and a kind stopped twice was run no more. JourneyMap draws its map in such work, 82 seconds a
+    piece; it was stopped twice and the map stayed empty. Work with a time of its own (`schedule`,
+    `scheduleAtFixedRate`) never ran at all. Locks and monitors were always free, nothing was ever waited for.
+  - The decision was the user's (2026-11-13: real threads, yes). The model:
+    - A thread of the mods' is a thread of the machine's with a stack of its own (64 MB), and still only one
+      thread runs a runtime at a time. The game's thread lends its runtime, with the game it is in, at a tick's
+      end and between two frames (`mod_threads::lend`): 3 ms every 10 ms at most while some thread has work
+      (`HORIZON_COMPAT_THREAD_MS`, `HORIZON_COMPAT_THREAD_EVERY_MS`), nothing while they all wait. The thread
+      that takes it runs until it waits for something, until its slice is over, or until its body ends
+      (`horizon-compat-core/src/threads.rs`: a baton under one mutex, `run_threads`, `thread_wait`,
+      `thread_wake`, `slice_point` in the call trampoline, once in 64 calls).
+    - What a piece of code is in the middle of goes with its thread: the exception being thrown, the calls from
+      the runtime into the mods' code in progress, what the collector keeps for them, the count of unmapped
+      calls, the locks held.
+    - No thread is made to give up its turn inside a `synchronized` block or method or between `lock()` and
+      `unlock()` (for 50 ms at most), so what a monitor guards is still done in one piece. The translator emits
+      the monitor's enter and exit for that (`monitorenter`/`monitorexit`, and a wrapper around a
+      `synchronized` method); the fixture's new `monitors` case matches the JVM.
+    - Only while the game runs. While the mods load there is no tick and no frame to lend at, and the
+      runtime's copies are made after: there a thread still runs inside `start`, and a pool's work when the
+      mod's code is done, as before.
+  - The collector with threads:
+    - A collection inside a call of the game's thread frees only what was made since it had the runtime back:
+      what is older a waiting thread may hold where nothing shows it.
+    - One inside a call of a mod's thread frees all that was made since that call began, whoever made it, and
+      reads what the other threads hold from their stacks. Only while the game's thread lent from between its
+      own work (`lend_threads`: it holds no value there) and no other thread waits under the runtime's own
+      code; else it frees nothing. Without it, work that runs for minutes a slice at a time would leave all its
+      garbage to the whole collections.
+    - A whole collection is the game's thread's alone. It reads the stacks of the waiting threads as it reads
+      its own in a call (every word that could be a reference), with what each was throwing and keeping. It is
+      put off while a thread waits under the runtime's own code (inside a `forEach`'s lambda), whose containers
+      no stack shows; a thread past its slice runs on up to 2 ms to come out from under it. Found on the way: a
+      collection that could not run doubled the heap size the next one waited for; it is asked for again at
+      the next safe point instead.
+  - What waits now, where the mods' code asks:
+    - `Thread.sleep`, `join`, `interrupt` (a sleeping thread's sleep throws), `yield`, `isAlive`,
+      `currentThread` (each thread its own `Thread`), `Object.wait`/`notify`, a condition's `await`/`signal`,
+      `LockSupport.park`/`unpark`, a latch's `await`, a synchronizer of a mod's own (`acquire` asks again after
+      each release), `ThreadLocal` (a value for each thread).
+    - On the game's own thread a wait cannot stop the game for good: the mods' threads run inside it until what
+      is waited for holds, and it is given up after 5 seconds (a bare `wait()` after 250 ms), at once when no
+      thread could ever change it. With no thread of the mods' at all every wait is over at once, as it was.
+  - Pools:
+    - A pool has one thread of its own, started with its first work and ended after 30 idle seconds
+      (`tasks::to_worker`); the common pool has one too. Work runs there in the order given, for as long as it
+      takes: nothing is stopped for its time there.
+    - Its future is pending meanwhile: `isDone` is false, `get`/`join` wait for it (the game's thread no longer
+      runs it itself), `get(time, unit)` throws `TimeoutException`, and a stage added to it (`thenApply`,
+      `thenAccept`, `handle`, `whenComplete`, `allOf`, `anyOf`...) is kept and run when the work is done, on the
+      thread that did it, as a JVM runs it. A stage for the game's own executor
+      (`thenAcceptAsync(..., Minecraft.getInstance())`) is run by the game's thread when it next comes by.
+    - `schedule`, `scheduleAtFixedRate` and `scheduleWithFixedDelay` run their work when it is due, again and
+      again until cancelled or the pool is shut down. `shutdownNow` drops what was not begun and interrupts
+      what runs; `awaitTermination` waits for the queue.
+  - The game's own thread stays the game's:
+    - `Minecraft.isSameThread()` and the server's are false on a thread of the mods'; what such a thread gives
+      the client's or the server's executor (`execute`, `tell`, `submit`) waits in a queue the game's thread
+      runs after each time it lent the runtime. (The server's `execute` and `tell` were answered by nothing
+      before.)
+    - A hook the game runs from inside a call a mod's thread made finds the runtime that thread was lent
+      (`threads::lent_at`), not a new copy of its own.
+    - A network message sent from a thread of the mods' waits for the game's thread, which sends it in order.
+    - A panic in a thread's code ends that thread alone.
+  - An enum asked for its text as an `Object`: a mod's enum has no `toString` of its own, and the call found
+    no method in the mod's classes and was answered `Class@hash`. JourneyMap writes its config's enum values so
+    (`value.toString()` on a value out of a map of attributes) and could not read its own file again, four
+    times a launch; its world's folder was named `...Constants$WorldType@2cb4a7`. An enum's text is its name
+    now, through whatever type it is asked (the fixture's new `enumObjects` case: two of its eight parts
+    differed from the JVM).
+  - Tests: core 32 (threads: lent and resumed, wake, slice, a monitor keeps the turn, a panic, the collector's
+    four cases), runtime 923 (a started thread sleeps beside the game, a monitor's wait and notify, a task for
+    the client's thread, an interrupt, a thread-local, no threads where nothing lends; a pool's work and its
+    stages, long work not stopped, scheduled work), the translator's suites plain and under collector stress.
+  - Round 40 (every crate again: the runtime's core changed): 2,267 s, 575 crates, 2,068,994,464 bytes (1.4 MB
+    more; 78 MB under the limit).
+  - Launch 40, with 7,200 more ticks in the world at the end (388 s, 18.6 a second):
+    - Ready after 365 s (373), resources 239.5 s (246.1), 771 unmapped (771), 111 uncaught (107: three more of
+      one mod's death effects over the longer stay, one render handler), the mods' own errors 506 lines of 479
+      kinds (508, 480). The press still makes its sheet, the Nether trip takes 6 s.
+    - The mods' threads: 2 to 8 on the client, 12 to 19% of its thread for most of the stay (6 to 31%), about
+      200 turns in 10 s; 1 or 2 on the server, under 0.1%. No whole collection was put off. The client's heap
+      went between 6.4 and 11.5 million objects, 5.9 to 6.3 million after each whole collection: the threads'
+      garbage is collected as they go.
+    - JourneyMap's map work runs to its end on its pool's thread. The line "work given to a pool ... is run no
+      more" and its two `StackOverflowError`s are gone; a change of dimension shuts its pool down and the work
+      in progress is interrupted, as on a JVM ("TaskBatch thread interrupted"). It wrote its tiles: 65 PNG
+      files, 512 by 512. Every one is blank: its colour palette was "generated for 0 blockstates", so the map
+      is still empty, for a reason that is no thread's.
+    - FTB Teams no longer says the local player is unknown (`Minecraft.getUser()`, Part 195).
+    - Five threads were started before their runtime lent for the first time (two while the mods loaded, three
+      as the server started) and still ended at their first wait.
+    - The client's thread spends 17.5 of every 20 s in the mods' hooks (15 to 17 before): 9.0 s drawing in the
+      level, 5.5 s in its ticks, the lent slices among them; it draws 21 frames a second.
 - [ ] Next: standalone harness (`scratchpad/harness`: links only the engine) checks Create registers its blocks and
   block entities at runtime; then the kinetic test in game (creative motor + shafts, read Speed).
 - Note: the horizon-ctl socket path must be short (SUN_LEN), so use `mktemp -d /tmp/hz.XXXX` for it.
