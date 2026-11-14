@@ -1678,6 +1678,28 @@ fn image(rt: &mut Rt, width: usize, rgba: Vec<u8>) -> V {
     rt.alloc(NATIVE_IMAGE, Data::Bytes(rgba, width))
 }
 
+/// The image of texture `name` (`minecraft:block/stone`: the file
+/// `assets/minecraft/textures/block/stone.png`) as the game's resources have it, read once.
+/// None where nothing has that file.
+pub(crate) fn texture_image(rt: &mut Rt, name: &str) -> Option<V> {
+    let key = format!("compat:texture-image/{name}");
+    if let Some(v) = rt.interned.get(&key) {
+        return (v.r() != 0).then_some(*v);
+    }
+    let (namespace, path) = name.split_once(':').unwrap_or(("minecraft", name));
+    let file = format!("assets/{namespace}/textures/{path}.png");
+    let made = held(rt, &file)
+        .and_then(|bytes| decode_png(&bytes))
+        .map(|(width, rgba)| image(rt, width, rgba));
+    rt.interned.insert(key, made.unwrap_or(V::NULL));
+    made
+}
+
+/// An image's width and height.
+pub(crate) fn size_of_image(rt: &Rt, v: V) -> (usize, usize) {
+    image_size(rt, v)
+}
+
 fn image_size(rt: &Rt, v: V) -> (usize, usize) {
     match rt.heap.get(v.r() as usize).map(|o| &o.data) {
         Some(Data::Bytes(b, w)) if *w > 0 => (*w, b.len() / 4 / *w),

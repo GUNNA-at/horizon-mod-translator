@@ -2914,6 +2914,20 @@ fn world_reads(get: &str, c: &str) -> String {
         fn world_height(&self) -> (i32, i32) {{
             {get}.native_world_height()
         }}
+        fn height(&mut self, heightmap: &str, x: i32, z: i32) -> Option<i32> {{
+            use crate::game::NativeHeightmap as Kind;
+            let kind = match heightmap {{
+                "WORLD_SURFACE" | "WORLD_SURFACE_WG" => Kind::WorldSurface,
+                "MOTION_BLOCKING" => Kind::MotionBlocking,
+                "MOTION_BLOCKING_NO_LEAVES" => Kind::MotionBlockingNoLeaves,
+                "OCEAN_FLOOR" | "OCEAN_FLOOR_WG" => Kind::OceanFloor,
+                _ => return None,
+            }};
+            // (The level being ticked, on its server. A window's own world, and a column that is
+            // not loaded, the runtime reads from their blocks instead.)
+            let dimension = {get}.native_dimension().to_owned();
+            {get}.native_surface_heights(&dimension, &[(x, z)], kind).ok()?.first().copied().flatten()
+        }}
         fn game_rule(&self, name: &str) -> Option<i32> {{
             {get}.native_game_rule(name)
         }}

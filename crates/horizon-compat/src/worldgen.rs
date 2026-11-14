@@ -770,7 +770,51 @@ pub(crate) fn call(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
 pub(crate) fn height(rt: &mut Rt, kind: V, x: i32, z: i32) -> V {
     let name = rt.str_of(rt.get_field(kind, "$name")).unwrap_or("WORLD_SURFACE_WG").to_owned();
     let bottom = rt.host().map_or(-64, |h| h.world_height().0);
-    V::I(rt.host_mut().and_then(|h| h.height(&name, x, z)).unwrap_or(bottom))
+    if let Some(y) = rt.host_mut().and_then(|h| h.height(&name, x, z)) {
+        return V::I(y);
+    }
+    V::I(scanned_height(rt, &name, x, z).unwrap_or(bottom))
+}
+
+/// A column's top by the heightmap `name` where the host keeps no heightmaps (a running game's
+/// level, as against a region being generated): read from the column's blocks, down from the
+/// top of the world, to the first one that heightmap counts. The y above it, as `getHeight`
+/// answers; the world's bottom for a column with none (and one not loaded, which reads as air).
+/// Every level answered its bottom before, whatever stood in the column.
+fn scanned_height(rt: &Rt, name: &str, x: i32, z: i32) -> Option<i32> {
+    let h = rt.host()?;
+    let (bottom, height) = h.world_height();
+    let mut y = bottom + height - 1;
+    while y >= bottom {
+        let text = h.block_state([x, y, z]);
+        let air = matches!(
+            text.as_str(),
+            "minecraft:air" | "minecraft:cave_air" | "minecraft:void_air"
+        );
+        if !air && heightmap_counts(rt, name, &text) {
+            return Some(y + 1);
+        }
+        y -= 1;
+    }
+    Some(bottom)
+}
+
+/// Whether the heightmap `name` counts the state `text` (no air), as vanilla's
+/// `Heightmap.Types` do: the world's surface any block; the ocean's floor one that blocks
+/// motion; motion blocking one that does or holds a fluid, and without leaves no leaves.
+fn heightmap_counts(rt: &Rt, name: &str, text: &str) -> bool {
+    if name.starts_with("WORLD_SURFACE") {
+        return true;
+    }
+    let block = crate::host::state_block(text);
+    let blocks = !matches!(block, "minecraft:cobweb" | "minecraft:bamboo_sapling")
+        && crate::block_breaking::solid(rt, text);
+    if name.starts_with("OCEAN_FLOOR") {
+        return blocks;
+    }
+    let fluid = text.contains("waterlogged=true") || crate::block_breaking::liquid(rt, text);
+    let leaves = name == "MOTION_BLOCKING_NO_LEAVES" && block.ends_with("leaves");
+    (blocks || fluid) && !leaves
 }
 
 /// A state's text (`create:shaft[axis=y]`), air for none.

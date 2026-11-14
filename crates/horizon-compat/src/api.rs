@@ -3473,6 +3473,39 @@ fn world(rt: &mut Rt, key: &'static str, args: &[V]) -> Option<V> {
             }
             m
         }
+        // A column's top block by heightmap (`getHeight(type, x, z)`, the column by its place in
+        // the chunk or in the world: its low four bits): the block itself, one below what the
+        // level's `getHeight` answers. It was answered the world's height, as the question
+        // with no arguments is: a map mod looked for every column's surface at the top of the
+        // world and drew nothing.
+        (LEVEL_CHUNK | CHUNK_ACCESS, "getHeight")
+            if desc == "(Lnet/minecraft/world/level/levelgen/Heightmap$Types;II)I" =>
+        {
+            let (x, z) = (rt.get_field(a(0), "$x").i(), rt.get_field(a(0), "$z").i());
+            let top = crate::worldgen::height(
+                rt,
+                a(1),
+                (x << 4) | (a(2).i() & 15),
+                (z << 4) | (a(3).i() & 15),
+            );
+            V::I(top.i() - 1)
+        }
+        // The biome of a place in it, by quarters of a block (`getNoiseBiome(x, y, z)`), as its
+        // level has it.
+        (LEVEL_CHUNK | CHUNK_ACCESS, "getNoiseBiome") if desc.starts_with("(III)") => {
+            let level = rt.get_field(a(0), "$level");
+            let pos = block_pos(
+                rt,
+                i64::from(a(1).i()) << 2,
+                i64::from(a(2).i()) << 2,
+                i64::from(a(3).i()) << 2,
+            );
+            call(
+                rt,
+                "net/minecraft/world/level/Level.getBiome.(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/core/Holder;",
+                &[level, pos],
+            )
+        }
         (LEVEL_CHUNK | CHUNK_ACCESS, "setUnsaved" | "markUnsaved") => V::Void,
         (LEVEL_CHUNK | CHUNK_ACCESS, "isUnsaved" | "isEmpty") => V::I(0),
         // `LevelHeightAccessor`'s, from the world's lowest y and height.

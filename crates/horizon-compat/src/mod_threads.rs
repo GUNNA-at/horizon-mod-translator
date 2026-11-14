@@ -23,6 +23,11 @@ pub(crate) const ID: &str = "$tid";
 const INTERRUPTED: &str = "$interrupted";
 /// A `Thread`'s permit to pass its next `LockSupport.park`.
 const PERMIT: &str = "$permit";
+/// The threads that waited where they were started, before any thread of the mods' could run
+/// (a list): started again, on stacks of their own, when the game's thread first lends.
+const TO_START: &str = "compat:threads-to-start";
+/// Set on a `Thread` in that list.
+const LATER: &str = "$later";
 /// The object the game's own thread waits on, and whether it was woken ([`wake`]).
 const GAME_WAITS: &str = "compat:game-waits";
 const GAME_WOKEN: &str = "compat:game-woken";
@@ -57,6 +62,33 @@ pub(crate) fn start(rt: &mut Rt, thread: V) -> bool {
     }
     rt.put_field(thread, ID, V::I(id as i32));
     true
+}
+
+/// `thread` waited in a body that ran where it was started (while the mods loaded, or before
+/// its runtime's thread first lent): it is to be started again, from its beginning, on a stack
+/// of its own when that thread lends ([`lend`]). Once for a thread.
+pub(crate) fn start_later(rt: &mut Rt, thread: V) {
+    if thread.r() == 0 || rt.get_field(thread, LATER).i() != 0 {
+        return;
+    }
+    rt.put_field(thread, LATER, V::I(1));
+    let list = rt.intern(TO_START.into(), |rt| crate::jutil::new_list(rt, Vec::new()));
+    crate::api::call(
+        rt,
+        "java/util/List.add.(Ljava/lang/Object;)Z",
+        &[list, thread],
+    );
+}
+
+/// Starts the threads that wait for it ([`start_later`]).
+fn start_waiting(rt: &mut Rt) {
+    let Some(list) = rt.interned.remove(TO_START) else {
+        return;
+    };
+    for thread in crate::jutil::elements(rt, list) {
+        rt.put_field(thread, LATER, V::I(0));
+        start(rt, thread);
+    }
 }
 
 /// A started thread's body: a subclass's own `run`, else the `Runnable` it was made with.
@@ -107,10 +139,11 @@ pub(crate) fn id_of(rt: &Rt, thread: V) -> u32 {
     }
 }
 
-/// Whether `thread` runs on a stack of its own and is not done.
+/// Whether `thread` runs on a stack of its own and is not done, or is to be started on one
+/// ([`start_later`]).
 pub(crate) fn alive(rt: &Rt, thread: V) -> bool {
     let id = id_of(rt, thread);
-    id != 0 && rt.thread_alive(id)
+    (id != 0 && rt.thread_alive(id)) || rt.get_field(thread, LATER).i() != 0
 }
 
 /// `Thread.currentThread()` on a thread of the mods' own; None on the game's.
@@ -400,6 +433,10 @@ fn budget() -> (Duration, Duration) {
 /// they gave the game's own thread to do meanwhile is done after.
 pub(crate) fn lend(rt: &mut Rt) {
     rt.threads.lends += 1;
+    // The threads that were started before this one could lend go on now.
+    if rt.interned.contains_key(TO_START) && real(rt) {
+        start_waiting(rt);
+    }
     if !rt.has_threads() {
         return;
     }
@@ -517,9 +554,15 @@ mod tests {
             }
             // Waits on a monitor until it is told to go on, then counts the latch down.
             2 => {
+                let began = kept(rt, "t:began").i();
+                rt.interned.insert("t:began".into(), V::I(began + 1));
                 let lock = kept(rt, "t:lock");
                 while kept(rt, "t:go").i() == 0 && rt.thrown.is_none() {
                     call(rt, "java/lang/Object.wait.()V", &[lock]);
+                }
+                // (What ends its wait unwinds it, as the translated code would be.)
+                if rt.thrown.is_some() {
+                    return Some(V::Void);
                 }
                 let latch = kept(rt, "t:latch");
                 call(rt, COUNT_DOWN, &[latch]);
@@ -743,6 +786,46 @@ mod tests {
         assert_eq!(call(&mut rt, ALIVE, &[thread]), V::I(0));
         let how = kept(&rt, "t:ended");
         assert_eq!(rt.str_of(how), Some("java/lang/InterruptedException"));
+    }
+
+    /// A thread started before its runtime's thread lends (while the mods load, as a server
+    /// starts) runs where it is started, to its first wait; in a game that wait ends its body
+    /// without a word, and the thread is started again, from its beginning and on a stack of
+    /// its own, when the game's thread first lends: a loop that waits for work lives then.
+    #[test]
+    fn a_thread_that_waits_before_the_game_runs_is_started_again_when_it_does() {
+        let mut host = crate::host::MemoryHost::default();
+        let mut rt = runtime();
+        rt.threads.lends = 0;
+        rt.with_host(&mut host, |rt| {
+            let latch = latch(rt, 1);
+            let lock = rt.new_object("java/lang/Object");
+            rt.interned.insert("t:latch".into(), latch);
+            rt.interned.insert("t:lock".into(), lock);
+            let thread = start(rt, "t/Waiter.run", 2);
+            assert!(rt.thrown.is_none(), "what ended its body stays in it");
+            assert_eq!(kept(rt, "t:began"), V::I(1));
+            assert_eq!(call(rt, COUNT, &[latch]), V::J(1));
+            assert!(!rt.has_threads());
+            assert_eq!(call(rt, ALIVE, &[thread]), V::I(1), "it is to go on");
+            // The game runs: its thread lends for the first time.
+            for _ in 0..5 {
+                lend_now(rt);
+            }
+            assert_eq!(kept(rt, "t:began"), V::I(2), "from its beginning, once");
+            assert!(rt.has_threads());
+            rt.interned.insert("t:go".into(), V::I(1));
+            call(rt, "java/lang/Object.notifyAll.()V", &[lock]);
+            let unit = seconds(rt);
+            assert_eq!(call(rt, AWAIT, &[latch, V::J(5), unit]), V::I(1));
+            call(rt, "java/lang/Thread.join.(J)V", &[thread, V::J(5_000)]);
+            assert_eq!(call(rt, ALIVE, &[thread]), V::I(0));
+            assert!(
+                rt.thrown.is_none() && rt.unmapped.is_empty(),
+                "{:?}",
+                rt.unmapped
+            );
+        });
     }
 
     /// While the mods load, and on a runtime no thread of the game's lends, a started thread

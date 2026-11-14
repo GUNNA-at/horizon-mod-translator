@@ -1631,6 +1631,24 @@ fn client(rt: &mut Rt, owner: &str, name: &str, desc: &str, args: &[V]) -> Optio
             _ => return None,
         },
         (SPRITE_CONTENTS, "name") => rt.get_field(a(0), "$name"),
+        // Its images, the whole one first (`byMipLevel`, a field a map mod reads for a block's
+        // colour, the mean of its sprite's pixels): the texture's own file among the game's
+        // resources. No image where there is no such file.
+        (SPRITE_CONTENTS, "$byMipLevel") => {
+            let name = rt.get_field(a(0), "$name");
+            let name = crate::api_common::name_of(rt, name);
+            let images: Vec<V> = crate::resources::texture_image(rt, &name).into_iter().collect();
+            rt.alloc("[Lcom/mojang/blaze3d/platform/NativeImage;", Data::Array(images))
+        }
+        // Its size: one frame's (an animation's file holds its frames one under another).
+        (SPRITE_CONTENTS, "width" | "height") => {
+            let texture = rt.get_field(a(0), "$name");
+            let texture = crate::api_common::name_of(rt, texture);
+            let (w, h) = crate::resources::texture_image(rt, &texture)
+                .map_or((16, 16), |i| crate::resources::size_of_image(rt, i));
+            let frame = if w > 0 && h > w && h % w == 0 { w } else { h };
+            V::I(if name == "width" { w } else { frame } as i32)
+        }
         // The game culls a block entity before asking its renderer to draw it, so what the renderer
         // checks again (Create's belt, each item it carries) is in view.
         ("net/minecraft/client/renderer/culling/Frustum", "isVisible" | "pointInFrustum") => V::I(1),
@@ -2300,6 +2318,43 @@ fn model_of(rt: &Rt, model: V) -> Option<Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A sprite's own image, as a map mod reads it for a block's colour
+    /// (`sprite.contents().byMipLevel[0]`): the texture's file among the game's resources, its
+    /// pixels where the file has them. A sprite with no file has no image.
+    #[test]
+    fn a_sprites_image_is_its_textures_file() {
+        // Two pixels a row: red, green; blue, half-clear white.
+        let rgba: Vec<u8> = vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 128,
+        ];
+        let png = crate::resources::encode_png(2, &rgba).unwrap();
+        let mut h = crate::host::MemoryHost::default();
+        h.resources
+            .insert("assets/minecraft/textures/block/stone.png".into(), png);
+        let mut rt = Rt::new();
+        crate::install();
+        rt.with_host(&mut h, |rt| {
+            let images = |rt: &mut Rt, name: &str| {
+                let sprite = sprite_named(rt, name);
+                let contents = crate::api::call(rt, "net/minecraft/client/renderer/texture/TextureAtlasSprite.contents.()Lnet/minecraft/client/renderer/texture/SpriteContents;", &[sprite]);
+                let all = crate::api::call(rt, "net/minecraft/client/renderer/texture/SpriteContents.$byMipLevel.()[Lcom/mojang/blaze3d/platform/NativeImage;", &[contents]);
+                (contents, crate::jutil::elements(rt, all))
+            };
+            let (contents, of_stone) = images(rt, "minecraft:block/stone");
+            assert_eq!(of_stone.len(), 1);
+            let pixel = |rt: &mut Rt, x: i32, y: i32| {
+                crate::api::call(rt, "com/mojang/blaze3d/platform/NativeImage.getPixelRGBA.(II)I", &[of_stone[0], V::I(x), V::I(y)]).i() as u32
+            };
+            // (A pixel is its bytes read little-endian: 0xAABBGGRR.)
+            assert_eq!([pixel(rt, 0, 0), pixel(rt, 1, 0), pixel(rt, 0, 1), pixel(rt, 1, 1)], [0xFF00_00FF, 0xFF00_FF00, 0xFFFF_0000, 0x80FF_FFFF]);
+            assert_eq!(crate::api::call(rt, "net/minecraft/client/renderer/texture/SpriteContents.width.()I", &[contents]), V::I(2));
+            assert_eq!(crate::api::call(rt, "net/minecraft/client/renderer/texture/SpriteContents.height.()I", &[contents]), V::I(2));
+            let (_, of_none) = images(rt, "minecraft:block/no_such_texture");
+            assert!(of_none.is_empty());
+        });
+        assert!(rt.unmapped.is_empty(), "{:?}", rt.unmapped);
+    }
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)

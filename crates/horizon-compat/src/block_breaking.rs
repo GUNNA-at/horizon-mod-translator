@@ -495,7 +495,7 @@ pub(crate) fn fluid_block(rt: &mut Rt, here: &str) -> String {
 
 /// `BlockState.liquid()` of state `text`: water and lava, and a mod's fluid's block (a
 /// `LiquidBlock`), as vanilla's `Properties.liquid()` marks them.
-fn liquid(rt: &Rt, text: &str) -> bool {
+pub(crate) fn liquid(rt: &Rt, text: &str) -> bool {
     let block = crate::host::state_block(text);
     matches!(block, "minecraft:water" | "minecraft:lava")
         || mod_block_object(rt, text).is_some_and(|b| rt.is_a(rt.class_of(b), "net/minecraft/world/level/block/LiquidBlock"))

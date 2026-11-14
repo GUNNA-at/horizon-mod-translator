@@ -68,7 +68,14 @@ thread_local! {
     /// How deep in started threads' bodies the runtime is, and how often the innermost has
     /// waited ([`wait`]).
     static STARTED: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+    /// The threads whose bodies run where they were started, innermost last.
+    static INLINE: std::cell::RefCell<Vec<V>> = const { std::cell::RefCell::new(Vec::new()) };
 }
+
+/// What ends the body of a thread that waits where it was started, in a game: an error no
+/// `catch (InterruptedException)` takes for its own, as a JVM once stopped a thread
+/// ([`wait`]). The thread is started again when the game runs.
+const LATER: &str = "java/lang/ThreadDeath";
 
 /// A thread's body told to stop this often that waits again is stopped by an error instead: it
 /// swallows the interrupt and would never end.
@@ -357,12 +364,17 @@ pub(crate) fn in_started_thread() -> bool {
     STARTED.with(|s| s.get().0 > 0)
 }
 
-/// A wait (`Thread.sleep`, a lock's) where it is asked. On the game's own thread it is over at
-/// once, the work the pools hold run meanwhile as their threads would run it beside the one
-/// waiting ([`crate::tasks`]): what the code waits for may be that work's doing. In the body of
-/// a thread a mod started, which runs on the game's thread too ([`thread`]), it can't be waited
-/// out: the thread is interrupted, as a mod stops one of its own, and its loop ends the way the
-/// mod wrote it to.
+/// A wait (`Thread.sleep`, a lock's) where no thread of the mods' own runs
+/// ([`crate::mod_threads`] has those). On the game's own thread it is over at once, the work
+/// the pools hold run meanwhile as their threads would run it beside the one waiting
+/// ([`crate::tasks`]): what the code waits for may be that work's doing. In the body of a
+/// thread a mod started, which runs where it was started ([`thread`]), it can't be waited out:
+/// - in a game, or while the mods load for one, the body ends there ([`LATER`]) and the thread
+///   is started again, from its beginning, on a stack of its own once the game's thread lends
+///   its runtime ([`crate::mod_threads::start_later`]): a loop that takes work from a queue,
+///   or sleeps between two looks, lives then as it does on a JVM;
+/// - with no game (a probe, a test) the thread is interrupted, as a mod stops one of its own,
+///   and its loop ends the way the mod wrote it to.
 pub(crate) fn wait(rt: &mut Rt) -> V {
     let (depth, waits) = STARTED.with(|s| s.get());
     if depth == 0 {
@@ -370,6 +382,16 @@ pub(crate) fn wait(rt: &mut Rt) -> V {
         return V::Void;
     }
     STARTED.with(|s| s.set((depth, waits + 1)));
+    if (crate::neo::loading(rt) || rt.host().is_some())
+        && let Some(thread) = INLINE.with(|i| i.borrow().last().copied())
+    {
+        crate::mod_threads::start_later(rt, thread);
+        return crate::jlang::throw_with(
+            rt,
+            LATER,
+            "a thread a mod started waits: it goes on when the game runs, on a stack of its own",
+        );
+    }
     let class = if waits < WAITS { "java/lang/InterruptedException" } else { "java/lang/Error" };
     crate::jlang::throw_with(rt, class, "a thread a mod started runs on the game's thread and can't wait there")
 }
@@ -451,6 +473,7 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
             return;
         }
         let outer = STARTED.with(|s| s.replace((s.get().0 + 1, 0)));
+        INLINE.with(|i| i.borrow_mut().push(thread));
         // Its body is a piece of its own for the calls nothing maps: a loop of it that was
         // stopped for them leaves what started the thread its own count.
         let misses = (
@@ -460,9 +483,11 @@ pub(crate) fn thread(rt: &mut Rt, name: &str, desc: &str, args: &[V]) -> Option<
         rt.call_functional(RUN, body, &[]);
         (rt.hook_misses, rt.hook_first_miss) = misses;
         STARTED.with(|s| s.set(outer));
-        // What ended it stays in it, as on a JVM: an interrupt silently, anything else named.
+        INLINE.with(|i| i.borrow_mut().pop());
+        // What ended it stays in it, as on a JVM: an interrupt silently (and what ends a body
+        // that is to go on later), anything else named.
         if let Some(t) = rt.thrown.take()
-            && rt.class_of(t) != "java/lang/InterruptedException"
+            && !matches!(rt.class_of(t), "java/lang/InterruptedException" | LATER)
         {
             let message = rt.get_field(t, "message");
             eprintln!(
